@@ -1016,7 +1016,7 @@ terminal + model + project 之间 AND
 ```text
 terminal=codex OR maka
 AND model=gpt-5.6-luna
-AND project=/Users/hogee/Desktop/Usagi
+AND project=/Users/example/Projects/Usagi
 ```
 
 ## 2. 查询参数
@@ -1195,7 +1195,7 @@ Maka
 标题
 终端：Maka
 项目：PeekFlow
-项目路径：/Users/hogee/Desktop/PeekFlow
+项目路径：/Users/example/Projects/PeekFlow
 Session ID
 最后活动时间
 ```

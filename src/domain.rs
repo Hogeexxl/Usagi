@@ -53,6 +53,68 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
     }
 }
 
+/// Canonical identity for one source-native session.
+///
+/// `thread_id` is opaque.  In particular, callers must use the explicit
+/// `source` and `native_session_id` fields instead of parsing a namespace out
+/// of the canonical id.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SessionIdentity {
+    pub thread_id: String,
+    pub source: crate::source::SourceId,
+    pub native_session_id: String,
+}
+
+impl SessionIdentity {
+    pub fn new(
+        thread_id: impl Into<String>,
+        source: crate::source::SourceId,
+        native_session_id: impl Into<String>,
+    ) -> Result<Self, DomainError> {
+        let identity = Self {
+            thread_id: thread_id.into(),
+            source,
+            native_session_id: native_session_id.into(),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    /// Preserve the existing Codex thread id exactly as its canonical id.
+    pub fn legacy_codex(native_session_id: impl Into<String>) -> Result<Self, DomainError> {
+        let native_session_id = native_session_id.into();
+        Self::new(
+            native_session_id.clone(),
+            crate::source::SourceId::CODEX,
+            native_session_id,
+        )
+    }
+
+    /// Give a new source a collision-resistant namespaced canonical id while
+    /// retaining its native id as a separate opaque field.
+    pub fn namespaced(
+        source: impl Into<crate::source::SourceId>,
+        native_session_id: impl Into<String>,
+    ) -> Result<Self, DomainError> {
+        let source = source.into();
+        let native_session_id = native_session_id.into();
+        let thread_id = format!("{source}:{native_session_id}");
+        Self::new(thread_id, source, native_session_id)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        non_empty(&self.thread_id, "thread_id")?;
+        self.source
+            .validate()
+            .map_err(|error| DomainError::InvalidValue {
+                field: "source",
+                reason: error.to_string(),
+            })?;
+        non_empty(&self.native_session_id, "native_session_id")?;
+        Ok(())
+    }
+}
+
 fn non_negative(value: i64, field: &'static str) -> Result<(), DomainError> {
     if value < 0 {
         Err(DomainError::invalid(field, "must be non-negative"))
@@ -2916,5 +2978,26 @@ mod tests {
         );
         assert!(UsageEpochState::new(3, Some(5), 7, Some(8)).is_err());
         assert!(UsageEpochState::new(3, Some(4), 7, None).is_err());
+    }
+
+    #[test]
+    fn session_identity_preserves_legacy_and_namespaced_rules() {
+        let legacy = SessionIdentity::legacy_codex("thread-1").unwrap();
+        assert_eq!(legacy.thread_id, "thread-1");
+        assert_eq!(legacy.source, crate::source::SourceId::CODEX);
+        assert_eq!(legacy.native_session_id, "thread-1");
+
+        let source = crate::source::SourceId::new("antigravity").unwrap();
+        let namespaced = SessionIdentity::namespaced(&source, "conversation-1").unwrap();
+        assert_eq!(namespaced.thread_id, "antigravity:conversation-1");
+        assert_eq!(namespaced.source, source);
+        assert_eq!(namespaced.native_session_id, "conversation-1");
+    }
+
+    #[test]
+    fn session_identity_rejects_empty_identity_parts() {
+        assert!(SessionIdentity::legacy_codex("").is_err());
+        assert!(SessionIdentity::new("", crate::source::SourceId::CODEX, "native").is_err());
+        assert!(SessionIdentity::new("thread", crate::source::SourceId::CODEX, "").is_err());
     }
 }

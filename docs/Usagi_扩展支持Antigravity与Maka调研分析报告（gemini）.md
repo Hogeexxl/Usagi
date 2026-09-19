@@ -42,11 +42,11 @@ Usagi 是一个纯本机运行、只读且注重隐私的 Rust 后端 + React �
 
 ### 1. Antigravity 目录与数据结构分析
 
-- **数据根目录**：`/Users/hogee/.gemini/antigravity`
+- **数据根目录**：`/Users/example/.gemini/antigravity`
 - **核心数据文件**：
   1. `conversation_summaries.db`（SQLite）：
      - 存放所有会话摘要信息。
-     - 包含字段：`conversation_id`、`title`、`workspace_uris`（格式如 `["file:///Users/hogee/Desktop/PeekFlow"]`）、`status`、`last_modified_time`、`last_user_input_time`、`parent_conversation_id`、`project_id` 等。
+     - 包含字段：`conversation_id`、`title`、`workspace_uris`（格式如 `["file:///Users/example/Desktop/PeekFlow"]`）、`status`、`last_modified_time`、`last_user_input_time`、`parent_conversation_id`、`project_id` 等。
   2. `annotations/<conversation_id>.pbtxt`：
      - 文本 Protobuf 文件，存放用户重命名后的会话标题 `title`。
   3. `conversations/<conversation_id>.db`（每个会话独立的 SQLite 数据库）：
@@ -65,7 +65,7 @@ Usagi 是一个纯本机运行、只读且注重隐私的 Rust 后端 + React �
 
 ### 2. Maka 目录与数据结构分析
 
-- **数据根目录**：`/Users/hogee/Library/Application Support/Maka`
+- **数据根目录**：`/Users/example/Library/Application Support/Maka`
 - **核心数据文件**：
   1. `session-experience.sqlite`（顶层 SQLite）：
      - 表 `sessions`：`session_id`、`summary`（JSON 字符串）。
