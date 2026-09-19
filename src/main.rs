@@ -226,14 +226,14 @@ mod tests {
     };
 
     use futures_util::{FutureExt, future::BoxFuture};
+    use reqwest::StatusCode;
+    use semver::Version;
+    use tokio::sync::Notify;
     use usagi::{
         api::listen_address,
         platform::browser::{BrowserError, BrowserOpener},
         update::{ReleaseInfo, ReleaseProvider, UpdateFailureKind, UpdateService},
     };
-    use reqwest::StatusCode;
-    use semver::Version;
-    use tokio::sync::Notify;
 
     use super::run_with_update_factory;
 
