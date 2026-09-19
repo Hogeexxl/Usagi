@@ -37,10 +37,7 @@ impl fmt::Display for LauncherError {
                 write!(formatter, "could not create local health probe: {error}")
             }
             Self::NotReady(address) => {
-                write!(
-                    formatter,
-                    "Usagi service at {address} did not become ready"
-                )
+                write!(formatter, "Usagi service at {address} did not become ready")
             }
         }
     }
