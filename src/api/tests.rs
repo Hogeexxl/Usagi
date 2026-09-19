@@ -685,6 +685,19 @@ mod spec05_concurrency;
 
 mod spec05_p2;
 
+#[test]
+fn runtime_port_guard_accepts_only_selected_loopback_port() {
+    assert!(allowed_local_authority("127.0.0.1:3217", 3217));
+    assert!(allowed_local_authority("localhost:3217", 3217));
+    assert!(!allowed_local_authority("127.0.0.1:3210", 3217));
+    assert!(!allowed_local_authority("localhost:3210", 3217));
+
+    assert!(allowed_local_origin("http://127.0.0.1:3217", 3217));
+    assert!(allowed_local_origin("http://localhost:3217", 3217));
+    assert!(!allowed_local_origin("http://127.0.0.1:3210", 3217));
+    assert!(!allowed_local_origin("http://localhost:3210", 3217));
+}
+
 #[tokio::test]
 async fn t_public_api_v1_info_contract_is_stable() {
     let fixture = support::ApiFixture::new("public-v1-info");

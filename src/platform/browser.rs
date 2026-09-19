@@ -1,6 +1,6 @@
 //! The small browser seam used by the launcher.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, net::SocketAddr};
 
 pub const DASHBOARD_URL: &str = "http://127.0.0.1:3210";
 
@@ -40,6 +40,17 @@ impl BrowserOpener for SystemBrowser {
     }
 }
 
+pub fn dashboard_url(address: SocketAddr) -> String {
+    format!("http://{address}")
+}
+
+pub fn open_dashboard_at<T: BrowserOpener + ?Sized>(
+    opener: &T,
+    address: SocketAddr,
+) -> Result<(), BrowserError> {
+    opener.open(&dashboard_url(address))
+}
+
 pub fn open_dashboard<T: BrowserOpener + ?Sized>(opener: &T) -> Result<(), BrowserError> {
     opener.open(DASHBOARD_URL)
 }
@@ -58,6 +69,17 @@ mod tests {
             self.0.lock().unwrap().push(url.to_owned());
             Ok(())
         }
+    }
+
+    #[test]
+    fn dashboard_open_at_uses_runtime_loopback_url() {
+        let browser = RecordingBrowser::default();
+        let address: SocketAddr = "127.0.0.1:3217".parse().unwrap();
+        open_dashboard_at(&browser, address).unwrap();
+        assert_eq!(
+            browser.0.lock().unwrap().as_slice(),
+            ["http://127.0.0.1:3217"]
+        );
     }
 
     #[test]

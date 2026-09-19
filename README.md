@@ -14,7 +14,7 @@ Usagi 是一个纯本机运行的 Rust 服务 + React Dashboard，用来读取 O
 它有三个原则：
 
 - **只读**：只读取 Codex 数据目录，绝不修改、绝不删除 Codex 的任何文件；
-- **本地**：数据处理、SQLite 数据库、Dashboard 页面全部留在你的电脑上，服务只监听 `127.0.0.1:3210`，不监听外网；
+- **本地**：数据处理、SQLite 数据库、Dashboard 页面全部留在你的电脑上，服务只监听 `127.0.0.1` 回环地址，不监听外网；macOS 固定使用 `3210`，Windows 优先使用 `3210`，冲突时自动选择后续本机端口；
 - **无上传**：不会把会话内容、用量数据或 OpenAI 凭据发送到任何服务器。唯一的网络请求是向 GitHub 公开接口查询新版本，且不携带任何本地数据。
 
 ## 功能一览
@@ -68,7 +68,7 @@ Usagi 是一个纯本机运行的 Rust 服务 + React Dashboard，用来读取 O
 
 从 [GitHub Releases](https://github.com/Hogeexxl/Usagi/releases) 下载对应平台的安装包（以 Releases 页面实际提供的文件为准）：
 
-- Windows x64：`Usagi-v0.2.6-windows-x64-setup.exe`
+- Windows x64：`Usagi-v0.2.6-windows-x64-setup.exe`，安装后的主程序为 `usagi.exe`
 - macOS Apple Silicon：`Usagi-v0.2.6-macos-arm64.dmg`
 
 启动后 Usagi 会在本机启动服务并自动打开默认浏览器；如果浏览器没有自动打开，手动访问：
@@ -81,7 +81,7 @@ http://127.0.0.1:3210
 
 - **macOS 首次启动被拦截**：v0.1.0 的 macOS 应用未做 Developer ID 签名与 notarization。在 Finder 中按住 Control 点按应用并选择「打开」，或在「系统设置 → 隐私与安全性」中选择「仍要打开」。
 - **重复启动**：再次启动只会打开已在运行的实例，不会启动第二个。
-- **提示端口被占用**：如果 `3210` 被其他程序占用，Usagi 会明确报错退出，不会结束或替换占用端口的程序。
+- **端口被占用**：Windows 会从 `3210` 开始自动选择后续可用的本机端口，不会结束或替换占用端口的程序；macOS 仍保持固定 `3210` 的原有行为。
 - **看不到数据**：确认本机 `~/.codex/sessions` 下存在 `rollout-*.jsonl` 文件；如果设置过 `CODEX_HOME` 环境变量，确认它指向 Codex 实际使用的数据目录。数据每 5 分钟自动扫描一次，也可以点「同步数据」立即扫描。
 
 ## 数据来源
@@ -118,7 +118,7 @@ Usagi 自身的数据全部落在本机：
 | `CODEX_HOME` | Codex 数据目录（非空时生效） | `~/.codex` |
 | `TZ` | 时间范围计算使用的时区 | 系统时区 |
 
-监听地址与端口固定为 `127.0.0.1:3210`，不可配置，以保证服务不会暴露到网络。
+监听地址始终固定为 `127.0.0.1`，不会暴露到网络。macOS 继续固定使用 `3210`；Windows 优先使用 `3210`，若被其他程序占用则自动选择后续可用端口。
 
 ## Public API v1
 

@@ -466,6 +466,10 @@ try {
     if ($null -eq $installedBinary) {
         throw 'Installed usagi.exe was not found'
     }
+    $legacyBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $legacyBinary) {
+        throw "Installed runtime still contains legacy mini-usage.exe: $($legacyBinary.FullName)"
+    }
     if ($installedBinary.FullName.StartsWith($env:GITHUB_WORKSPACE, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installed binary unexpectedly resolves inside the repository'
     }
@@ -508,6 +512,10 @@ try {
     $installedBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'usagi.exe' -File | Select-Object -First 1
     if ($null -eq $installedBinary) {
         throw 'Reinstalled usagi.exe was not found'
+    }
+    $legacyBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $legacyBinary) {
+        throw "Reinstalled runtime still contains legacy mini-usage.exe: $($legacyBinary.FullName)"
     }
     Invoke-InstalledRuntimeSmoke -BinaryPath $installedBinary.FullName -RuntimeRoot $runtimeRoot -CodexHome $codexHome -Temp $temp -ExpectedLocalAppData $localAppData
     if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne 'preserve across reinstall') {
