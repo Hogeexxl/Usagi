@@ -184,13 +184,14 @@ fn assert_port_is_free() {
     }
 }
 
-async fn wait_for_health(client: &Client, child: &mut ChildGuard) {
+async fn wait_for_health(client: &Client, child: &mut ChildGuard, port: u16) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let url = format!("http://127.0.0.1:{port}/api/health");
     loop {
         if let Some(status) = child.child_mut().try_wait().expect("poll launcher child") {
-            panic!("first launcher child exited before health check: {status}");
+            panic!("launcher child exited before health check on port {port}: {status}");
         }
-        if let Ok(response) = client.get("http://127.0.0.1:3210/api/health").send().await
+        if let Ok(response) = client.get(&url).send().await
             && response.status() == StatusCode::NO_CONTENT
             && response.headers().get("x-usagi-app")
                 == Some(&header::HeaderValue::from_static("Usagi"))
@@ -199,7 +200,7 @@ async fn wait_for_health(client: &Client, child: &mut ChildGuard) {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "first launcher child did not become healthy"
+            "launcher child did not become healthy on port {port}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -232,7 +233,7 @@ async fn t_dist_006_launcher_lifecycle_matrix() {
         .no_proxy()
         .build()
         .expect("build local launcher client");
-    wait_for_health(&client, &mut first).await;
+    wait_for_health(&client, &mut first, 3210).await;
 
     let second = ChildGuard::spawn(&runtime_binary, &runtime_root, true)
         .expect("start duplicate launcher child");
@@ -257,17 +258,44 @@ async fn t_dist_006_launcher_lifecycle_matrix() {
         .expect("reserve listener for non-Usagi conflict");
     let fake_app = Router::new().route("/api/health", get(|| async { StatusCode::NO_CONTENT }));
     let fake_server = tokio::spawn(axum::serve(occupied_listener, fake_app).into_future());
-    let conflicting = ChildGuard::spawn(&runtime_binary, &runtime_root, true)
-        .expect("start launcher against non-Usagi listener");
-    let conflict_output = wait_for_exit(conflicting).await;
-    assert!(!conflict_output.status.success());
-    let diagnostics = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&conflict_output.stdout),
-        String::from_utf8_lossy(&conflict_output.stderr)
-    );
-    assert!(diagnostics.contains("already in use by another program"));
-    assert!(!diagnostics.contains("panicked at"));
+    #[cfg(windows)]
+    {
+        let mut fallback = ChildGuard::spawn(&runtime_binary, &runtime_root, true)
+            .expect("start Windows launcher against occupied preferred port");
+        wait_for_health(&client, &mut fallback, 3211).await;
+
+        let duplicate_fallback = ChildGuard::spawn(&runtime_binary, &runtime_root, true)
+            .expect("start duplicate Windows launcher while fallback instance is running");
+        let duplicate_fallback_output = wait_for_exit(duplicate_fallback).await;
+        assert!(
+            duplicate_fallback_output.status.success(),
+            "duplicate fallback launcher should reuse the existing Usagi instance"
+        );
+        let fallback_still_healthy = client
+            .get("http://127.0.0.1:3211/api/health")
+            .send()
+            .await
+            .expect("probe fallback launcher after duplicate exit");
+        assert_eq!(fallback_still_healthy.status(), StatusCode::NO_CONTENT);
+
+        drop(fallback);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let conflicting = ChildGuard::spawn(&runtime_binary, &runtime_root, true)
+            .expect("start launcher against non-Usagi listener");
+        let conflict_output = wait_for_exit(conflicting).await;
+        assert!(!conflict_output.status.success());
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&conflict_output.stdout),
+            String::from_utf8_lossy(&conflict_output.stderr)
+        );
+        assert!(diagnostics.contains("already in use by another program"));
+        assert!(!diagnostics.contains("panicked at"));
+    }
+
     fake_server.abort();
     let _ = fake_server.await;
 }
