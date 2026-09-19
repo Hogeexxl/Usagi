@@ -1,10 +1,10 @@
-# MiniUsage Spec 04：Token 账本与聚合
+# Usagi Spec 04：Token 账本与聚合
 
 > 版本：v0.2  
 > 状态：当前契约修订版（Spec07 已完成，Spec08 清理目标）  
 > 更新日期：2026-08-09  
 > 依赖：`Spec_01_数据模型和数据库骨架_v0.2.md`、`Spec_02_Codex原始数据与元数据适配_v0.2.md`、`Spec_03_增量扫描器_v0.2.md`、`normalizedTokenUsage数据口径.md`、`codex rollout数据口径.md`  
-> 当前唯一测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`  
+> 当前唯一测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`  
 > 当前版本范围：完整 Token 用量；仅美元费用 `estimated_cost` 保持 `null`
 
 ---
@@ -1342,7 +1342,7 @@ UsageLedger scan/commit/rebuild/query interface
 脱敏 fixtures、domain tests、SQLite integration tests、scanner integration tests
 ```
 
-完成本 Spec 后，MiniUsage 具备完整、可恢复、可去重的 Token 事实层和聚合能力。Spec 05 只需把这些稳定查询结果映射为 HTTP 与更新通知。
+完成本 Spec 后，Usagi 具备完整、可恢复、可去重的 Token 事实层和聚合能力。Spec 05 只需把这些稳定查询结果映射为 HTTP 与更新通知。
 
 ---
 

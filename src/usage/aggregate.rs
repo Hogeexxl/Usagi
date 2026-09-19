@@ -2010,7 +2010,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()
-            .join("miniusage-usage-aggregate")
+            .join("usagi-usage-aggregate")
             .join(name.trim_start_matches('/'))
             .to_string_lossy()
             .into_owned()

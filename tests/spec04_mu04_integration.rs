@@ -11,7 +11,10 @@ use axum::{
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode},
 };
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     domain::{ScanResult, ScanTrigger},
@@ -21,9 +24,6 @@ use mini_usage::{
     update::UpdateService,
     usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
 };
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const ROOT: &str = "00000000-03e8-7000-8000-000000000101";
 const CHILD: &str = "00000000-07d0-7000-8000-000000000102";
@@ -43,7 +43,7 @@ impl TempRoot {
             .expect("system clock")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-mu04-f-{label}-{}-{stamp}",
+            "usagi-mu04-f-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create fixture root");
@@ -373,7 +373,7 @@ fn request_and_wait(scanner: &ScanHandle, ledger: &Ledger) {
             Ok(RequestDisposition::Coalesced {
                 followup_scan_id, ..
             }) => break followup_scan_id,
-            Err(mini_usage::scanner::ScanRequestError::Recovering) => {
+            Err(usagi::scanner::ScanRequestError::Recovering) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("manual scan request failed: {error:?}"),
@@ -740,7 +740,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(
         final_versions,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             None,
             1,
             TARGET_PRICING_CATALOG_VERSION,
@@ -882,7 +882,7 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
             1,
             TARGET_PRICING_CATALOG_VERSION,
             old_epoch,
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             None,
         )
     );

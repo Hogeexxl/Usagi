@@ -9,7 +9,14 @@ use std::{
 };
 
 use axum::serve;
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use tokio::{
+    net::TcpListener,
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    time::{sleep, timeout},
+};
+use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     domain::ScanResult,
@@ -19,13 +26,6 @@ use mini_usage::{
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
     usage::{CompletionStatus, USAGE_PARSER_VERSION, UsageLedger},
-};
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
-use tokio::{
-    net::TcpListener,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    time::{sleep, timeout},
 };
 
 struct TempRoot(PathBuf);
@@ -39,7 +39,7 @@ impl TempRoot {
         let directory = std::env::temp_dir();
         for attempt in 0..8 {
             let path = directory.join(format!(
-                "miniusage-spec06-browser-{}-{stamp}-{attempt}",
+                "usagi-spec06-browser-{}-{stamp}-{attempt}",
                 std::process::id()
             ));
             match fs::create_dir(&path) {
@@ -755,8 +755,8 @@ async fn spec06_real_axum_browser_gate() {
     assert_eq!(
         metadata,
         (
-            mini_usage::codex::METADATA_PARSER_VERSION,
-            mini_usage::codex::METADATA_PARSER_VERSION,
+            usagi::codex::METADATA_PARSER_VERSION,
+            usagi::codex::METADATA_PARSER_VERSION,
             Some(INCIDENT_ROOT.to_owned()),
             Some("session_meta_parent".to_owned())
         )

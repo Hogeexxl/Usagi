@@ -1,4 +1,4 @@
--- MiniUsage schema version 5: stable normalized Thread project assignment.
+-- Usagi schema version 5: stable normalized Thread project assignment.
 --
 -- The migration runner temporarily disables foreign-key enforcement while
 -- this table is rebuilt, then validates every relationship before commit.

@@ -170,7 +170,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mini_usage_t_dc_028_{}_{}.sqlite",
+            "usagi_t_dc_028_{}_{}.sqlite",
             std::process::id(),
             suffix
         ));
@@ -197,7 +197,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mini_usage_t_s04_s05_v3_{}_{}.sqlite",
+            "usagi_t_s04_s05_v3_{}_{}.sqlite",
             std::process::id(),
             suffix
         ));
@@ -1609,7 +1609,7 @@ mod tests {
         let (database, connection) = file_v3_connection_with_rows();
         seed_v3_metadata_fixture(&connection);
         let portable_source_path = std::env::temp_dir()
-            .join("miniusage-s04-s05-v3-rollout.jsonl")
+            .join("usagi-s04-s05-v3-rollout.jsonl")
             .to_string_lossy()
             .into_owned();
         connection
@@ -1621,7 +1621,7 @@ mod tests {
         drop(connection);
 
         let codex_home = std::env::temp_dir().join(format!(
-            "mini_usage_t_s04_s05_codex_{}_{}",
+            "usagi_t_s04_s05_codex_{}_{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

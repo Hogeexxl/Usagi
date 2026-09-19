@@ -1,10 +1,10 @@
-# MiniUsage Spec 05：查询 API 与更新通知
+# Usagi Spec 05：查询 API 与更新通知
 
 > 版本：v0.2  
 > 状态：当前契约修订版（Spec08 实施目标）  
 > 更新日期：2026-08-09  
 > 依赖：`Spec_01_数据模型和数据库骨架_v0.2.md`、`Spec_03_增量扫描器_v0.2.md`、`Spec_04_Token账本与聚合_v0.2.md`  
-> 当前唯一测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`
+> 当前唯一测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`
 
 ---
 
@@ -250,7 +250,7 @@ API 不返回 Subagent 独立行。三个 usage 对象复用 3.4 的固定 canon
 请求无 body，必须携带：
 
 ```text
-X-MiniUsage-Request: 1
+X-Usagi-Request: 1
 ```
 
 自定义 header 使其他网页的跨源简单请求不能静默触发扫描；服务端不启用 CORS。缺失或错误返回 `403 FORBIDDEN`。

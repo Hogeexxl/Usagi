@@ -80,11 +80,7 @@ async fn t_s05_019_real_sqlite_busy_refresh_returns_only_safe_code() {
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
 
     let response = fixture
-        .call(
-            Method::POST,
-            "/api/refresh",
-            &[("x-miniusage-request", "1")],
-        )
+        .call(Method::POST, "/api/refresh", &[("x-usagi-request", "1")])
         .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = to_bytes(response.into_body(), 1024).await.unwrap();

@@ -1,4 +1,4 @@
--- MiniUsage schema version 4: metadata parent provenance and current-schema cleanup.
+-- Usagi schema version 4: metadata parent provenance and current-schema cleanup.
 --
 -- This migration runs inside the migration runner's BEGIN IMMEDIATE transaction.
 -- The two target tables are rebuilt so existing facts and all current checks

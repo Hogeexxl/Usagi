@@ -1,4 +1,4 @@
-import { miniUsageClient, type MiniUsageClient } from "./miniUsageClient";
+import { usagiClient, type UsagiClient } from "./usagiClient";
 import type { RevisionTuple } from "./types";
 
 export type RevisionEventSource = {
@@ -10,7 +10,7 @@ export type RevisionEventSource = {
 };
 
 export type RevisionFeedOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
   eventSourceFactory?: (url: string) => RevisionEventSource;
   pollIntervalMs?: number;
 };
@@ -43,7 +43,7 @@ function tupleFrom(value: unknown): RevisionTuple | null {
 }
 
 export class RevisionFeed {
-  private readonly client: MiniUsageClient;
+  private readonly client: UsagiClient;
   private readonly eventSourceFactory: (url: string) => RevisionEventSource;
   private readonly pollIntervalMs: number;
   private readonly listeners = new Map<RevisionListener, RevisionErrorListener | undefined>();
@@ -54,7 +54,7 @@ export class RevisionFeed {
   private tuple: RevisionTuple | null = null;
 
   constructor(options: RevisionFeedOptions = {}) {
-    this.client = options.client ?? miniUsageClient;
+    this.client = options.client ?? usagiClient;
     this.eventSourceFactory = options.eventSourceFactory ?? defaultEventSourceFactory;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL;
   }

@@ -1244,7 +1244,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()
-            .join("miniusage-codex-metadata")
+            .join("usagi-codex-metadata")
             .join(name.trim_start_matches('/'))
             .to_string_lossy()
             .into_owned()

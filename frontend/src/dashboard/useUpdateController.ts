@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  miniUsageClient,
-  type MiniUsageClient,
-  type MiniUsageUpdateClient,
-} from "../data/miniUsageClient";
+  usagiClient,
+  type UsagiClient,
+  type UsagiUpdateClient,
+} from "../data/usagiClient";
 import { type UpdateStatusResponse } from "../data/types";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 export type UpdateControllerOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
   pollIntervalMs?: number;
 };
 
@@ -19,16 +19,16 @@ export type UpdateViewModel = {
   open_release: () => void;
 };
 
-function hasUpdateStatusApi(client: MiniUsageClient): client is MiniUsageClient & Pick<MiniUsageUpdateClient, "getUpdateStatus"> {
+function hasUpdateStatusApi(client: UsagiClient): client is UsagiClient & Pick<UsagiUpdateClient, "getUpdateStatus"> {
   return typeof client.getUpdateStatus === "function";
 }
 
-function hasOpenReleaseApi(client: MiniUsageClient): client is MiniUsageClient & Pick<MiniUsageUpdateClient, "openRelease"> {
+function hasOpenReleaseApi(client: UsagiClient): client is UsagiClient & Pick<UsagiUpdateClient, "openRelease"> {
   return typeof client.openRelease === "function";
 }
 
 export function useUpdateController(options: UpdateControllerOptions = {}): UpdateViewModel {
-  const client = options.client ?? miniUsageClient;
+  const client = options.client ?? usagiClient;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const supportsStatus = hasUpdateStatusApi(client);
   const supportsOpenRelease = hasOpenReleaseApi(client);

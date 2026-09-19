@@ -1,4 +1,4 @@
--- MiniUsage schema version 3: canonical NormalizedTokenUsage columns.
+-- Usagi schema version 3: canonical NormalizedTokenUsage columns.
 -- This script is run inside the migration runner's BEGIN IMMEDIATE transaction.
 
 PRAGMA defer_foreign_keys = ON;

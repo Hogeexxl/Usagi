@@ -1,8 +1,8 @@
-import { miniUsageClient, type MiniUsageClient } from "../data/miniUsageClient";
+import { usagiClient, type UsagiClient } from "../data/usagiClient";
 import { StatefulButton } from "../ui/beui/button";
 import { useUpdateController } from "./useUpdateController";
 
-export function UpdateButton({ client = miniUsageClient }: { client?: MiniUsageClient }) {
+export function UpdateButton({ client = usagiClient }: { client?: UsagiClient }) {
   const view = useUpdateController({ client });
   if (!view.status?.update_available) return null;
 

@@ -91,7 +91,7 @@ impl From<&ScanConfig> for CodexMetadata {
     }
 }
 
-/// Start the coordinator with MiniUsage's fixed metadata worker.
+/// Start the coordinator with Usagi's fixed metadata worker.
 pub struct ScanCoordinator;
 
 impl ScanCoordinator {
@@ -614,7 +614,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "miniusage-worker-{label}-{}-{}",
+                "usagi-worker-{label}-{}-{}",
                 now_ms(),
                 TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ));

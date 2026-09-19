@@ -1,11 +1,11 @@
-# MiniUsage Spec 06-02：Session 记录列表
+# Usagi Spec 06-02：Session 记录列表
 
 > 版本：v0.2  
 > 状态：当前契约修订版  
 > 更新日期：2026-08-09  
-> 测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`  
+> 测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`  
 > 直接依赖：`Spec_05_查询API与更新通知_v0.2.md`、`Spec_06_01_前端框架与Dashboard界面_v0.2.md`  
-> 数据口径：`MiniUsage_Codex本地数据口径_v0.2.md`  
+> 数据口径：`Usagi_Codex本地数据口径_v0.2.md`  
 > 上游实现：Spec 01～04  
 > 当前版本说明：用量图表不在本版本范围内；本 Spec 只增加 Session 记录列表
 
@@ -68,7 +68,7 @@ frontend/src/
       sessionFormat.ts
       sessionTypes.ts
   data/
-    miniUsageClient.ts
+    usagiClient.ts
 ```
 
 职责固定：
@@ -83,7 +83,7 @@ frontend/src/
 | `useSessionTableController.ts` | range snapshot、首屏请求、分页、revision、竞态 |
 | `sessionFormat.ts` | 时间、模型、fallback 文案；复用 06-01 数值 formatter |
 | `sessionTypes.ts` | Session DTO 与 view model |
-| `miniUsageClient.ts` | 增加 sessions 请求与 DTO 校验 |
+| `usagiClient.ts` | 增加 sessions 请求与 DTO 校验 |
 
 不得在 React view 中：
 
@@ -187,7 +187,7 @@ cursor 对前端完全 opaque：
 
 ### 3.2 TypeScript DTO
 
-`miniUsageClient.ts` 增加精确 DTO：
+`usagiClient.ts` 增加精确 DTO：
 
 ```text
 UsageDto {
@@ -1061,7 +1061,7 @@ loading：
 
 1. 在 `sessionTypes.ts` 定义 `UsageDto`、`SessionItemDto`、`SessionPageDto` 和 view model 类型；
 2. 与 06-01 已存在的 Usage 类型重复时，抽到共享 `dashboard/types.ts`，不要维护两套字段定义；
-3. `miniUsageClient.ts` 新增：
+3. `usagiClient.ts` 新增：
 
 ```text
 getSessions({
@@ -1348,7 +1348,7 @@ INVALID_CURSOR
 
 ## 11. 独立验收标准
 
-> **测试标准唯一来源**：本节只定义 Spec 06-02 的功能与交付完成边界，不再定义测试方案、测试用例、优先级或执行清单。Spec 06-02 的测试条目、P0/P1/P2 分类、Gate、测试代码落点、执行命令、S06-01 回归要求及与最终完整测试的关系，**唯一以 `MiniUsage_测试标准_Spec01-06_v0.17.md` 为准**。
+> **测试标准唯一来源**：本节只定义 Spec 06-02 的功能与交付完成边界，不再定义测试方案、测试用例、优先级或执行清单。Spec 06-02 的测试条目、P0/P1/P2 分类、Gate、测试代码落点、执行命令、S06-01 回归要求及与最终完整测试的关系，**唯一以 `Usagi_测试标准_Spec01-06_v0.17.md` 为准**。
 >
 > 本 Spec 其他章节中出现的“验证”“测试”“检查”等文字仅属于实施说明或风险提示，不构成独立测试标准；如与上述 v0.17 测试标准存在差异或冲突，以 v0.17 为准。不得以本节勾选项替代 S06-02 / S06 总 Gate。
 
@@ -1376,7 +1376,7 @@ INVALID_CURSOR
 - [ ] table 使用语义化标签并满足键盘、aria、200% zoom；
 - [ ] Dashboard 与 Session 共用一个 `revisionFeed`，页面内最多一个 EventSource 和一个 revision polling timer；
 - [ ] 不创建新 API、新持久化表或浏览器持久化 cache；
-- [ ] 本 Spec 的测试、S06-01 回归与工程验收已按 `MiniUsage_测试标准_Spec01-06_v0.17.md` 中 S06-02 / S06 总完成门执行；本节不另设测试清单或通过口径。
+- [ ] 本 Spec 的测试、S06-01 回归与工程验收已按 `Usagi_测试标准_Spec01-06_v0.17.md` 中 S06-02 / S06 总完成门执行；本节不另设测试清单或通过口径。
 
 ---
 

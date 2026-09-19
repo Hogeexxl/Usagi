@@ -1,4 +1,4 @@
--- MiniUsage schema version 6: durable Subagent agent_path metadata.
+-- Usagi schema version 6: durable Subagent agent_path metadata.
 --
 -- The migration runner executes this file inside one BEGIN IMMEDIATE
 -- transaction.  Rebuild the metadata fact table so every existing field,

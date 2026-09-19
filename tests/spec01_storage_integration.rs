@@ -9,7 +9,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use mini_usage::{
+use rusqlite::{Connection, params};
+use usagi::{
     domain::{
         AgentPathProvenance, AgentRole, AgentRoleProvenance, CheckpointProcessingStatus,
         ContinuationState, CwdProvenance, FactQualityStatus, MetadataCheckpointAdvance,
@@ -20,7 +21,6 @@ use mini_usage::{
     },
     storage::{Ledger, LedgerOptions},
 };
-use rusqlite::{Connection, params};
 
 type PersistedProvenance = (
     Option<String>,
@@ -40,7 +40,7 @@ impl TempRoot {
             .expect("clock before epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-spec01-{label}-{}-{stamp}",
+            "usagi-spec01-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create temporary test directory");
@@ -340,11 +340,11 @@ fn t_s01_002_source_identity_database_constraints_matrix() {
         )
     };
 
-    insert(1, "/tmp/miniusage/spec01/a.jsonl", 10, 20, 1, 10).unwrap();
-    assert!(insert(2, "/tmp/miniusage/spec01/a.jsonl", 11, 21, 1, 10).is_err());
-    assert!(insert(3, "/tmp/miniusage/spec01/b.jsonl", 10, 20, 1, 10).is_err());
-    assert!(insert(4, "/tmp/miniusage/spec01/c.jsonl", 12, 22, 0, 10).is_err());
-    assert!(insert(5, "/tmp/miniusage/spec01/d.jsonl", 13, 23, 1, -1).is_err());
+    insert(1, "/tmp/usagi/spec01/a.jsonl", 10, 20, 1, 10).unwrap();
+    assert!(insert(2, "/tmp/usagi/spec01/a.jsonl", 11, 21, 1, 10).is_err());
+    assert!(insert(3, "/tmp/usagi/spec01/b.jsonl", 10, 20, 1, 10).is_err());
+    assert!(insert(4, "/tmp/usagi/spec01/c.jsonl", 12, 22, 0, 10).is_err());
+    assert!(insert(5, "/tmp/usagi/spec01/d.jsonl", 13, 23, 1, -1).is_err());
 
     assert_eq!(
         connection

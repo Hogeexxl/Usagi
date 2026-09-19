@@ -1070,14 +1070,14 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("mini-usage-metadata-{name}-{stamp}"));
+        let root = std::env::temp_dir().join(format!("usagi-metadata-{name}-{stamp}"));
         fs::create_dir_all(&root).unwrap();
         (root.join("mu.sqlite3"), root.join("codex"))
     }
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()
-            .join("miniusage-storage-metadata")
+            .join("usagi-storage-metadata")
             .join(name.trim_start_matches('/'))
             .to_string_lossy()
             .into_owned()

@@ -570,7 +570,7 @@ fn plan_observations(
 }
 
 fn temporary_path(source_file_id: i64, generation: i64) -> String {
-    format!("/.miniusage-observation-pending/{source_file_id}-{generation}")
+    format!("/.usagi-observation-pending/{source_file_id}-{generation}")
 }
 
 fn load_existing_sources(transaction: &Transaction<'_>) -> Result<Vec<ExistingSource>> {
@@ -897,7 +897,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()
-            .join("miniusage-storage-source")
+            .join("usagi-storage-source")
             .join(name.trim_start_matches('/'))
             .to_string_lossy()
             .into_owned()
@@ -905,7 +905,7 @@ mod tests {
 
     fn test_ledger() -> (Ledger, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "miniusage-source-{}-{}",
+            "usagi-source-{}-{}",
             std::process::id(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
         ));

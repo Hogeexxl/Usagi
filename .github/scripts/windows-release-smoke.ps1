@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$installer = Join-Path $env:GITHUB_WORKSPACE "target/release/MiniUsage-v$env:TAG_VERSION-windows-x64-setup.exe"
+$installer = Join-Path $env:GITHUB_WORKSPACE "target/release/Usagi-v$env:TAG_VERSION-windows-x64-setup.exe"
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
     throw "Windows installer was not found: $installer"
 }
@@ -12,7 +12,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace MiniUsage.Acceptance
+namespace Usagi.Acceptance
 {
     public sealed class AlternateUserProcess : IDisposable
     {
@@ -177,7 +177,7 @@ $securePassword = ConvertTo-SecureString $plainPassword -AsPlainText -Force
 $testUserCreated = $false
 $testUserSid = $null
 $profilePath = $null
-$workRoot = Join-Path $env:ProgramData "MiniUsage-S12-$([Guid]::NewGuid().ToString('N'))"
+$workRoot = Join-Path $env:ProgramData "Usagi-S12-$([Guid]::NewGuid().ToString('N'))"
 
 function Grant-TestUserModify {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -196,7 +196,7 @@ function Start-IsolatedUserProcess {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory
     )
 
-    return [MiniUsage.Acceptance.NativeLogon]::Start(
+    return [Usagi.Acceptance.NativeLogon]::Start(
         $testUser,
         '.',
         $plainPassword,
@@ -208,7 +208,7 @@ function Start-IsolatedUserProcess {
 function Wait-ForFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][MiniUsage.Acceptance.AlternateUserProcess]$Process,
+        [Parameter(Mandatory = $true)][Usagi.Acceptance.AlternateUserProcess]$Process,
         [int]$TimeoutSeconds = 30
     )
 
@@ -227,7 +227,7 @@ function Wait-ForFile {
 }
 
 function Stop-IsolatedProcessTree {
-    param([Parameter(Mandatory = $true)][MiniUsage.Acceptance.AlternateUserProcess]$Process)
+    param([Parameter(Mandatory = $true)][Usagi.Acceptance.AlternateUserProcess]$Process)
 
     if ($Process.WaitForExit(0) -eq [int]::MinValue) {
         & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $Process.ProcessId /T /F | Out-Null
@@ -254,7 +254,7 @@ function Invoke-InstalledRuntimeSmoke {
     Grant-TestUserModify -Path $CodexHome
     New-Item -ItemType Directory -Force -Path (Join-Path $CodexHome 'sessions'), (Join-Path $CodexHome 'archived_sessions') | Out-Null
 
-    $launcher = Join-Path $RuntimeRoot 'launch-mini-usage.ps1'
+    $launcher = Join-Path $RuntimeRoot 'launch-usagi.ps1'
     $runtimeIdentityPath = Join-Path $RuntimeRoot 'runtime-identity.json'
     $stdoutPath = Join-Path $RuntimeRoot 'stdout.log'
     $stderrPath = Join-Path $RuntimeRoot 'stderr.log'
@@ -275,8 +275,8 @@ Remove-Item Env:CARGO_HOME, Env:RUSTUP_HOME, Env:NODE_PATH, Env:npm_config_prefi
 `$env:TEMP = '$escapedTemp'
 `$env:TMP = '$escapedTemp'
 `$env:CODEX_HOME = '$escapedCodexHome'
-`$env:MINIUSAGE_WINDOWS_HEADLESS_SMOKE = '1'
-`$env:MINIUSAGE_DISABLE_BROWSER = '1'
+`$env:USAGI_WINDOWS_HEADLESS_SMOKE = '1'
+`$env:USAGI_DISABLE_BROWSER = '1'
 Set-Location -LiteralPath '$escapedRuntimeRoot'
 [pscustomobject]@{
     UserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -287,8 +287,8 @@ Set-Location -LiteralPath '$escapedRuntimeRoot'
 `$binaryPath = '$escapedBinary'
 `$stdoutPath = '$escapedStdout'
 `$stderrPath = '$escapedStderr'
-`$miniUsage = Start-Process -FilePath `$binaryPath -PassThru -Wait -RedirectStandardOutput `$stdoutPath -RedirectStandardError `$stderrPath
-exit `$miniUsage.ExitCode
+`$usagi = Start-Process -FilePath `$binaryPath -PassThru -Wait -RedirectStandardOutput `$stdoutPath -RedirectStandardError `$stderrPath
+exit `$usagi.ExitCode
 "@ | Set-Content -LiteralPath $launcher -Encoding utf8
 
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
@@ -315,8 +315,8 @@ exit `$miniUsage.ExitCode
                 $response = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri 'http://127.0.0.1:3210/api/health' -TimeoutSec 2
                 $expectedBinaryVersion = $env:CARGO_VERSION
                 if ($response.StatusCode -eq 204 -and
-                    [string]$response.Headers['X-MiniUsage-App'] -eq 'MiniUsage' -and
-                    [string]$response.Headers['X-MiniUsage-Version'] -eq $expectedBinaryVersion) {
+                    [string]$response.Headers['X-Usagi-App'] -eq 'Usagi' -and
+                    [string]$response.Headers['X-Usagi-Version'] -eq $expectedBinaryVersion) {
                     $healthy = $true
                     break
                 }
@@ -443,7 +443,7 @@ try {
     $runtimeRoot = Join-Path $workRoot 'runtime'
     $codexHome = Join-Path $profilePath '.codex'
     $temp = Join-Path $workRoot 'temp'
-    $appDataRoot = Join-Path $localAppData 'MiniUsage'
+    $appDataRoot = Join-Path $localAppData 'Usagi'
     $databasePath = Join-Path $appDataRoot 'mu.sqlite3'
     $sentinelPath = Join-Path $appDataRoot 'acceptance-user-data.txt'
 
@@ -453,7 +453,7 @@ try {
     Grant-TestUserModify -Path $codexHome
     New-Item -ItemType Directory -Force -Path (Join-Path $codexHome 'sessions'), (Join-Path $codexHome 'archived_sessions') | Out-Null
     if (Test-Path -LiteralPath $appDataRoot) {
-        throw "Fresh isolated Windows user unexpectedly already has MiniUsage data: $appDataRoot"
+        throw "Fresh isolated Windows user unexpectedly already has Usagi data: $appDataRoot"
     }
 
     $install = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru -NoNewWindow
@@ -462,9 +462,13 @@ try {
     }
     $install.Dispose()
 
-    $installedBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File | Select-Object -First 1
+    $installedBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'usagi.exe' -File | Select-Object -First 1
     if ($null -eq $installedBinary) {
-        throw 'Installed mini-usage.exe was not found'
+        throw 'Installed usagi.exe was not found'
+    }
+    $legacyBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $legacyBinary) {
+        throw "Installed runtime still contains legacy mini-usage.exe: $($legacyBinary.FullName)"
     }
     if ($installedBinary.FullName.StartsWith($env:GITHUB_WORKSPACE, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installed binary unexpectedly resolves inside the repository'
@@ -499,19 +503,23 @@ try {
     }
     $reinstall.Dispose()
     if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne 'preserve across reinstall' -or -not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
-        throw 'NSIS reinstall did not preserve isolated MiniUsage user data'
+        throw 'NSIS reinstall did not preserve isolated Usagi user data'
     }
     if ((Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash -ne $databaseHashBeforeReinstall) {
-        throw 'NSIS reinstall changed the isolated MiniUsage database'
+        throw 'NSIS reinstall changed the isolated Usagi database'
     }
 
-    $installedBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File | Select-Object -First 1
+    $installedBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'usagi.exe' -File | Select-Object -First 1
     if ($null -eq $installedBinary) {
-        throw 'Reinstalled mini-usage.exe was not found'
+        throw 'Reinstalled usagi.exe was not found'
+    }
+    $legacyBinary = Get-ChildItem -Path $installRoot -Recurse -Filter 'mini-usage.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $legacyBinary) {
+        throw "Reinstalled runtime still contains legacy mini-usage.exe: $($legacyBinary.FullName)"
     }
     Invoke-InstalledRuntimeSmoke -BinaryPath $installedBinary.FullName -RuntimeRoot $runtimeRoot -CodexHome $codexHome -Temp $temp -ExpectedLocalAppData $localAppData
     if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne 'preserve across reinstall') {
-        throw 'Installed runtime relaunch did not preserve isolated MiniUsage user data'
+        throw 'Installed runtime relaunch did not preserve isolated Usagi user data'
     }
 
     $databaseHashBeforeUninstall = (Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash
@@ -531,23 +539,23 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if (Test-Path -LiteralPath $installedBinary.FullName) {
-        throw 'NSIS uninstall left mini-usage.exe in the install directory'
+        throw 'NSIS uninstall left usagi.exe in the install directory'
     }
     if (Test-Path -LiteralPath $installRoot) {
-        $remainingInstalledExecutables = @(Get-ChildItem -Path $installRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)^mini-usage(?:\.exe)?$' })
+        $remainingInstalledExecutables = @(Get-ChildItem -Path $installRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)^usagi(?:\.exe)?$' })
         if ($remainingInstalledExecutables.Count -ne 0) {
-            throw 'NSIS uninstall left an installed MiniUsage executable in the install directory'
+            throw 'NSIS uninstall left an installed Usagi executable in the install directory'
         }
         throw "NSIS uninstall left the install directory in place: $installRoot"
     }
     if (-not (Test-Path -LiteralPath $sentinelPath -PathType Leaf) -or -not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
-        throw 'NSIS uninstall removed isolated MiniUsage user data'
+        throw 'NSIS uninstall removed isolated Usagi user data'
     }
     if ((Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash -ne $databaseHashBeforeUninstall) {
-        throw 'NSIS uninstall changed the isolated MiniUsage database'
+        throw 'NSIS uninstall changed the isolated Usagi database'
     }
     if ((Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash -ne $sentinelHashBeforeUninstall) {
-        throw 'NSIS uninstall changed isolated MiniUsage user data'
+        throw 'NSIS uninstall changed isolated Usagi user data'
     }
 } finally {
     if ($testUserCreated) {

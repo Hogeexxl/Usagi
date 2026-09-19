@@ -51,12 +51,12 @@ fn t_dist_012_release_workflow_is_tag_gated_and_allows_explicit_dispatch() {
     assert!(release.contains("release_args+=(--draft --prerelease)"));
     assert!(release.contains("is_candidate=\"${{ steps.version.outputs.is_candidate }}\""));
     assert!(release.contains("\"${release_args[@]}\""));
-    assert!(release.contains("windows_name=\"MiniUsage-v${version}-windows-x64-setup.exe\""));
-    assert!(release.contains("macos_name=\"MiniUsage-v${version}-macos-arm64.dmg\""));
+    assert!(release.contains("windows_name=\"Usagi-v${version}-windows-x64-setup.exe\""));
+    assert!(release.contains("macos_name=\"Usagi-v${version}-macos-arm64.dmg\""));
     assert!(release.contains("TAG_VERSION=$tagVersion"));
     assert!(release.contains("CARGO_VERSION=$cargoVersion"));
     assert!(windows_smoke.contains("expectedBinaryVersion = $env:CARGO_VERSION"));
-    assert!(release.contains("X-MiniUsage-Version"));
+    assert!(release.contains("X-Usagi-Version"));
 }
 
 #[test]
@@ -73,8 +73,8 @@ fn t_dist_012_release_jobs_build_only_supported_assets() {
         "cargo install cargo-packager --locked --version",
         "cargo packager --release --formats nsis",
         "cargo packager --release --formats dmg",
-        "MiniUsage-v$env:TAG_VERSION-windows-x64-setup.exe",
-        "MiniUsage-v${TAG_VERSION}-macos-arm64.dmg",
+        "Usagi-v$env:TAG_VERSION-windows-x64-setup.exe",
+        "Usagi-v${TAG_VERSION}-macos-arm64.dmg",
         "actions/upload-artifact@v4",
         "actions/download-artifact@v4",
     ] {
@@ -116,7 +116,7 @@ fn t_dist_013_windows_release_has_static_runtime_and_install_smoke() {
         "IMAGE_SUBSYSTEM_WINDOWS_GUI",
         "IMAGE_FILE_MACHINE_AMD64",
         "PE32+",
-        "expectedPackagerName = \"mini-usage_$($env:CARGO_VERSION)_x64-setup.exe\"",
+        "expectedPackagerName = \"usagi_$($env:CARGO_VERSION)_x64-setup.exe\"",
         "$generated[0].Name -cne $expectedPackagerName",
         "T-DIST-013 clean-runtime installer smoke",
         ".github/scripts/windows-release-smoke.ps1",
@@ -130,16 +130,16 @@ fn t_dist_013_windows_release_has_static_runtime_and_install_smoke() {
     for required in [
         "Start-Process -FilePath $installer",
         "'/S'",
-        "MINIUSAGE_WINDOWS_HEADLESS_SMOKE",
-        "MINIUSAGE_DISABLE_BROWSER",
+        "USAGI_WINDOWS_HEADLESS_SMOKE",
+        "USAGI_DISABLE_BROWSER",
         "Start-Process -FilePath `$binaryPath",
         "-PassThru",
         "-Wait",
         "-RedirectStandardOutput `$stdoutPath",
         "-RedirectStandardError `$stderrPath",
-        "exit `$miniUsage.ExitCode",
+        "exit `$usagi.ExitCode",
         "127.0.0.1:3210/api/health",
-        "X-MiniUsage-Version",
+        "X-Usagi-Version",
         "expectedBinaryVersion = $env:CARGO_VERSION",
         "SkipHttpErrorCheck",
         "Content-Type",
@@ -152,7 +152,7 @@ fn t_dist_013_windows_release_has_static_runtime_and_install_smoke() {
         "$uninstallers.Count -ne 1",
         "$uninstallerPath",
         "Start-Process -FilePath $uninstallerPath",
-        "NSIS uninstall left mini-usage.exe",
+        "NSIS uninstall left usagi.exe",
         "databaseHashBeforeUninstall",
         "sentinelHashBeforeUninstall",
         "New-LocalUser",
@@ -168,7 +168,7 @@ fn t_dist_013_windows_release_has_static_runtime_and_install_smoke() {
         "[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)",
         "CreateProcessWithLogonW did not run as the isolated Windows user",
         "Installed runtime resolved the wrong Windows LocalApplicationData known folder",
-        "$appDataRoot = Join-Path $localAppData 'MiniUsage'",
+        "$appDataRoot = Join-Path $localAppData 'Usagi'",
         "Windows LocalApplicationData escaped the isolated user profile",
         "Get-CimInstance -ClassName Win32_UserProfile",
         "Remove-CimInstance",
@@ -213,8 +213,8 @@ fn t_dist_014_macos_release_has_arm64_clean_runtime_smoke() {
         "T-DIST-014 clean-runtime arm64 DMG smoke",
         "hdiutil attach -plist -nobrowse -readonly",
         "find target/release -maxdepth 1 -type f -name '*.dmg'",
-        "MiniUsage_${CARGO_VERSION}_aarch64.dmg",
-        "MiniUsage_${CARGO_VERSION}_arm64.dmg",
+        "Usagi_${CARGO_VERSION}_aarch64.dmg",
+        "Usagi_${CARGO_VERSION}_arm64.dmg",
         "cargo-packager DMG basename",
         "hdiutil detach",
         "attached_devices=()",
@@ -226,15 +226,15 @@ fn t_dist_014_macos_release_has_arm64_clean_runtime_smoke() {
         "plistlib",
         "mount_count",
         "trap cleanup EXIT INT TERM",
-        "file \"$app/Contents/MacOS/mini-usage\"",
+        "file \"$app/Contents/MacOS/usagi\"",
         "ditto \"$app\" \"$app_copy\"",
         "cd \"$runtime_root\"",
         "PATH=\"/usr/bin:/bin\"",
         "curl --silent --output /dev/null",
-        "X-MiniUsage-App",
+        "X-Usagi-App",
         "CARGO_VERSION",
         "expected_binary_version=\"$CARGO_VERSION\"",
-        "database_dir=\"$home/Library/Application Support/MiniUsage\"",
+        "database_dir=\"$home/Library/Application Support/Usagi\"",
         "database_path=\"$database_dir/mu.sqlite3\"",
         "Configured CODEX_HOME is not an existing readable directory",
         "Content-Type",
@@ -261,8 +261,8 @@ fn packager_metadata_uses_cargo_identity_without_runtime_resources_or_signing() 
     let manifest = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
         .expect("read Cargo manifest");
     assert!(manifest.contains("[package.metadata.packager]"));
-    assert!(manifest.contains("product-name = \"MiniUsage\""));
-    assert!(manifest.contains("identifier = \"com.hogeexxl.miniusage\""));
+    assert!(manifest.contains("product-name = \"Usagi\""));
+    assert!(manifest.contains("identifier = \"com.hogeexxl.usagi\""));
     assert!(manifest.contains("formats = [\"nsis\", \"dmg\"]"));
     assert!(!manifest.contains("resources ="));
     assert!(!manifest.contains("signing-identity"));

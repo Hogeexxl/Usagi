@@ -714,7 +714,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()
-            .join("miniusage-state-index")
+            .join("usagi-state-index")
             .join(name.trim_start_matches('/'))
             .to_string_lossy()
             .into_owned()
@@ -735,7 +735,7 @@ mod tests {
                 .as_nanos();
             let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::temp_dir().join(format!(
-                "mini-usage-state-index-{}-{nonce}-{sequence}",
+                "usagi-state-index-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir(&directory).unwrap();

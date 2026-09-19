@@ -11,7 +11,7 @@ use super::{ReleaseInfo, ReleaseProvider};
 use crate::update::state::{CURRENT_VERSION, UpdateFailureKind};
 
 pub(crate) const GITHUB_OWNER: &str = "Hogeexxl";
-pub(crate) const GITHUB_REPOSITORY: &str = "MiniUsage";
+pub(crate) const GITHUB_REPOSITORY: &str = "Usagi";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,7 +24,7 @@ pub struct GithubReleaseAdapter {
 
 impl GithubReleaseAdapter {
     pub fn new() -> Result<Self, reqwest::Error> {
-        let user_agent = format!("MiniUsage/{CURRENT_VERSION}");
+        let user_agent = format!("Usagi/{CURRENT_VERSION}");
         let client = Client::builder()
             .user_agent(user_agent)
             .connect_timeout(REQUEST_TIMEOUT)
@@ -92,7 +92,7 @@ fn latest_release_url() -> String {
 fn latest_release_request(client: &Client) -> reqwest::RequestBuilder {
     client
         .get(latest_release_url())
-        .header(header::USER_AGENT, format!("MiniUsage/{CURRENT_VERSION}"))
+        .header(header::USER_AGENT, format!("Usagi/{CURRENT_VERSION}"))
         .header(header::ACCEPT, "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
 }
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn fixed_repository_coordinates_are_single_source_of_truth() {
         assert_eq!(GITHUB_OWNER, "Hogeexxl");
-        assert_eq!(GITHUB_REPOSITORY, "MiniUsage");
+        assert_eq!(GITHUB_REPOSITORY, "Usagi");
         assert_eq!(
             latest_release_url(),
             format!(
@@ -153,7 +153,7 @@ mod tests {
         );
         assert_eq!(
             request.headers().get(header::USER_AGENT),
-            Some(&header::HeaderValue::from_str(&format!("MiniUsage/{CURRENT_VERSION}")).unwrap())
+            Some(&header::HeaderValue::from_str(&format!("Usagi/{CURRENT_VERSION}")).unwrap())
         );
         assert!(request.headers().get(header::AUTHORIZATION).is_none());
         assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(5));

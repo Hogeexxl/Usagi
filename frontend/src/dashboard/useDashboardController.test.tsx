@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MiniUsageClient } from "../data/miniUsageClient";
+import type { UsagiClient } from "../data/usagiClient";
 import { createRevisionFeed } from "../data/revisionFeed";
 import type { DashboardFilters, DashboardRange, StatusResponse, SummaryResponse } from "../data/types";
 import { useDashboardController } from "./useDashboardController";
@@ -60,7 +60,7 @@ function fakeEvents() {
   };
 }
 
-function clientWith(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
+function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
     filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
     codexQuota: vi.fn(async () => ({

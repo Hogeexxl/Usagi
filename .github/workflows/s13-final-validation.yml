@@ -113,7 +113,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.release_tag }}
-          MINIUSAGE_RELEASE_DMG: staging/macos/MiniUsage-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.release_tag }}-macos-arm64.dmg
+          USAGI_RELEASE_DMG: staging/macos/Usagi-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.release_tag }}-macos-arm64.dmg
         run: |
           export GITHUB_REF_NAME="$RELEASE_TAG"
           bash ./.github/scripts/s13-public-release-e2e.sh

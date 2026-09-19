@@ -1,7 +1,7 @@
 # Spec07 数据口径改造实施方案
 
 - 文档版本：v0.1
-- 基线源码：`MiniUsage-69be2a4`（commit `69be2a4d5095679192fa7c1667a0a7e39ab7234e`）
+- 基线源码：`Usagi-69be2a4`（commit `69be2a4d5095679192fa7c1667a0a7e39ab7234e`）
 - 数据口径基线：
   - `normalizedTokenUsage数据口径.md` v0.2
   - `codex rollout数据口径.md` v0.2
@@ -1090,7 +1090,7 @@ cache_tokens
 
 未来 Session DTO 只能复用 `UsageDto`，不要重新定义 Token 字段。
 
-### 11.2 `miniUsageClient.ts`
+### 11.2 `usagiClient.ts`
 
 `parseUsage` 直接要求 canonical API 字段。
 
@@ -1175,7 +1175,7 @@ Spec_04_Token账本与聚合
 Spec_05_查询API与更新通知
 Spec_06_01_前端框架与Dashboard
 Spec_06_02_Session记录列表
-MiniUsage_测试标准_Spec01-06_v0.17.md
+Usagi_测试标准_Spec01-06_v0.17.md
 各 Spec04/05/06 测试代码布局
 ```
 

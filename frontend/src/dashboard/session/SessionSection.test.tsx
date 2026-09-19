@@ -52,8 +52,8 @@ const usage: UsageDto = {
 const item: SessionItemDto = {
   root_session_id: "root-1",
   title: null,
-  project_name: "MiniUsage",
-  project_path: "/work/MiniUsage",
+  project_name: "Usagi",
+  project_path: "/work/Usagi",
   last_activity_at_ms: Date.UTC(2026, 7, 10, 8, 9),
   models_used: ["gpt-5", "o4-mini"],
   subagent_count: 2,

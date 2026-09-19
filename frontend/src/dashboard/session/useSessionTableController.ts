@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createRevisionFeed, type RevisionFeed } from "../../data/revisionFeed";
-import { canonicalDashboardFilters, dashboardQueryKey, miniUsageClient, type MiniUsageClient } from "../../data/miniUsageClient";
+import { canonicalDashboardFilters, dashboardQueryKey, usagiClient, type UsagiClient } from "../../data/usagiClient";
 import {
-  MiniUsageClientError,
+  UsagiClientError,
   type DashboardFilters,
   type DashboardRange,
   type RevisionTuple,
@@ -70,7 +70,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function errorCode(error: unknown): string {
-  return error instanceof MiniUsageClientError ? error.code : "HTTP_ERROR";
+  return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
 
 function compareRootIds(left: string, right: string): number {
@@ -127,7 +127,7 @@ function makeSnapshot(
   queryKey: string,
   range: DashboardRange,
   filters: DashboardFilters,
-  response: Awaited<ReturnType<MiniUsageClient["getSessionSnapshot"]>>,
+  response: Awaited<ReturnType<UsagiClient["getSessionSnapshot"]>>,
   previous: Snapshot | null,
 ): Snapshot {
   const rowCache = new Map<string, SessionItemDto>();
@@ -152,7 +152,7 @@ export function useSessionTableController(
   filters: DashboardFilters,
   options: SessionControllerOptions = {},
 ): SessionTableViewModel {
-  const client = options.client ?? miniUsageClient;
+  const client = options.client ?? usagiClient;
   const canonicalFilters = canonicalDashboardFilters(filters);
   const queryKey = dashboardQueryKey(range, canonicalFilters);
   const ownedFeedRef = useRef<RevisionFeed | null>(null);

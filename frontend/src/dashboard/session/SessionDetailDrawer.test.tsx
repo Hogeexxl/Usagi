@@ -87,8 +87,8 @@ const detail: SessionDetailResponse = {
 const row: SessionItemDto = {
   root_session_id: detail.root_session_id,
   title: detail.main.title,
-  project_name: "MiniUsage",
-  project_path: "/work/MiniUsage",
+  project_name: "Usagi",
+  project_path: "/work/Usagi",
   last_activity_at_ms: detail.last_activity_at_ms,
   models_used: detail.main.models_used,
   subagent_count: 2,

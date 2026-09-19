@@ -1,4 +1,4 @@
--- MiniUsage schema version 8: resilient metadata continuation and Session quarantine.
+-- Usagi schema version 8: resilient metadata continuation and Session quarantine.
 -- The migration runner executes this script inside one BEGIN IMMEDIATE transaction.
 
 PRAGMA defer_foreign_keys = ON;

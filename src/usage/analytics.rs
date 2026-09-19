@@ -404,7 +404,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("mini-usage-s07-analytics-{unique}"));
+        let root = std::env::temp_dir().join(format!("usagi-s07-analytics-{unique}"));
         fs::create_dir_all(&root).unwrap();
         let ledger = Ledger::open(LedgerOptions::new(
             root.join("mu.sqlite3"),

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MiniUsageClient } from "./miniUsageClient";
+import type { UsagiClient } from "./usagiClient";
 import { createRevisionFeed, type RevisionEventSource } from "./revisionFeed";
 
-function clientWithRevision(revision: number): MiniUsageClient {
+function clientWithRevision(revision: number): UsagiClient {
   return {
     filterOptions: vi.fn(),
     codexQuota: vi.fn(),

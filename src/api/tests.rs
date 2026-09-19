@@ -172,11 +172,7 @@ async fn t_q_004_quota_refresh_isolated_from_scanner_refresh_and_ledger_state() 
     );
 
     let refreshed = fixture
-        .call(
-            Method::POST,
-            "/api/refresh",
-            &[("x-miniusage-request", "1")],
-        )
+        .call(Method::POST, "/api/refresh", &[("x-usagi-request", "1")])
         .await;
     assert!(matches!(
         refreshed.status(),
@@ -220,8 +216,7 @@ async fn t_dist_008_check_requires_active_header_and_maps_success_or_failure_saf
     let mut latest = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     latest.patch = latest.patch.checked_add(1).unwrap();
     let expected_latest = latest.to_string();
-    let expected_url =
-        format!("https://github.com/Hogeexxl/MiniUsage/releases/tag/v{expected_latest}");
+    let expected_url = format!("https://github.com/Hogeexxl/Usagi/releases/tag/v{expected_latest}");
     let provider = Arc::new(FixtureProvider::success(latest));
     let service = fixed_service(Arc::clone(&provider) as Arc<dyn ReleaseProvider>);
     let fixture = support::ApiFixture::with_updates(
@@ -238,7 +233,7 @@ async fn t_dist_008_check_requires_active_header_and_maps_success_or_failure_saf
         .call(
             Method::POST,
             "/api/update/check",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -266,7 +261,7 @@ async fn t_dist_008_check_requires_active_header_and_maps_success_or_failure_saf
         .call(
             Method::POST,
             "/api/update/check",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -300,7 +295,7 @@ async fn t_dist_008_concurrent_check_requests_share_one_provider_call() {
                     .method(Method::POST)
                     .uri("/api/update/check")
                     .header("host", "127.0.0.1:3210")
-                    .header("x-miniusage-request", "1")
+                    .header("x-usagi-request", "1")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -316,7 +311,7 @@ async fn t_dist_008_concurrent_check_requests_share_one_provider_call() {
                     .method(Method::POST)
                     .uri("/api/update/check")
                     .header("host", "127.0.0.1:3210")
-                    .header("x-miniusage-request", "1")
+                    .header("x-usagi-request", "1")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -337,7 +332,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     let mut latest = current.clone();
     latest.patch = latest.patch.checked_add(1).unwrap();
-    let expected_url = format!("https://github.com/Hogeexxl/MiniUsage/releases/tag/v{latest}");
+    let expected_url = format!("https://github.com/Hogeexxl/Usagi/releases/tag/v{latest}");
     let no_update_provider = Arc::new(FixtureProvider::success(current));
     let no_update_browser = Arc::new(RecordingBrowser::default());
     let fixture = support::ApiFixture::with_updates(
@@ -349,7 +344,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
         .call(
             Method::POST,
             "/api/update/open-release",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(no_update.status(), StatusCode::CONFLICT);
@@ -371,7 +366,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
         .call(
             Method::POST,
             "/api/update/check",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(checked.status(), StatusCode::OK);
@@ -379,7 +374,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
         .call(
             Method::POST,
             "/api/update/open-release",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(opened.status(), StatusCode::NO_CONTENT);
@@ -400,7 +395,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
         .call(
             Method::POST,
             "/api/update/check",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(checked.status(), StatusCode::OK);
@@ -408,7 +403,7 @@ async fn t_dist_008_open_release_requires_valid_state_and_preserves_state_on_bro
         .call(
             Method::POST,
             "/api/update/open-release",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -504,11 +499,11 @@ async fn health_exposes_exact_launcher_markers() {
     let health = fixture.call(Method::GET, "/api/health", &[]).await;
     assert_eq!(health.status(), StatusCode::NO_CONTENT);
     assert_eq!(
-        health.headers()[header::HeaderName::from_static("x-miniusage-app")],
-        "MiniUsage"
+        health.headers()[header::HeaderName::from_static("x-usagi-app")],
+        "Usagi"
     );
     assert_eq!(
-        health.headers()[header::HeaderName::from_static("x-miniusage-version")],
+        health.headers()[header::HeaderName::from_static("x-usagi-version")],
         env!("CARGO_PKG_VERSION")
     );
     fixture.scanner.shutdown().unwrap();
@@ -536,7 +531,7 @@ async fn service_control_stops_the_scanner_and_requests_full_process_shutdown() 
         .call(
             Method::POST,
             "/api/service/stop",
-            &[("x-miniusage-request", "1")],
+            &[("x-usagi-request", "1")],
         )
         .await;
     assert_eq!(stopped.status(), StatusCode::OK);
@@ -551,11 +546,7 @@ async fn service_control_stops_the_scanner_and_requests_full_process_shutdown() 
     assert!(String::from_utf8_lossy(&event_bytes).contains("event: revision"));
 
     let refresh = fixture
-        .call(
-            Method::POST,
-            "/api/refresh",
-            &[("x-miniusage-request", "1")],
-        )
+        .call(Method::POST, "/api/refresh", &[("x-usagi-request", "1")])
         .await;
     assert_eq!(refresh.status(), StatusCode::SERVICE_UNAVAILABLE);
 
@@ -693,3 +684,232 @@ mod support;
 mod spec05_concurrency;
 
 mod spec05_p2;
+
+#[test]
+fn runtime_port_guard_accepts_only_selected_loopback_port() {
+    assert!(allowed_local_authority("127.0.0.1:3217", 3217));
+    assert!(allowed_local_authority("localhost:3217", 3217));
+    assert!(!allowed_local_authority("127.0.0.1:3210", 3217));
+    assert!(!allowed_local_authority("localhost:3210", 3217));
+
+    assert!(allowed_local_origin("http://127.0.0.1:3217", 3217));
+    assert!(allowed_local_origin("http://localhost:3217", 3217));
+    assert!(!allowed_local_origin("http://127.0.0.1:3210", 3217));
+    assert!(!allowed_local_origin("http://localhost:3210", 3217));
+}
+
+#[tokio::test]
+async fn t_public_api_v1_info_contract_is_stable() {
+    let fixture = support::ApiFixture::new("public-v1-info");
+    let response = fixture.call(Method::GET, "/api/v1/info", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "service": "usagi",
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "api_version": "1",
+            "capabilities": [
+                "revision",
+                "revision-events",
+                "status",
+                "codex-quota",
+                "usage-summary"
+            ]
+        })
+    );
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_revision_and_status_expose_only_public_contract() {
+    let fixture = support::ApiFixture::new("public-v1-status");
+
+    let revision = fixture.call(Method::GET, "/api/v1/revision", &[]).await;
+    assert_eq!(revision.status(), StatusCode::OK);
+    let revision = json_body(revision).await;
+    assert!(revision["data_revision"].as_i64().is_some());
+    assert!(revision["status_revision"].as_i64().is_some());
+
+    let status = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = json_body(status).await;
+    for key in [
+        "data_revision",
+        "status_revision",
+        "scan_state",
+        "source_binding_status",
+        "last_finished_scan_result",
+        "last_scan_started_at_ms",
+        "last_scan_completed_at_ms",
+        "last_scan_failed_at_ms",
+        "last_scan_error_code",
+    ] {
+        assert!(
+            status.get(key).is_some(),
+            "missing public status field: {key}"
+        );
+    }
+    for internal_key in [
+        "active_scan_id",
+        "last_finished_scan_id",
+        "followup",
+        "target_scan",
+    ] {
+        assert!(
+            status.get(internal_key).is_none(),
+            "internal status field leaked: {internal_key}"
+        );
+    }
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_quota_redacts_account_and_internal_fields() {
+    let provider = quota_fixture_provider();
+    let service = CodexQuotaService::with_provider_and_clock(
+        "/tmp/codex-public-api-v1-quota",
+        Arc::new(provider),
+        Arc::new(|| 1_700_000_000_000),
+    );
+    let ready = service.refresh_now().await;
+    assert_eq!(ready.status, CodexQuotaStatus::Ready);
+
+    let fixture = support::ApiFixture::with_quota_service("public-v1-quota", service);
+    let response = fixture.call(Method::GET, "/api/v1/codex/quota", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+
+    assert_eq!(body["status"], "ready");
+    assert!(body.get("five_hour").is_some());
+    assert!(body.get("weekly").is_some());
+    assert!(body.get("session").is_none());
+    assert_eq!(body["fetched_at_ms"], 1_700_000_000_000_i64);
+    assert!(body.get("account_email").is_none());
+    assert!(body.get("plan_type").is_none());
+    assert!(body.get("reset_credits_available").is_none());
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_summary_supports_named_and_custom_ranges_only() {
+    let fixture = support::ApiFixture::new("public-v1-summary-ranges");
+
+    for range in ["today", "yesterday", "7d", "30d", "year"] {
+        let uri = format!("/api/v1/usage/summary?range={range}");
+        let response = fixture.call(Method::GET, &uri, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK, "range={range}");
+        let body = json_body(response).await;
+        assert_eq!(body["range"]["key"], range);
+        assert!(
+            body["range"]["end_ms"].as_i64().unwrap() > body["range"]["start_ms"].as_i64().unwrap()
+        );
+        assert!(
+            body["range"]["timezone"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert!(body["usage"].is_object());
+    }
+
+    let custom = fixture
+        .call(
+            Method::GET,
+            "/api/v1/usage/summary?range=custom&from=2026-09-01&to=2026-09-14",
+            &[],
+        )
+        .await;
+    assert_eq!(custom.status(), StatusCode::OK);
+    let custom = json_body(custom).await;
+    assert_eq!(custom["range"]["key"], "custom");
+    assert!(
+        custom["range"]["end_ms"].as_i64().unwrap() > custom["range"]["start_ms"].as_i64().unwrap()
+    );
+
+    for uri in [
+        "/api/v1/usage/summary?range=today&model=gpt-5",
+        "/api/v1/usage/summary?range=today&project_path=%2Ftmp",
+        "/api/v1/usage/summary?range=today&unknown=1",
+    ] {
+        let response = fixture.call(Method::GET, uri, &[]).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(json_body(response).await["error"]["code"], "INVALID_FILTER");
+    }
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_events_is_sse_and_keeps_existing_local_security() {
+    let fixture = support::ApiFixture::new("public-v1-events");
+
+    let response = fixture.call(Method::GET, "/api/v1/events", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|value| value.to_str().ok()),
+        Some("no")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let events_finished =
+        tokio::spawn(async move { to_bytes(response.into_body(), 64 * 1024).await.unwrap() });
+
+    let rejected = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/revision")
+                .header("host", "example.test")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_body(rejected).await["error"]["code"], "FORBIDDEN_HOST");
+
+    let stopped = fixture
+        .call(
+            Method::POST,
+            "/api/service/stop",
+            &[("x-usagi-request", "1")],
+        )
+        .await;
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let event_bytes = tokio::time::timeout(std::time::Duration::from_secs(1), events_finished)
+        .await
+        .expect("Public API SSE must close during process shutdown")
+        .unwrap();
+    let rendered = String::from_utf8_lossy(&event_bytes);
+    assert!(rendered.contains("event: revision"));
+    assert!(rendered.contains("data_revision"));
+    assert!(rendered.contains("status_revision"));
+
+    fixture.scanner.shutdown().unwrap();
+}

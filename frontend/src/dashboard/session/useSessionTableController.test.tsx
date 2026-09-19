@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MiniUsageClient } from "../../data/miniUsageClient";
+import type { UsagiClient } from "../../data/usagiClient";
 import { createRevisionFeed, type RevisionEventSource } from "../../data/revisionFeed";
 import type {
   DashboardFilters,
@@ -33,8 +33,8 @@ function item(id: string, total = 3): SessionItemDto {
   return {
     root_session_id: id,
     title: id,
-    project_name: "MiniUsage",
-    project_path: "/work/MiniUsage",
+    project_name: "Usagi",
+    project_path: "/work/Usagi",
     last_activity_at_ms: 1_700_000_000_000,
     models_used: ["gpt-5"],
     subagent_count: 0,
@@ -68,7 +68,7 @@ function snapshot(count: number, seedCount = 40, key: DashboardRange = { key: "t
   };
 }
 
-function sourceAndFeed(client: MiniUsageClient) {
+function sourceAndFeed(client: UsagiClient) {
   let source: RevisionEventSource | null = null;
   const feed = createRevisionFeed({
     client,
@@ -81,7 +81,7 @@ function sourceAndFeed(client: MiniUsageClient) {
   return { feed, source: () => source };
 }
 
-function clientWith(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
+function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
     filterOptions: vi.fn(),
     codexQuota: vi.fn(),
@@ -108,8 +108,8 @@ afterEach(() => vi.useRealTimers());
 describe("useSessionTableController", () => {
   it("T-S05-001 keeps a full index, shows 10/page, jumps windows, and isolates QueryKey caches", async () => {
     const first = snapshot(200);
-    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<MiniUsageClient["getSessionSnapshot"]>[0]) => ({ ...first, range: range(key) }));
-    const getSessionRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<MiniUsageClient["getSessionRows"]>[0]) => ({
+    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<UsagiClient["getSessionSnapshot"]>[0]) => ({ ...first, range: range(key) }));
+    const getSessionRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<UsagiClient["getSessionRows"]>[0]) => ({
       range: range(key),
       data_revision: 1,
       items: root_session_ids.map((id) => item(id)),
@@ -167,8 +167,8 @@ describe("useSessionTableController", () => {
       sort_index: sortIndex,
       items: sortIndex.slice(0, 40).map(({ root_session_id }) => item(root_session_id)),
     };
-    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<MiniUsageClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) }));
-    const getSessionRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<MiniUsageClient["getSessionRows"]>[0]) => ({
+    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<UsagiClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) }));
+    const getSessionRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<UsagiClient["getSessionRows"]>[0]) => ({
       range: range(key),
       data_revision: 1,
       items: root_session_ids.map((id) => item(id)),
@@ -234,13 +234,13 @@ describe("useSessionTableController", () => {
     unmount();
     feed.dispose();
 
-    const prefetchRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<MiniUsageClient["getSessionRows"]>[0]) => ({
+    const prefetchRows = vi.fn(async ({ range: key, root_session_ids }: Parameters<UsagiClient["getSessionRows"]>[0]) => ({
       range: range(key),
       data_revision: 1,
       items: root_session_ids.map((id) => item(id)),
     }));
     const prefetchClient = clientWith({
-      getSessionSnapshot: vi.fn(async ({ range: key }: Parameters<MiniUsageClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) })),
+      getSessionSnapshot: vi.fn(async ({ range: key }: Parameters<UsagiClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) })),
       getSessionRows: prefetchRows,
     });
     const { feed: prefetchFeed } = sourceAndFeed(prefetchClient);
@@ -270,14 +270,14 @@ describe("useSessionTableController", () => {
 
   it("T-S06-001 upgrades a pending prefetch when the foreground jumps into its window", async () => {
     let resolveBatch!: () => void;
-    const getSessionRows = vi.fn(({ range: key, root_session_ids }: Parameters<MiniUsageClient["getSessionRows"]>[0]) =>
-      new Promise<Awaited<ReturnType<MiniUsageClient["getSessionRows"]>>>((resolve) => {
+    const getSessionRows = vi.fn(({ range: key, root_session_ids }: Parameters<UsagiClient["getSessionRows"]>[0]) =>
+      new Promise<Awaited<ReturnType<UsagiClient["getSessionRows"]>>>((resolve) => {
         resolveBatch = () => resolve({ range: range(key), data_revision: 1, items: root_session_ids.map((id) => item(id)) });
       }),
     );
     const full = snapshot(200);
     const client = clientWith({
-      getSessionSnapshot: vi.fn(async ({ range: key }: Parameters<MiniUsageClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) })),
+      getSessionSnapshot: vi.fn(async ({ range: key }: Parameters<UsagiClient["getSessionSnapshot"]>[0]) => ({ ...full, range: range(key) })),
       getSessionRows,
     });
     const { feed } = sourceAndFeed(client);
@@ -305,10 +305,10 @@ describe("useSessionTableController", () => {
   });
 
   it("does not let a late row response cross scope or revision", async () => {
-    let resolveRows!: (value: Awaited<ReturnType<MiniUsageClient["getSessionRows"]>>) => void;
+    let resolveRows!: (value: Awaited<ReturnType<UsagiClient["getSessionRows"]>>) => void;
     const client = clientWith({
       getSessionSnapshot: vi.fn(async ({ range: key }) => ({ ...snapshot(80), range: range(key) })),
-      getSessionRows: vi.fn(() => new Promise<Awaited<ReturnType<MiniUsageClient["getSessionRows"]>>>((resolve) => { resolveRows = resolve; })),
+      getSessionRows: vi.fn(() => new Promise<Awaited<ReturnType<UsagiClient["getSessionRows"]>>>((resolve) => { resolveRows = resolve; })),
     });
     const { feed } = sourceAndFeed(client);
     const { result, rerender } = renderHook(({ key }: { key: DashboardRange }) => useSessionTableController(key, emptyFilters, { client, revisionFeed: feed }), { initialProps: { key: { key: "today" } } });
@@ -326,7 +326,7 @@ describe("useSessionTableController", () => {
     let snapshotCalls = 0;
     let resolveStale!: (value: SessionSnapshotResponse) => void;
     const fresh = snapshot(1);
-    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<MiniUsageClient["getSessionSnapshot"]>[0]) => {
+    const getSessionSnapshot = vi.fn(async ({ range: key }: Parameters<UsagiClient["getSessionSnapshot"]>[0]) => {
       snapshotCalls += 1;
       if (snapshotCalls === 1) return { ...fresh, range: range(key) };
       if (snapshotCalls === 2) return await new Promise<SessionSnapshotResponse>((resolve) => { resolveStale = resolve; });

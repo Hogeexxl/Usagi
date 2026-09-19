@@ -14,7 +14,10 @@ use axum::{
     http::{Method, Request, StatusCode},
 };
 use futures_util::StreamExt;
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     platform::browser::SystemBrowser,
@@ -22,9 +25,6 @@ use mini_usage::{
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
 };
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const ROOT: &str = "00000000-03e8-7000-8000-000000000001";
 
@@ -36,7 +36,7 @@ impl TempRoot {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-spec05-stress-{}-{stamp}",
+            "usagi-spec05-stress-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();
@@ -56,7 +56,7 @@ struct Fixture {
     _root: TempRoot,
     rollout: PathBuf,
     ledger: Arc<Ledger>,
-    scanner: mini_usage::scanner::ScanHandle,
+    scanner: usagi::scanner::ScanHandle,
     app: Router,
 }
 impl Fixture {
@@ -175,7 +175,7 @@ async fn call(app: &Router, method: Method, uri: &str, refresh: bool) -> axum::r
         .uri(uri)
         .header("host", "127.0.0.1:3210");
     if refresh {
-        builder = builder.header("x-miniusage-request", "1");
+        builder = builder.header("x-usagi-request", "1");
     }
     app.clone()
         .oneshot(builder.body(Body::empty()).unwrap())

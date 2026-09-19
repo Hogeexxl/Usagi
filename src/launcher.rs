@@ -9,11 +9,12 @@ use crate::api::{APP_MARKER_HEADER, APP_MARKER_VALUE, listen_address};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const PROBE_RETRY_DELAY: Duration = Duration::from_millis(40);
+const WINDOWS_PORT_FALLBACK_COUNT: u16 = 32;
 
 #[derive(Debug)]
 pub enum BindOutcome {
     Listener(TcpListener),
-    ExistingInstance,
+    ExistingInstance(SocketAddr),
 }
 
 #[derive(Debug)]
@@ -27,19 +28,16 @@ pub enum LauncherError {
 impl fmt::Display for LauncherError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bind(error) => write!(formatter, "could not bind MiniUsage listener: {error}"),
+            Self::Bind(error) => write!(formatter, "could not bind Usagi listener: {error}"),
             Self::AddressInUse(address) => write!(
                 formatter,
-                "{address} is already in use by another program (MiniUsage health marker not found)"
+                "{address} is already in use by another program (Usagi health marker not found)"
             ),
             Self::ProbeClient(error) => {
                 write!(formatter, "could not create local health probe: {error}")
             }
             Self::NotReady(address) => {
-                write!(
-                    formatter,
-                    "MiniUsage service at {address} did not become ready"
-                )
+                write!(formatter, "Usagi service at {address} did not become ready")
             }
         }
     }
@@ -52,12 +50,55 @@ pub async fn bind_or_detect_existing() -> Result<BindOutcome, LauncherError> {
     bind_or_detect_existing_at(listen_address()).await
 }
 
+/// Windows uses the fixed production port as its first choice, but falls
+/// forward through a small deterministic loopback range when another program
+/// already owns that port. macOS continues to use `bind_or_detect_existing`
+/// and therefore retains the fixed-port contract.
+pub async fn bind_or_detect_existing_with_port_fallback() -> Result<BindOutcome, LauncherError> {
+    bind_or_detect_existing_in_range(listen_address(), WINDOWS_PORT_FALLBACK_COUNT).await
+}
+
+async fn bind_or_detect_existing_in_range(
+    preferred: SocketAddr,
+    count: u16,
+) -> Result<BindOutcome, LauncherError> {
+    if count == 0 {
+        return Err(LauncherError::AddressInUse(preferred));
+    }
+    let start_port = preferred.port();
+    let end_port = start_port
+        .checked_add(count - 1)
+        .ok_or_else(|| LauncherError::AddressInUse(preferred))?;
+
+    let mut first_available = None;
+    for port in start_port..=end_port {
+        let address = SocketAddr::new(preferred.ip(), port);
+        match TcpListener::bind(address).await {
+            Ok(listener) => {
+                if first_available.is_none() {
+                    first_available = Some(listener);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                if probe_health(address).await? {
+                    return Ok(BindOutcome::ExistingInstance(address));
+                }
+            }
+            Err(error) => return Err(LauncherError::Bind(error)),
+        }
+    }
+
+    first_available
+        .map(BindOutcome::Listener)
+        .ok_or(LauncherError::AddressInUse(preferred))
+}
+
 async fn bind_or_detect_existing_at(address: SocketAddr) -> Result<BindOutcome, LauncherError> {
     match TcpListener::bind(address).await {
         Ok(listener) => Ok(BindOutcome::Listener(listener)),
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
             if probe_health(address).await? {
-                Ok(BindOutcome::ExistingInstance)
+                Ok(BindOutcome::ExistingInstance(address))
             } else {
                 Err(LauncherError::AddressInUse(address))
             }
@@ -135,7 +176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_health_marker_identifies_existing_mini_usage() {
+    async fn exact_health_marker_identifies_existing_usagi() {
         let (address, listener) = reserve_address().await;
         let app = Router::new().route(
             "/api/health",
@@ -151,17 +192,37 @@ mod tests {
         });
 
         let outcome = bind_or_detect_existing_at(address).await.unwrap();
-        assert!(matches!(outcome, BindOutcome::ExistingInstance));
+        assert!(matches!(outcome, BindOutcome::ExistingInstance(value) if value == address));
         server.abort();
         let _ = server.await;
     }
 
     #[tokio::test]
-    async fn occupied_non_mini_usage_port_is_an_explicit_error() {
+    async fn occupied_non_usagi_port_is_an_explicit_error() {
         let (address, listener) = reserve_address().await;
         let error = bind_or_detect_existing_at(address).await.unwrap_err();
         assert!(matches!(error, LauncherError::AddressInUse(value) if value == address));
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn fallback_binding_moves_forward_when_preferred_port_is_occupied() {
+        let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let start = occupied.local_addr().unwrap();
+        let next = start.port().checked_add(1).unwrap();
+        let preferred = SocketAddr::new(start.ip(), start.port());
+
+        let outcome = bind_or_detect_existing_in_range(preferred, 2)
+            .await
+            .unwrap();
+        let BindOutcome::Listener(listener) = outcome else {
+            panic!("expected fallback listener");
+        };
+        assert_eq!(listener.local_addr().unwrap().port(), next);
+        drop(listener);
+        drop(occupied);
     }
 
     #[test]

@@ -30,7 +30,7 @@ impl TempRoot {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-spec05-api-private-{label}-{}-{stamp}",
+            "usagi-spec05-api-private-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();

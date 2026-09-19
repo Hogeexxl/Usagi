@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createRevisionFeed, type RevisionFeed } from "../../data/revisionFeed";
-import { canonicalDashboardFilters, dashboardQueryKey, type MiniUsageClient, miniUsageClient } from "../../data/miniUsageClient";
+import { canonicalDashboardFilters, dashboardQueryKey, type UsagiClient, usagiClient } from "../../data/usagiClient";
 import {
-  MiniUsageClientError,
+  UsagiClientError,
   type DashboardFilters,
   type DashboardRange,
   type RevisionTuple,
@@ -14,7 +14,7 @@ import {
 export type SessionDetailLoadState = "closed" | "loading" | "ready" | "refreshing" | "error";
 
 export type SessionDetailControllerOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
   revisionFeed?: RevisionFeed;
   /** The revision backing the currently visible Session snapshot. */
   dataRevision?: number;
@@ -65,7 +65,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function errorCode(error: unknown): string {
-  return error instanceof MiniUsageClientError ? error.code : "HTTP_ERROR";
+  return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
 
 function detailCacheKey(scope: Scope, rootSessionId: string, revision = scope.revision): string {
@@ -81,7 +81,7 @@ export function useSessionDetailController(
   filters: DashboardFilters,
   options: SessionDetailControllerOptions = {},
 ): SessionDetailControllerViewModel {
-  const client = options.client ?? miniUsageClient;
+  const client = options.client ?? usagiClient;
   const canonicalFilters = canonicalDashboardFilters(filters);
   const feedRef = useRef<RevisionFeed | null>(null);
   const ownedFeedRef = useRef<RevisionFeed | null>(null);

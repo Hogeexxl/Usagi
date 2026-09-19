@@ -1,4 +1,4 @@
--- MiniUsage schema version 7: durable reasoning context and derived cost.
+-- Usagi schema version 7: durable reasoning context and derived cost.
 -- The migration runner executes this script in its migration transaction.
 
 PRAGMA defer_foreign_keys = ON;

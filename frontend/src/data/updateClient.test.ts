@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { miniUsageClient } from "./miniUsageClient";
+import { usagiClient } from "./usagiClient";
 
 const status = {
   current_version: "0.1.0",
   latest_version: "0.1.1",
   update_available: true,
-  release_url: "https://github.com/Hogeexxl/MiniUsage/releases/tag/v0.1.1",
+  release_url: "https://github.com/Hogeexxl/Usagi/releases/tag/v0.1.1",
   last_checked_at_ms: 1234,
   checking: false,
 };
@@ -21,9 +21,9 @@ describe("update API client", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(status), { status: 200 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
-    await expect(miniUsageClient.getUpdateStatus()).resolves.toEqual(status);
-    await expect(miniUsageClient.checkUpdate()).resolves.toEqual(status);
-    await expect(miniUsageClient.openRelease()).resolves.toBeUndefined();
+    await expect(usagiClient.getUpdateStatus()).resolves.toEqual(status);
+    await expect(usagiClient.checkUpdate()).resolves.toEqual(status);
+    await expect(usagiClient.openRelease()).resolves.toBeUndefined();
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -36,7 +36,7 @@ describe("update API client", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "same-origin",
-        headers: expect.objectContaining({ "X-MiniUsage-Request": "1" }),
+        headers: expect.objectContaining({ "X-Usagi-Request": "1" }),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -45,7 +45,7 @@ describe("update API client", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "same-origin",
-        headers: expect.objectContaining({ "X-MiniUsage-Request": "1" }),
+        headers: expect.objectContaining({ "X-Usagi-Request": "1" }),
       }),
     );
     expect(fetchMock.mock.calls.every(([url]) => String(url).startsWith("/api/update/"))).toBe(true);

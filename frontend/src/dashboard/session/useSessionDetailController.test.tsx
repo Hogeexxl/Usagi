@@ -1,17 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MiniUsageClient } from "../../data/miniUsageClient";
+import type { UsagiClient } from "../../data/usagiClient";
 import { createRevisionFeed, type RevisionEventSource } from "../../data/revisionFeed";
-import { MiniUsageClientError, type DashboardFilters, type DashboardRange, type SessionDetailResponse, type SessionItemDto } from "../../data/types";
+import { UsagiClientError, type DashboardFilters, type DashboardRange, type SessionDetailResponse, type SessionItemDto } from "../../data/types";
 import { useSessionDetailController } from "./useSessionDetailController";
 
 const filters: DashboardFilters = { models: [], projects: [] };
 const row: SessionItemDto = {
   root_session_id: "root-1",
   title: "Root",
-  project_name: "MiniUsage",
-  project_path: "/work/MiniUsage",
+  project_name: "Usagi",
+  project_path: "/work/Usagi",
   last_activity_at_ms: 200,
   models_used: ["model-a"],
   subagent_count: 1,
@@ -83,7 +83,7 @@ function detail(revision: number, total = revision, rootSessionId = "root-1"): S
   };
 }
 
-function clientWith(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
+function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
     filterOptions: vi.fn(),
     codexQuota: vi.fn(),
@@ -101,7 +101,7 @@ function clientWith(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
   };
 }
 
-function sourceAndFeed(client: MiniUsageClient) {
+function sourceAndFeed(client: UsagiClient) {
   let source: RevisionEventSource | null = null;
   const feed = createRevisionFeed({
     client,
@@ -213,7 +213,7 @@ describe("useSessionDetailController", () => {
   it("refreshes the open drawer on a higher revision and ignores the old response", async () => {
     let resolveOld!: (value: SessionDetailResponse) => void;
     let resolveNew!: (value: SessionDetailResponse) => void;
-    const getSessionDetail = vi.fn(({ expected_data_revision }: Parameters<MiniUsageClient["getSessionDetail"]>[0]) => new Promise<SessionDetailResponse>((resolve) => {
+    const getSessionDetail = vi.fn(({ expected_data_revision }: Parameters<UsagiClient["getSessionDetail"]>[0]) => new Promise<SessionDetailResponse>((resolve) => {
       if (expected_data_revision === 1) resolveOld = resolve;
       else resolveNew = resolve;
     }));
@@ -235,7 +235,7 @@ describe("useSessionDetailController", () => {
 
   it("keeps retry_detail as the public retry path without exposing manual refresh_detail", async () => {
     const getSessionDetail = vi.fn()
-      .mockRejectedValueOnce(new MiniUsageClientError("HTTP_ERROR", 500))
+      .mockRejectedValueOnce(new UsagiClientError("HTTP_ERROR", 500))
       .mockResolvedValueOnce(detail(1, 222));
     const client = clientWith({ getSessionDetail });
     const { feed } = sourceAndFeed(client);
@@ -255,7 +255,7 @@ describe("useSessionDetailController", () => {
 
   it("keeps the previous detail while a revision refresh is pending and reports refresh errors", async () => {
     let rejectRefresh!: (error: unknown) => void;
-    const getSessionDetail = vi.fn(({ expected_data_revision }: Parameters<MiniUsageClient["getSessionDetail"]>[0]) => {
+    const getSessionDetail = vi.fn(({ expected_data_revision }: Parameters<UsagiClient["getSessionDetail"]>[0]) => {
       if (expected_data_revision === 1) return Promise.resolve(detail(1, 111));
       return new Promise<SessionDetailResponse>((_, reject) => {
         rejectRefresh = reject;
@@ -278,7 +278,7 @@ describe("useSessionDetailController", () => {
     expect(result.current.detail?.data_revision).toBe(1);
     expect(result.current.detail?.main.self_usage.total_tokens).toBe(111);
 
-    await act(async () => rejectRefresh(new MiniUsageClientError("HTTP_ERROR", 500)));
+    await act(async () => rejectRefresh(new UsagiClientError("HTTP_ERROR", 500)));
     await waitFor(() => expect(result.current.refresh_error_code).toBe("HTTP_ERROR"));
     expect(result.current.load_state).toBe("ready");
     expect(result.current.error_code).toBeUndefined();
@@ -313,7 +313,7 @@ describe("useSessionDetailController", () => {
 
   it("notifies the Session snapshot after a stale detail error", async () => {
     const onStaleRevision = vi.fn();
-    const client = clientWith({ getSessionDetail: vi.fn(async () => { throw new MiniUsageClientError("STALE_DATA_REVISION", 409); }) });
+    const client = clientWith({ getSessionDetail: vi.fn(async () => { throw new UsagiClientError("STALE_DATA_REVISION", 409); }) });
     const { feed } = sourceAndFeed(client);
     const { result } = renderHook(() => useSessionDetailController({ key: "today" }, filters, { client, revisionFeed: feed, dataRevision: 1, onStaleRevision }));
     await act(async () => result.current.select_session(row));

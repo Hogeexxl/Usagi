@@ -1,4 +1,4 @@
-import type { MiniUsageClient } from "../../data/miniUsageClient";
+import type { UsagiClient } from "../../data/usagiClient";
 import type {
   DashboardFilters,
   DashboardRange,
@@ -36,6 +36,6 @@ export type SessionTableViewModel = {
 };
 
 export type SessionControllerOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
   revisionFeed?: RevisionFeed;
 };

@@ -190,7 +190,7 @@ mod tests {
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "mini-usage-platform-{name}-{}",
+            "usagi-platform-{name}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

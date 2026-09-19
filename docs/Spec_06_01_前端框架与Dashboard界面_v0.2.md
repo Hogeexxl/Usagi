@@ -1,10 +1,10 @@
-# MiniUsage Spec 06-01：前端框架与 Dashboard 界面
+# Usagi Spec 06-01：前端框架与 Dashboard 界面
 
 > 版本：v0.2  
 > 状态：当前契约修订版  
 > 更新日期：2026-08-09  
 > 依赖：`Spec_05_查询API与更新通知_v0.2.md`  
-> 测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`
+> 测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`
 
 ---
 
@@ -36,7 +36,7 @@ frontend/src/
     format.ts
     types.ts
   data/
-    miniUsageClient.ts
+    usagiClient.ts
 ```
 
 `useDashboardController` 是页面状态 seam，对 view 只暴露：
@@ -184,7 +184,7 @@ justify-content: space-between;
 ### 5.2 同步按钮
 
 1. 只在“已成功取得 status、`source_binding_status=ready`、无 requesting、无 active refresh target、无 active scan、无 queued follow-up”时允许点击。此时 `scan_state=idle` 或 `failed` 都可重新同步；`running`、`source_changed` 或 `followup.state=queued` 必须禁用。
-2. 点击后立即进入 `requesting`、禁用按钮，调用 `POST /api/refresh` 并携带 `X-MiniUsage-Request: 1`。
+2. 点击后立即进入 `requesting`、禁用按钮，调用 `POST /api/refresh` 并携带 `X-Usagi-Request: 1`。
 3. `202 started`：保存 `refresh_target={scan_id,kind:started}`；`200 coalesced`：保存 `refresh_target={scan_id,kind:followup}`，该 ID 必须是排队 follow-up，不是当前 active scan。两者均进入“同步中…”，`status_revision` 只用于单调新鲜度，不单独作为完成判据。
 4. 存在 target 时所有 status 请求都携带 `target_scan_id`，只根据 `target_scan.state` 完成它。当前 scan_state、last-finished 投影或单纯 revision 增加都不是 target 终态证据。target 终止后，如 data revision 变化则重取当前 summary。
 5. scan target 执行失败或 follow-up `start_failed`：显示“同步失败”并保留旧 KPI。清除 active target 后，只要 binding ready、无 active/queued 且当前 scan state 为 idle/failed，按钮恢复可点。
@@ -279,7 +279,7 @@ POST 网络中断后前端不猜测是否接受；下一次 status 若看到 act
 
 ## 8. 独立验收标准
 
-> **测试标准唯一来源**：本节只定义 Spec 06-01 的功能与交付完成边界，不再定义测试方案、测试用例、优先级或执行清单。Spec 06-01 的测试条目、P0/P1/P2 分类、Gate、测试代码落点、执行命令及与最终完整测试的关系，**唯一以 `MiniUsage_测试标准_Spec01-06_v0.17.md` 为准**。
+> **测试标准唯一来源**：本节只定义 Spec 06-01 的功能与交付完成边界，不再定义测试方案、测试用例、优先级或执行清单。Spec 06-01 的测试条目、P0/P1/P2 分类、Gate、测试代码落点、执行命令及与最终完整测试的关系，**唯一以 `Usagi_测试标准_Spec01-06_v0.17.md` 为准**。
 >
 > 本 Spec 其他章节中出现的“验证”“测试”“检查”等文字仅属于实施说明或风险提示，不构成独立测试标准；如与上述 v0.17 测试标准存在差异或冲突，以 v0.17 为准。不得以本节勾选项替代 S06-01 Gate。
 
@@ -300,7 +300,7 @@ POST 网络中断后前端不猜测是否接受；下一次 status 若看到 act
 - [ ] `retry_load()` 重试所有当前失败的普通依赖，revision 成功后追平 tuple 且不提前停止 SSE 降级轮询；
 - [ ] 通过 Vite dev server 访问 summary/SSE/refresh 时 Host 和改写后 Origin 均符合 Spec 05；
 - [ ] loading/error/rebuild 不改变布局尺寸，不清空旧稳定 KPI；
-- [ ] 本 Spec 的测试与工程验收已按 `MiniUsage_测试标准_Spec01-06_v0.17.md` 中 S06-01 完成门执行；本节不另设测试清单或通过口径。
+- [ ] 本 Spec 的测试与工程验收已按 `Usagi_测试标准_Spec01-06_v0.17.md` 中 S06-01 完成门执行；本节不另设测试清单或通过口径。
 
 ---
 

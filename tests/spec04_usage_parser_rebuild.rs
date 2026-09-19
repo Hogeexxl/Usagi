@@ -9,15 +9,15 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use usagi::{
     domain::{ScanResult, ScanTrigger},
     range::ResolvedDay,
     scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator},
     storage::{Ledger, LedgerOptions},
     usage::{USAGE_PARSER_VERSION, UsageFilter, UsageLedger, analytics::skills_usage_snapshot},
 };
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
 
 const ROOT: &str = "00000000-03e8-7000-8000-000000000001";
 const CHILD: &str = "00000000-07d0-7000-8000-000000000002";
@@ -37,7 +37,7 @@ impl TempRoot {
             .as_nanos();
         let sequence = TEMP_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "miniusage-mu04-b03-{label}-{}-{stamp}-{sequence}",
+            "usagi-mu04-b03-{label}-{}-{stamp}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create fixture root");
@@ -95,7 +95,7 @@ impl SkillFixture {
         )
     }
 
-    fn scanner(&self, ledger: Arc<Ledger>) -> mini_usage::scanner::ScanHandle {
+    fn scanner(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
         ScanCoordinator::start(
             ScanConfig::new(self.home.clone()),
             ledger,
@@ -136,7 +136,7 @@ impl Fixture {
         )
     }
 
-    fn scanner(&self, ledger: Arc<Ledger>) -> mini_usage::scanner::ScanHandle {
+    fn scanner(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
         ScanCoordinator::start(
             ScanConfig::new(self.home.clone()),
             ledger,
@@ -365,14 +365,14 @@ fn wait_scan(ledger: &Ledger, wanted: Option<&str>) {
     }
 }
 
-fn request_and_wait(handle: &mini_usage::scanner::ScanHandle, ledger: &Ledger) {
+fn request_and_wait(handle: &usagi::scanner::ScanHandle, ledger: &Ledger) {
     let scan_id = loop {
         match handle.request(ScanTrigger::Manual) {
             Ok(RequestDisposition::Started { scan_id, .. }) => break scan_id,
             Ok(RequestDisposition::Coalesced {
                 followup_scan_id, ..
             }) => break followup_scan_id,
-            Err(mini_usage::scanner::ScanRequestError::Recovering) => {
+            Err(usagi::scanner::ScanRequestError::Recovering) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("request scanner round failed: {error:?}"),
@@ -602,7 +602,7 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     assert_eq!(active_events(&connection, initial_epoch), expected_old);
     drop(connection);
 
-    let usage = mini_usage::usage::UsageLedger::new(&ledger);
+    let usage = usagi::usage::UsageLedger::new(&ledger);
     let build = usage
         .begin_rebuild(USAGE_PARSER_VERSION, [main_source_id, child_source_id], 10)
         .expect("begin parser-v5 shadow rebuild");

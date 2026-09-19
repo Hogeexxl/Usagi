@@ -17,7 +17,7 @@ describe("serviceClient", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/api/service/stop",
-      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "X-MiniUsage-Request": "1" }) }),
+      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "X-Usagi-Request": "1" }) }),
     );
   });
 });

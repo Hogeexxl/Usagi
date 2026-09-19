@@ -1,4 +1,4 @@
--- MiniUsage schema version 1.
+-- Usagi schema version 1.
 -- The migration runner executes this file inside a BEGIN IMMEDIATE transaction.
 
 CREATE TABLE app_meta (

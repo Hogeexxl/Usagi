@@ -1,18 +1,18 @@
-# MiniUsage Spec 02：Codex 原始数据与元数据适配
+# Usagi Spec 02：Codex 原始数据与元数据适配
 
 > 版本：v0.2  
 > 状态：修订待实施  
 > 更新日期：2026-08-09  
-> 上游文档：`Spec_01_数据模型和数据库骨架_v0.2.md`、`MiniUsage_Codex本地数据口径_v0.2.md`、`MiniUsage_程序运行机制与数据持久化方案_v0.3.md`  
-> 当前唯一测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`  
-> 真实格式核验基线：2026-08-09 提供的 3 份真实 Codex rollout、`.codex/state_5.sqlite`、MiniUsage `mu.sqlite3`  
+> 上游文档：`Spec_01_数据模型和数据库骨架_v0.2.md`、`Usagi_Codex本地数据口径_v0.2.md`、`Usagi_程序运行机制与数据持久化方案_v0.3.md`  
+> 当前唯一测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`  
+> 真实格式核验基线：2026-08-09 提供的 3 份真实 Codex rollout、`.codex/state_5.sqlite`、Usagi `mu.sqlite3`  
 > 当前版本范围：完整实现 Token 用量；仅 Token 美元费用 `estimated_cost` 占位
 
 ---
 
 ## 1. 文档目标
 
-本 Spec 定义 MiniUsage（下文简称 MU）如何把 Codex 本地来源中的原始结构适配为稳定、规范化、可持久化的 Thread 元数据。
+本 Spec 定义 Usagi（下文简称 MU）如何把 Codex 本地来源中的原始结构适配为稳定、规范化、可持久化的 Thread 元数据。
 
 本 Spec 完成后，项目应具备：
 

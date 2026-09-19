@@ -11,7 +11,10 @@ use axum::{
     http::{Method, Request, StatusCode},
 };
 
-use mini_usage::{
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     domain::{ScanResult, ScanTrigger},
@@ -24,9 +27,6 @@ use mini_usage::{
         CompletionStatus, SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger,
     },
 };
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const ROOT: &str = "00000000-03e8-7000-8000-000000000001";
 const CHILD: &str = "00000000-07d0-7000-8000-000000000002";
@@ -43,7 +43,7 @@ impl TempRoot {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-spec04-{label}-{}-{stamp}",
+            "usagi-spec04-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();
@@ -87,7 +87,7 @@ impl Fixture {
         Arc::new(Ledger::open(LedgerOptions::new(&self.db, &self.home)).unwrap())
     }
 
-    fn start(&self, ledger: Arc<Ledger>) -> mini_usage::scanner::ScanHandle {
+    fn start(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
         ScanCoordinator::start(
             ScanConfig::new(self.home.clone()),
             ledger,
@@ -367,7 +367,7 @@ fn wait_scan(ledger: &Ledger, wanted: Option<&str>) {
     }
 }
 
-fn request_and_wait(handle: &mini_usage::scanner::ScanHandle, ledger: &Ledger) {
+fn request_and_wait(handle: &usagi::scanner::ScanHandle, ledger: &Ledger) {
     let id = match handle.request(ScanTrigger::Manual).unwrap() {
         RequestDisposition::Started { scan_id, .. } => scan_id,
         RequestDisposition::Coalesced {
@@ -422,13 +422,13 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
 
     let usage = UsageLedger::new(&ledger);
     let build = usage
-        .begin_rebuild(mini_usage::usage::USAGE_PARSER_VERSION, [source_id], 10)
+        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 10)
         .unwrap();
     assert_eq!(build.active_epoch, 0);
     assert_eq!(build.build_epoch, 1);
     assert_eq!(
         build.target_parser_version,
-        mini_usage::usage::USAGE_PARSER_VERSION
+        usagi::usage::USAGE_PARSER_VERSION
     );
     assert_eq!(build.members.len(), 1);
     assert_eq!(
@@ -475,7 +475,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_checkpoint_before,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             0,
             "rebuild_required".to_owned()
         )
@@ -502,7 +502,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap();
     assert_eq!(after_scan.0, 1);
     assert!(after_scan.1.is_none());
-    assert_eq!(after_scan.2, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(after_scan.2, usagi::usage::USAGE_PARSER_VERSION);
     assert!(after_scan.3 > 0);
     assert_eq!(
         db.query_row(
@@ -525,7 +525,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         metadata_checkpoint,
         (
-            mini_usage::codex::METADATA_PARSER_VERSION,
+            usagi::codex::METADATA_PARSER_VERSION,
             bytes.len() as i64,
             "ready".to_owned()
         )
@@ -542,7 +542,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         fact_after,
         (
-            mini_usage::codex::METADATA_PARSER_VERSION,
+            usagi::codex::METADATA_PARSER_VERSION,
             Some(ROOT.to_owned()),
             Some("session_meta_parent".to_owned()),
             Some(0),
@@ -576,7 +576,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_checkpoint_after,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             bytes.len() as i64,
             "ready".to_owned()
         )
@@ -602,7 +602,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_state,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             bytes.len() as i64,
             CHILD.to_owned(),
             ROOT.to_owned(),
@@ -783,8 +783,8 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(metadata_parser, mini_usage::codex::METADATA_PARSER_VERSION);
-    assert_eq!(usage_parser, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(metadata_parser, usagi::codex::METADATA_PARSER_VERSION);
+    assert_eq!(usage_parser, usagi::usage::USAGE_PARSER_VERSION);
     drop(db);
     scanner.shutdown().unwrap();
 }
@@ -910,14 +910,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
         .unwrap();
     assert_eq!(
         after,
-        (
-            2,
-            baseline.1,
-            1,
-            1,
-            0,
-            mini_usage::usage::USAGE_PARSER_VERSION,
-        )
+        (2, baseline.1, 1, 1, 0, usagi::usage::USAGE_PARSER_VERSION,)
     );
     assert_eq!(fs::read(&rollout).unwrap(), raw_before);
 
@@ -1025,7 +1018,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
             },
         )
         .unwrap();
-    assert_eq!(initial.1, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(initial.1, usagi::usage::USAGE_PARSER_VERSION);
     assert_eq!((initial.2, initial.3), (1, 4));
     let initial_tokens: i64 = db
         .query_row(
@@ -1075,8 +1068,8 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         metadata_only,
         (
             initial.0,
-            mini_usage::usage::USAGE_PARSER_VERSION,
-            mini_usage::codex::METADATA_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::METADATA_PARSER_VERSION,
         )
     );
     assert_eq!(tokens_after_metadata, initial_tokens);
@@ -1141,7 +1134,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
             Ok(RequestDisposition::Coalesced {
                 followup_scan_id, ..
             }) => break followup_scan_id,
-            Err(mini_usage::scanner::ScanRequestError::Recovering) => {
+            Err(usagi::scanner::ScanRequestError::Recovering) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("usage upgrade scan request failed: {error:?}"),
@@ -1169,9 +1162,9 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         )
         .unwrap();
     assert_ne!(usage_only.0, initial.0);
-    assert_eq!(usage_only.1, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(usage_only.1, usagi::usage::USAGE_PARSER_VERSION);
     assert_eq!((usage_only.2, usage_only.3), (1, 4));
-    assert_eq!(usage_only.4, mini_usage::codex::METADATA_PARSER_VERSION);
+    assert_eq!(usage_only.4, usagi::codex::METADATA_PARSER_VERSION);
     scanner.shutdown().unwrap();
 }
 
@@ -1198,7 +1191,7 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
         [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
     assert_eq!(app.0, 1);
     assert!(app.1.is_none());
-    assert_eq!(app.2, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(app.2, usagi::usage::USAGE_PARSER_VERSION);
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM usage_events WHERE ledger_epoch=1",
@@ -1364,7 +1357,7 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
     let rev_before = ledger.app_state().unwrap().data_revision;
 
     let build = UsageLedger::new(&ledger)
-        .begin_rebuild(mini_usage::usage::USAGE_PARSER_VERSION, [source_id], 100)
+        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 100)
         .unwrap();
     assert_eq!(build.build_epoch, 2);
     let db = Connection::open(&fixture.db).unwrap();
@@ -1596,7 +1589,7 @@ fn t_s04_019_root_unconfirmed_blocks_usage_then_parent_resolution_replays_once()
 
 #[test]
 fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_shadow_build() {
-    use mini_usage::domain::{CheckpointRebuildCommand, ConsumerKind};
+    use usagi::domain::{CheckpointRebuildCommand, ConsumerKind};
 
     let fixture = Fixture::new("bounded-multibatch");
     let mut records = vec![
@@ -1764,7 +1757,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         first_checkpoint,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             initial_offset,
             "ready".to_owned()
         )
@@ -1822,7 +1815,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
 
     let usage = UsageLedger::new(&ledger);
     let build = usage
-        .begin_rebuild(mini_usage::usage::USAGE_PARSER_VERSION, [source_id], 100)
+        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 100)
         .unwrap();
     assert_eq!(build.active_epoch, first_epoch.0);
     assert!(build.build_epoch > build.active_epoch);
@@ -1847,7 +1840,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         rebuild_checkpoint,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             0,
             "rebuild_required".to_owned()
         )
@@ -1888,7 +1881,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         final_checkpoint,
         (
-            mini_usage::usage::USAGE_PARSER_VERSION,
+            usagi::usage::USAGE_PARSER_VERSION,
             final_offset,
             "ready".to_owned()
         )

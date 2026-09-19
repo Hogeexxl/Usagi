@@ -1,4 +1,4 @@
-//! Platform-standard paths used by MiniUsage.
+//! Platform-standard paths used by Usagi.
 
 use std::{
     env, fs, io,
@@ -7,7 +7,8 @@ use std::{
 
 use directories::BaseDirs;
 
-const DATABASE_DIRECTORY: &str = "MiniUsage";
+const DATABASE_DIRECTORY: &str = "Usagi";
+const LEGACY_DATABASE_DIRECTORY: &str = "MiniUsage";
 const DATABASE_FILENAME: &str = "mu.sqlite3";
 
 /// Return the current user's platform home directory.
@@ -22,11 +23,10 @@ pub fn default_codex_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
-/// Resolve the default MiniUsage database path.
+/// Resolve the canonical Usagi database path.
 ///
 /// `BaseDirs::data_local_dir` maps to `~/Library/Application Support` on
-/// macOS and `%LOCALAPPDATA%` on Windows.  The macOS suffix is intentionally
-/// the historical `MiniUsage/mu.sqlite3` path.
+/// macOS and `%LOCALAPPDATA%` on Windows.
 pub fn default_database_path() -> PathBuf {
     let path = BaseDirs::new()
         .map(|dirs| {
@@ -36,6 +36,18 @@ pub fn default_database_path() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from(DATABASE_FILENAME));
     normalize_path(path).unwrap_or_else(|_| PathBuf::from(DATABASE_FILENAME))
+}
+
+/// Resolve the database path used by versions released before the Usagi rename.
+///
+/// This is migration-only compatibility state. New data is never intentionally
+/// created in this location.
+pub(crate) fn legacy_database_path() -> Option<PathBuf> {
+    let path = BaseDirs::new()?
+        .data_local_dir()
+        .join(LEGACY_DATABASE_DIRECTORY)
+        .join(DATABASE_FILENAME);
+    normalize_path(path).ok()
 }
 
 /// Resolve an explicitly supplied or environment-selected Codex home.
@@ -70,7 +82,7 @@ pub fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
     Some(simplify_verbatim_path(lexically_normalize_strict(path)?))
 }
 
-/// Normalize a Codex source path into MiniUsage's one internal identity form.
+/// Normalize a Codex source path into Usagi's one internal identity form.
 /// Existing paths are canonicalized when possible; otherwise a strict lexical
 /// normalization is used. Windows verbatim disk/UNC prefixes are simplified in
 /// both cases so adapters and discovery compare the same representation.
@@ -197,18 +209,18 @@ mod tests {
             path.parent()
                 .and_then(Path::file_name)
                 .and_then(|name| name.to_str()),
-            Some("MiniUsage")
+            Some("Usagi")
         );
         #[cfg(target_os = "macos")]
         assert!(
             path.to_string_lossy()
-                .contains("Library/Application Support/MiniUsage")
+                .contains("Library/Application Support/Usagi")
         );
     }
 
     #[test]
     fn t_dist_002_explicit_env_default_precedence_and_empty_env() {
-        assert_eq!(non_empty_env_path("MINIUSAGE_TEST_MISSING"), None);
+        assert_eq!(non_empty_env_path("USAGI_TEST_MISSING"), None);
         let explicit = PathBuf::from(if cfg!(windows) {
             r"C:\用户\.codex"
         } else {
@@ -236,9 +248,9 @@ mod tests {
     #[test]
     fn t_dist_002_unicode_and_parent_components_are_preserved() {
         let path = PathBuf::from(if cfg!(windows) {
-            r"C:\用户\MiniUsage\..\Codex"
+            r"C:\用户\Usagi\..\Codex"
         } else {
-            "/tmp/用户/MiniUsage/../Codex"
+            "/tmp/用户/Usagi/../Codex"
         });
         let normalized = normalize_absolute_path(&path).expect("absolute path");
         assert!(normalized.to_string_lossy().contains("用户"));

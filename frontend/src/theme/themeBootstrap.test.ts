@@ -72,7 +72,7 @@ function testStorage(): Storage {
 function runBootstrap(stored: string | null, storageReadable = true) {
   testStorage().clear();
   document.documentElement.classList.remove("dark");
-  if (stored !== null) testStorage().setItem("miniusage.theme", stored);
+  if (stored !== null) testStorage().setItem("usagi.theme", stored);
   const getItem = storageReadable
     ? null
     : vi.spyOn(Object.getPrototypeOf(testStorage()), "getItem").mockImplementation(() => {
@@ -101,7 +101,7 @@ describe("Theme first-paint bootstrap", () => {
   });
 
   it("executes the inline theme bootstrap before the app root and module", () => {
-    const bootstrapAt = html.indexOf("window.localStorage.getItem(\"miniusage.theme\")");
+    const bootstrapAt = html.indexOf("window.localStorage.getItem(\"usagi.theme\")");
     const rootAt = html.indexOf('<div id="root"></div>');
     const moduleAt = html.indexOf('<script type="module" src="/src/main.tsx"></script>');
     expect(bootstrapAt).toBeGreaterThan(-1);

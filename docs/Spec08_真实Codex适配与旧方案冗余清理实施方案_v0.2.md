@@ -1,13 +1,13 @@
 # Spec08 真实 Codex 适配与旧方案冗余清理实施方案
 
 - 文档版本：v0.2
-- 源码基线：`MiniUsage-1992404`
+- 源码基线：`Usagi-1992404`
 - 依据：
   - `Spec_02_Codex原始数据与元数据适配_v0.2.md`
-  - `MiniUsage_测试标准_Spec01-06_v0.17.md`
+  - `Usagi_测试标准_Spec01-06_v0.17.md`
   - `normalizedTokenUsage数据口径.md`
   - `codex rollout数据口径.md`
-  - `MiniUsage_旧方案与旧测试冗余代码审计.md`
+  - `Usagi_旧方案与旧测试冗余代码审计.md`
   - 3 份真实 rollout + `.codex/state_5.sqlite` + 故障 `mu.sqlite3`
 - 改造性质：**替换式改造**
 - 禁止：旧 runtime fallback、dual-read、dual-write、compat alias、为了旧测试继续保留 reference implementation
@@ -83,10 +83,10 @@ payload.parent_thread_id 解析失败后静默退回一个伪 parent
 在开始代码修改前：
 
 1. 将已验收 `Spec02 v0.2` 放入 active docs；
-2. 将 `MiniUsage_测试标准_Spec01-06_v0.17.md` 作为唯一 active 测试标准；
+2. 将 `Usagi_测试标准_Spec01-06_v0.17.md` 作为唯一 active 测试标准；
 3. 删除 active：
    ```text
-   MiniUsage_测试标准_数据口径改造.md
+   Usagi_测试标准_数据口径改造.md
    ```
 4. `v0.15` 移出 active 目录；如要保留，放 `docs/archive/`；
 5. Spec06-01、Spec06-02 必须只引用 v0.17；不得保留 v0.15/v0.16 active 引用；
@@ -483,7 +483,7 @@ API contract tests 同步。
 frontend/src/data/types.ts
   last_full_import_completed_at_ms
 
-miniUsageClient.ts 对该字段 parser
+usagiClient.ts 对该字段 parser
 相关 fixtures/tests
 ```
 
@@ -859,7 +859,7 @@ old parser 不可 carry into current build
 唯一标准：
 
 ```text
-MiniUsage_测试标准_Spec01-06_v0.17.md
+Usagi_测试标准_Spec01-06_v0.17.md
 ```
 
 本方案执行过程中不得再创建第二份专项测试标准；若实施导致契约再次变化，只能修订统一标准并升版本。
@@ -1006,8 +1006,8 @@ forked_from_id
 active docs 中：
 
 ```text
-MiniUsage_测试标准_Spec01-06_v0.15.md
-MiniUsage_测试标准_数据口径改造.md
+Usagi_测试标准_Spec01-06_v0.15.md
+Usagi_测试标准_数据口径改造.md
 ```
 
 不得继续作为测试来源。

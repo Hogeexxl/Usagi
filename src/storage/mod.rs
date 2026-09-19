@@ -1,4 +1,4 @@
-//! SQLite storage bootstrap for MiniUsage.
+//! SQLite storage bootstrap for Usagi.
 //!
 //! This module owns the connection, PRAGMA setup, schema migration, source
 //! observation/checkpoint writes, metadata commits, scan lifecycle, and the
@@ -15,7 +15,7 @@ use crate::domain::{
     DomainError, FollowupState, ScanLifecycleState, ScanResult, ScanState, ScanTrigger,
 };
 use crate::platform::paths;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
@@ -249,11 +249,90 @@ impl From<rusqlite::Error> for StorageError {
     }
 }
 
+fn usage_event_count(path: &Path) -> Result<i64> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(classify_sqlite)?;
+    let table_exists: i64 = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'usage_events'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(classify_sqlite)?;
+    if table_exists == 0 {
+        return Ok(0);
+    }
+    connection
+        .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
+        .map_err(classify_sqlite)
+}
+
+fn migrate_legacy_database_if_needed(current: &Path, legacy: &Path) -> Result<()> {
+    if current == legacy || !legacy.is_file() {
+        return Ok(());
+    }
+
+    let should_migrate = if !current.is_file() {
+        true
+    } else {
+        usage_event_count(current)? == 0 && usage_event_count(legacy)? > 0
+    };
+    if !should_migrate {
+        return Ok(());
+    }
+
+    let current_dir = current.parent().ok_or_else(|| {
+        StorageError::invalid_state("canonical database path has no parent directory")
+    })?;
+    let legacy_dir = legacy.parent().ok_or_else(|| {
+        StorageError::invalid_state("legacy database path has no parent directory")
+    })?;
+    if current_dir == legacy_dir {
+        return Ok(());
+    }
+
+    if !current_dir.exists() {
+        fs::rename(legacy_dir, current_dir)?;
+        return Ok(());
+    }
+
+    let backup_dir = current_dir.with_file_name(format!(
+        ".usagi-empty-before-legacy-migration-{}-{}",
+        std::process::id(),
+        current_time_ms()
+    ));
+    fs::rename(current_dir, &backup_dir)?;
+    match fs::rename(legacy_dir, current_dir) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(backup_dir);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::rename(&backup_dir, current_dir);
+            Err(StorageError::from(error))
+        }
+    }
+}
+
+fn default_database_path_with_legacy_migration() -> Result<PathBuf> {
+    let current = paths::default_database_path();
+    if let Some(legacy) = paths::legacy_database_path() {
+        migrate_legacy_database_if_needed(&current, &legacy)?;
+    }
+    Ok(current)
+}
+
 /// Values used when opening a Ledger.
 #[derive(Debug, Clone, Default)]
 pub struct LedgerOptions {
     /// Optional path to `mu.sqlite3`.  If omitted, the platform default is
-    /// used (`~/Library/Application Support/MiniUsage/mu.sqlite3` on macOS and
+    /// used (`~/Library/Application Support/Usagi/mu.sqlite3` on macOS and
     /// the platform local application-data directory on Windows).
     pub db_path: Option<PathBuf>,
     /// Optional Codex home to bind. If omitted, `CODEX_HOME` or the platform
@@ -295,7 +374,7 @@ impl LedgerOptions {
         self.db_path
             .clone()
             .map(|path| paths::normalize_path(path).map_err(StorageError::from))
-            .unwrap_or_else(|| Ok(paths::default_database_path()))
+            .unwrap_or_else(default_database_path_with_legacy_migration)
     }
 
     pub fn codex_home_path(&self) -> Result<PathBuf> {
@@ -818,7 +897,10 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::{Ledger, LedgerOptions, PragmaState, SourceBindingStatus, StorageErrorKind};
+    use super::{
+        Ledger, LedgerOptions, PragmaState, SourceBindingStatus, StorageErrorKind,
+        migrate_legacy_database_if_needed, usage_event_count,
+    };
     use crate::domain::{AppState, FollowupState, ScanTrigger};
 
     struct TempDir(PathBuf);
@@ -829,7 +911,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("mini-usage-storage-{unique}"));
+            let path = std::env::temp_dir().join(format!("usagi-storage-{unique}"));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -850,6 +932,70 @@ mod tests {
             root.path().join("nested/db/mu.sqlite3"),
             root.path().join("codex"),
         )
+    }
+
+    fn seed_usage_database(path: &Path, rows: usize) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE usage_events (event_id TEXT PRIMARY KEY);")
+            .unwrap();
+        for index in 0..rows {
+            connection
+                .execute(
+                    "INSERT INTO usage_events(event_id) VALUES (?1)",
+                    [format!("event-{index}")],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn rename_migration_moves_legacy_directory_when_new_database_is_missing() {
+        let root = TempDir::new();
+        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
+        let current = root.path().join("Usagi").join("mu.sqlite3");
+        seed_usage_database(&legacy, 2);
+        fs::write(legacy.parent().unwrap().join("sidecar-state"), b"keep").unwrap();
+
+        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
+
+        assert_eq!(usage_event_count(&current).unwrap(), 2);
+        assert_eq!(
+            fs::read(current.parent().unwrap().join("sidecar-state")).unwrap(),
+            b"keep"
+        );
+        assert!(!legacy.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn rename_migration_replaces_empty_database_created_by_broken_rename_build() {
+        let root = TempDir::new();
+        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
+        let current = root.path().join("Usagi").join("mu.sqlite3");
+        seed_usage_database(&legacy, 3);
+        seed_usage_database(&current, 0);
+
+        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
+
+        assert_eq!(usage_event_count(&current).unwrap(), 3);
+        assert!(!legacy.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn rename_migration_never_overwrites_nonempty_usagi_database() {
+        let root = TempDir::new();
+        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
+        let current = root.path().join("Usagi").join("mu.sqlite3");
+        seed_usage_database(&legacy, 3);
+        seed_usage_database(&current, 1);
+
+        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
+
+        assert_eq!(usage_event_count(&current).unwrap(), 1);
+        assert_eq!(usage_event_count(&legacy).unwrap(), 3);
     }
 
     #[test]
@@ -1050,7 +1196,7 @@ mod tests {
                 "INSERT INTO source_files(
                     source_file_id,thread_id,current_path,source_area,device_id,inode,
                     file_generation,observed_size,observed_mtime_ns,file_status,last_seen_at_ms
-                 ) VALUES (1,'cost-root','/tmp/mini-usage-cost.jsonl','sessions',1,1,1,100,0,'present',0)",
+                 ) VALUES (1,'cost-root','/tmp/usagi-cost.jsonl','sessions',1,1,1,100,0,'present',0)",
                 [],
             )
             .unwrap();

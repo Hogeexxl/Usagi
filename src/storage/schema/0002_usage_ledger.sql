@@ -1,4 +1,4 @@
--- MiniUsage schema version 2: Token usage ledger foundations.
+-- Usagi schema version 2: Token usage ledger foundations.
 -- The migration runner executes this file and PRAGMA user_version in one
 -- BEGIN IMMEDIATE transaction.
 

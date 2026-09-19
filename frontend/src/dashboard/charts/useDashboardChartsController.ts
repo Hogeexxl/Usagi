@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { miniUsageClient, dashboardQueryKey, type MiniUsageClient } from "../../data/miniUsageClient";
+import { usagiClient, dashboardQueryKey, type UsagiClient } from "../../data/usagiClient";
 import type { DashboardFilters, DashboardRange, ModelDistributionResponse, ProjectDistributionResponse, SkillsUsageResponse } from "../../data/types";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "../scope";
 
@@ -15,9 +15,9 @@ export function useDashboardChartsController(args: {
   range: DashboardRange;
   filters: DashboardFilters;
   dataRevision: number;
-  client?: MiniUsageClient;
+  client?: UsagiClient;
 }): DashboardChartsView {
-  const client = args.client ?? miniUsageClient;
+  const client = args.client ?? usagiClient;
   const filterKey = useMemo(() => dashboardQueryKey(args.range, args.filters), [args.range, args.filters]);
   const [view, setView] = useState<DashboardChartsView>({ models: null, projects: null, skills: null, loading: true, error: false });
   useEffect(() => {

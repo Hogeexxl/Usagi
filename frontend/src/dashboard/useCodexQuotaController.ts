@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { miniUsageClient, type MiniUsageClient } from "../data/miniUsageClient";
+import { usagiClient, type UsagiClient } from "../data/usagiClient";
 import type { CodexQuotaResponse } from "../data/types";
 
 const LOADING_RETRY_DELAY_MS = 1_000;
@@ -31,11 +31,11 @@ function unavailableSnapshot(): CodexQuotaResponse {
 }
 
 export type CodexQuotaControllerOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
 };
 
 export function useCodexQuotaController(options: CodexQuotaControllerOptions = {}): CodexQuotaResponse {
-  const client = options.client ?? miniUsageClient;
+  const client = options.client ?? usagiClient;
   const [snapshot, setSnapshot] = useState<CodexQuotaResponse>(loadingSnapshot);
   const snapshotRef = useRef(snapshot);
   const requestRef = useRef<AbortController | null>(null);

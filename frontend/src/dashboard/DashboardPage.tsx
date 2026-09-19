@@ -73,7 +73,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
         <div className="flex flex-col gap-8">
           <header className="dashboard-header">
             <div className="flex min-w-0 items-center gap-3">
-              <h1 className="text-foreground">MiniUsage</h1>
+              <h1 className="text-foreground">Usagi</h1>
               <UpdateButton client={options?.client} />
             </div>
             <div className="dashboard-sync-group">

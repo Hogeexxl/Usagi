@@ -257,7 +257,7 @@ impl ScanCoordinator {
         let loop_commands = commands.clone();
         let loop_availability = Arc::clone(&availability);
         thread::Builder::new()
-            .name("miniusage-scan-coordinator".to_owned())
+            .name("usagi-scan-coordinator".to_owned())
             .spawn(move || {
                 EventLoop::new(
                     config,
@@ -549,7 +549,7 @@ impl EventLoop {
         let commands = self.commands.clone();
         let worker_scan_id = scan_id.clone();
         thread::Builder::new()
-            .name("miniusage-scan-worker".to_owned())
+            .name("usagi-scan-worker".to_owned())
             .spawn(move || {
                 let result = worker.run(&worker_scan_id, &worker_cancel);
                 let _ = commands.send(Command::WorkerFinished {
@@ -853,7 +853,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "miniusage-coordinator-{label}-{}-{}",
+                "usagi-coordinator-{label}-{}-{}",
                 now_ms(),
                 NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed)
             ));

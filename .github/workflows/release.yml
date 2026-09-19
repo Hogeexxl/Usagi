@@ -40,9 +40,9 @@ jobs:
         shell: pwsh
         run: |
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $package = @($metadata.packages) | Where-Object { $_.name -eq 'mini-usage' } | Select-Object -First 1
+          $package = @($metadata.packages) | Where-Object { $_.name -eq 'usagi' } | Select-Object -First 1
           if ($null -eq $package) {
-            throw 'Cargo package mini-usage was not found'
+            throw 'Cargo package usagi was not found'
           }
           $tag = [string]$env:GITHUB_REF_NAME
           $tagMatch = [regex]::Match($tag, '^v(?<base>\d+\.\d+\.\d+)(?<suffix>-rc\.\d+)?$')
@@ -97,7 +97,7 @@ jobs:
       - name: Inspect Windows PE imports and GUI subsystem
         shell: pwsh
         run: |
-          $binary = Join-Path $env:GITHUB_WORKSPACE 'target/release/mini-usage.exe'
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'target/release/usagi.exe'
           if (-not (Test-Path $binary)) {
             throw "release binary not found: $binary"
           }
@@ -118,13 +118,13 @@ jobs:
             throw "Static CRT guard found a Visual C++ runtime dependency:`n$imports"
           }
           if ($headers -notmatch '(?im)(Windows GUI|IMAGE_SUBSYSTEM_WINDOWS_GUI|\b2\s+subsystem\s+\(Windows GUI\))') {
-            throw "MiniUsage must be a GUI-subsystem executable:`n$headers"
+            throw "Usagi must be a GUI-subsystem executable:`n$headers"
           }
           if ($headers -notmatch '(?im)(machine\s+\(x64\)|IMAGE_FILE_MACHINE_AMD64|COFF-x86-64|\b866\b)') {
-            throw "MiniUsage release binary must be an x64 PE image:`n$headers"
+            throw "Usagi release binary must be an x64 PE image:`n$headers"
           }
           if ($headers -notmatch '(?im)(PE32\+|IMAGE_NT_OPTIONAL_HDR64_MAGIC|Magic:\s*0x20B\b)') {
-            throw "MiniUsage release binary must use the PE32+ optional header:`n$headers"
+            throw "Usagi release binary must use the PE32+ optional header:`n$headers"
           }
 
       - name: Install pinned cargo-packager
@@ -139,11 +139,11 @@ jobs:
           if ($generated.Count -ne 1) {
             throw "Expected exactly one NSIS installer, found $($generated.Count)"
           }
-          $expectedPackagerName = "mini-usage_$($env:CARGO_VERSION)_x64-setup.exe"
+          $expectedPackagerName = "usagi_$($env:CARGO_VERSION)_x64-setup.exe"
           if ($generated[0].Name -cne $expectedPackagerName) {
             throw "Expected cargo-packager NSIS basename $expectedPackagerName (Cargo base $env:CARGO_VERSION; final tag $env:TAG_VERSION), got $($generated[0].Name)"
           }
-          $asset = Join-Path $env:GITHUB_WORKSPACE "target/release/MiniUsage-v$env:TAG_VERSION-windows-x64-setup.exe"
+          $asset = Join-Path $env:GITHUB_WORKSPACE "target/release/Usagi-v$env:TAG_VERSION-windows-x64-setup.exe"
           Move-Item -LiteralPath $generated[0].FullName -Destination $asset -Force
           if (-not (Test-Path $asset)) {
             throw "Expected Windows asset was not created: $asset"
@@ -158,7 +158,7 @@ jobs:
         with:
           name: windows-installer
           if-no-files-found: error
-          path: target/release/MiniUsage-v${{ steps.version.outputs.version }}-windows-x64-setup.exe
+          path: target/release/Usagi-v${{ steps.version.outputs.version }}-windows-x64-setup.exe
 
   macos:
     name: macOS arm64 release
@@ -188,7 +188,7 @@ jobs:
         run: |
           set -euo pipefail
           metadata="$(cargo metadata --no-deps --format-version 1)"
-          cargo_version="$(printf '%s' "$metadata" | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "mini-usage"))')"
+          cargo_version="$(printf '%s' "$metadata" | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "usagi"))')"
           if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc\.[0-9]+)?$ ]]; then
             echo "Release tag must match vX.Y.Z or vX.Y.Z-rc.N, got $GITHUB_REF_NAME" >&2
             exit 1
@@ -232,8 +232,8 @@ jobs:
 
       - name: Inspect arm64 release binary
         run: |
-          file target/release/mini-usage
-          file target/release/mini-usage | grep -Eq 'arm64|aarch64'
+          file target/release/usagi
+          file target/release/usagi | grep -Eq 'arm64|aarch64'
 
       - name: Install pinned cargo-packager
         run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
@@ -250,11 +250,11 @@ jobs:
             exit 1
           fi
           generated_name="$(basename "${generated[0]}")"
-          if [[ "$generated_name" != "MiniUsage_${CARGO_VERSION}_aarch64.dmg" && "$generated_name" != "MiniUsage_${CARGO_VERSION}_arm64.dmg" ]]; then
-            echo "Expected cargo-packager DMG basename MiniUsage_${CARGO_VERSION}_{aarch64|arm64}.dmg (final tag ${TAG_VERSION}), got $generated_name" >&2
+          if [[ "$generated_name" != "Usagi_${CARGO_VERSION}_aarch64.dmg" && "$generated_name" != "Usagi_${CARGO_VERSION}_arm64.dmg" ]]; then
+            echo "Expected cargo-packager DMG basename Usagi_${CARGO_VERSION}_{aarch64|arm64}.dmg (final tag ${TAG_VERSION}), got $generated_name" >&2
             exit 1
           fi
-          asset="target/release/MiniUsage-v${TAG_VERSION}-macos-arm64.dmg"
+          asset="target/release/Usagi-v${TAG_VERSION}-macos-arm64.dmg"
           mv "${generated[0]}" "$asset"
           test -f "$asset"
 
@@ -262,8 +262,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="target/release/MiniUsage-v${TAG_VERSION}-macos-arm64.dmg"
-          runtime_root="$RUNNER_TEMP/miniusage-runtime"
+          asset="target/release/Usagi-v${TAG_VERSION}-macos-arm64.dmg"
+          runtime_root="$RUNNER_TEMP/usagi-runtime"
           home="$runtime_root/home"
           codex_home="$runtime_root/codex-home"
           mkdir -p "$home" "$codex_home" "$runtime_root/tmp"
@@ -330,15 +330,15 @@ jobs:
             exit 1
           fi
           app="${apps[0]}"
-          file "$app/Contents/MacOS/mini-usage" | grep -Eq 'arm64|aarch64'
+          file "$app/Contents/MacOS/usagi" | grep -Eq 'arm64|aarch64'
           if find "$app" -type d -name frontend -print -quit | grep -q .; then
             echo 'DMG app unexpectedly contains a frontend directory' >&2
             exit 1
           fi
-          app_copy="$runtime_root/MiniUsage.app"
+          app_copy="$runtime_root/Usagi.app"
           ditto "$app" "$app_copy"
           cd "$runtime_root"
-          HOME="$home" CODEX_HOME="$codex_home" TMPDIR="$runtime_root/tmp" MINIUSAGE_DISABLE_BROWSER=1 PATH="/usr/bin:/bin" "$app_copy/Contents/MacOS/mini-usage" >"$runtime_root/stdout.log" 2>"$runtime_root/stderr.log" &
+          HOME="$home" CODEX_HOME="$codex_home" TMPDIR="$runtime_root/tmp" USAGI_DISABLE_BROWSER=1 PATH="/usr/bin:/bin" "$app_copy/Contents/MacOS/usagi" >"$runtime_root/stdout.log" 2>"$runtime_root/stderr.log" &
           pid=$!
           healthy=0
           expected_binary_version="$CARGO_VERSION"
@@ -346,7 +346,7 @@ jobs:
           for _ in $(seq 1 120); do
             status="$(curl --silent --output /dev/null --show-error --dump-header "$health_headers" --write-out '%{http_code}' http://127.0.0.1:3210/api/health || true)"
             tr -d '\r' < "$health_headers" > "$runtime_root/health.headers.normalized" 2>/dev/null || true
-            if [[ "$status" == '204' ]] && grep -Eiq '^X-MiniUsage-App:[[:space:]]*MiniUsage$' "$runtime_root/health.headers.normalized" && grep -Eiq "^X-MiniUsage-Version:[[:space:]]*$expected_binary_version$" "$runtime_root/health.headers.normalized"; then
+            if [[ "$status" == '204' ]] && grep -Eiq '^X-Usagi-App:[[:space:]]*Usagi$' "$runtime_root/health.headers.normalized" && grep -Eiq "^X-Usagi-Version:[[:space:]]*$expected_binary_version$" "$runtime_root/health.headers.normalized"; then
               healthy=1
               break
             fi
@@ -361,7 +361,7 @@ jobs:
             echo "Configured CODEX_HOME is not an existing readable directory: $codex_home" >&2
             exit 1
           fi
-          database_dir="$home/Library/Application Support/MiniUsage"
+          database_dir="$home/Library/Application Support/Usagi"
           database_path="$database_dir/mu.sqlite3"
           if [[ ! -d "$database_dir" || ! -f "$database_path" || ! -r "$database_path" ]]; then
             echo "Installed macOS runtime did not create its default database at $database_path" >&2
@@ -450,7 +450,7 @@ jobs:
         with:
           name: macos-dmg
           if-no-files-found: error
-          path: target/release/MiniUsage-v${{ steps.version.outputs.version }}-macos-arm64.dmg
+          path: target/release/Usagi-v${{ steps.version.outputs.version }}-macos-arm64.dmg
 
   release:
     name: Publish GitHub Release
@@ -475,7 +475,7 @@ jobs:
         run: |
           set -euo pipefail
           metadata="$(cargo metadata --no-deps --format-version 1)"
-          cargo_version="$(printf '%s' "$metadata" | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "mini-usage"))')"
+          cargo_version="$(printf '%s' "$metadata" | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "usagi"))')"
           if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc\.[0-9]+)?$ ]]; then
             echo "Release tag must match vX.Y.Z or vX.Y.Z-rc.N, got $GITHUB_REF_NAME" >&2
             exit 1
@@ -520,8 +520,8 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          windows_name="MiniUsage-v${version}-windows-x64-setup.exe"
-          macos_name="MiniUsage-v${version}-macos-arm64.dmg"
+          windows_name="Usagi-v${version}-windows-x64-setup.exe"
+          macos_name="Usagi-v${version}-macos-arm64.dmg"
           windows_path="$(find staging/windows -type f -name "$windows_name" -print -quit)"
           macos_path="$(find staging/macos -type f -name "$macos_name" -print -quit)"
           [[ -n "$windows_path" && -n "$macos_path" ]]
@@ -549,10 +549,10 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
-            "release-assets/MiniUsage-v${version}-windows-x64-setup.exe" \
-            "release-assets/MiniUsage-v${version}-macos-arm64.dmg" \
+            "release-assets/Usagi-v${version}-windows-x64-setup.exe" \
+            "release-assets/Usagi-v${version}-macos-arm64.dmg" \
             release-assets/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
-            --title "MiniUsage $GITHUB_REF_NAME" \
+            --title "Usagi $GITHUB_REF_NAME" \
             --generate-notes \
             "${release_args[@]}"

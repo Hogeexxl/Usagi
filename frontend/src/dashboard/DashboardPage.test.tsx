@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { MiniUsageClient } from "../data/miniUsageClient";
-import { MiniUsageClientError, type ApiErrorCode, type CodexQuotaResponse, type StatusResponse } from "../data/types";
+import type { UsagiClient } from "../data/usagiClient";
+import { UsagiClientError, type ApiErrorCode, type CodexQuotaResponse, type StatusResponse } from "../data/types";
 import { ThemeProvider } from "../theme/ThemeProvider";
 import { DashboardPage } from "./DashboardPage";
 import { useCodexQuotaController } from "./useCodexQuotaController";
@@ -86,7 +86,7 @@ const quotaReady: CodexQuotaResponse = {
 
 const offsetHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 
-function fakeClient(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
+function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
     filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
     summary: vi.fn(async (range) => (range.key === "today" ? summary("today") : summary("yesterday"))),
@@ -166,7 +166,7 @@ function QuotaProbe({
   project = "",
   revision = 0,
 }: {
-  client: MiniUsageClient;
+  client: UsagiClient;
   range?: string;
   model?: string;
   project?: string;
@@ -249,7 +249,7 @@ describe("DashboardPage v0.2.1", () => {
       const rendered = render(<QuotaProbe client={client} range="today" model="" project="" revision={1} />);
       await flushQuotaPromises();
       expect(codexQuota).toHaveBeenCalledTimes(1);
-      rendered.rerender(<QuotaProbe client={client} range="30d" model="gpt-5" project="MiniUsage" revision={99} />);
+      rendered.rerender(<QuotaProbe client={client} range="30d" model="gpt-5" project="Usagi" revision={99} />);
       expect(codexQuota).toHaveBeenCalledTimes(1);
       rendered.unmount();
     } finally {
@@ -432,7 +432,7 @@ describe("DashboardPage v0.2.1", () => {
     const main = document.querySelector("main.dashboard-content");
     expect(main).toBeInTheDocument();
     expect(main?.firstElementChild).toHaveClass("flex", "flex-col", "gap-8");
-    expect(screen.getByRole("heading", { name: "MiniUsage" })).toHaveClass("text-foreground");
+    expect(screen.getByRole("heading", { name: "Usagi" })).toHaveClass("text-foreground");
 
     const sync = screen.getByRole("button", { name: "同步数据" });
     const stop = screen.getByRole("button", { name: "停止服务" });
@@ -468,7 +468,7 @@ describe("DashboardPage v0.2.1", () => {
   ])("maps refresh HTTP errors %s/%s to %s", async (statusCode, code, message) => {
     const client = fakeClient({
       refresh: vi.fn(async () => {
-        throw new MiniUsageClientError(code as ApiErrorCode, statusCode);
+        throw new UsagiClientError(code as ApiErrorCode, statusCode);
       }),
     });
     renderWithTheme(<DashboardPage options={{ client, eventSourceFactory: () => fakeEvents() }} />);

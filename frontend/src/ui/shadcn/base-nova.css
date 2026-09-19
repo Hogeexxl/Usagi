@@ -83,7 +83,7 @@
   @apply data-[side=inline-start]:slide-in-from-right-2 data-[side=inline-end]:slide-in-from-left-2;
 }
 
-/* MiniUsage-local calendar color adaptation. Keep Base UI calendar structure/logic unchanged. */
+/* Usagi-local calendar color adaptation. Keep Base UI calendar structure/logic unchanged. */
 .cn-calendar-popover {
   background-color: var(--background);
   color: var(--foreground);

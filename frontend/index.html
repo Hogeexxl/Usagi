@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MiniUsage</title>
+    <title>Usagi</title>
     <script>
       (() => {
         let theme = "dark";
         try {
-          const stored = window.localStorage.getItem("miniusage.theme");
+          const stored = window.localStorage.getItem("usagi.theme");
           if (stored === "dark" || stored === "light") theme = stored;
         } catch {}
         document.documentElement.classList.toggle("dark", theme === "dark");

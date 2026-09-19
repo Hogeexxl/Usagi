@@ -4204,7 +4204,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
-                "mini-usage-storage-usage-{}-{}",
+                "usagi-storage-usage-{}-{}",
                 std::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
             ));

@@ -1,4 +1,4 @@
-import { canonicalDashboardFilters } from "../data/miniUsageClient";
+import { canonicalDashboardFilters } from "../data/usagiClient";
 import type { DashboardFilters, DashboardRange } from "../data/types";
 
 export type RangePolicy = { kind: "dashboard" } | { kind: "fixed"; range: DashboardRange };

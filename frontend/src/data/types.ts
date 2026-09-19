@@ -314,13 +314,13 @@ export type ApiErrorCode =
   | "INTERNAL_ERROR"
   | "HTTP_ERROR";
 
-export class MiniUsageClientError extends Error {
+export class UsagiClientError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number;
 
   constructor(code: ApiErrorCode, status: number) {
     super(code);
-    this.name = "MiniUsageClientError";
+    this.name = "UsagiClientError";
     this.code = code;
     this.status = status;
   }

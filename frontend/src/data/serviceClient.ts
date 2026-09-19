@@ -1,4 +1,4 @@
-import { MiniUsageClientError } from "./types";
+import { UsagiClientError } from "./types";
 
 export type ServiceState = "running" | "stopped";
 
@@ -9,11 +9,11 @@ export type ServiceClient = {
 
 function parseState(value: unknown, status: number): ServiceState {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new MiniUsageClientError("HTTP_ERROR", status);
+    throw new UsagiClientError("HTTP_ERROR", status);
   }
   const state = (value as Record<string, unknown>).state;
   if (state !== "running" && state !== "stopped") {
-    throw new MiniUsageClientError("HTTP_ERROR", status);
+    throw new UsagiClientError("HTTP_ERROR", status);
   }
   return state;
 }
@@ -24,18 +24,18 @@ async function request(path: string, method: "GET" | "POST", signal?: AbortSigna
     response = await fetch(path, {
       method,
       signal,
-      headers: method === "POST" ? { Accept: "application/json", "X-MiniUsage-Request": "1" } : { Accept: "application/json" },
+      headers: method === "POST" ? { Accept: "application/json", "X-Usagi-Request": "1" } : { Accept: "application/json" },
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new MiniUsageClientError("HTTP_ERROR", 0);
+    throw new UsagiClientError("HTTP_ERROR", 0);
   }
-  if (!response.ok) throw new MiniUsageClientError("HTTP_ERROR", response.status);
+  if (!response.ok) throw new UsagiClientError("HTTP_ERROR", response.status);
   try {
     return parseState(await response.json(), response.status);
   } catch (error) {
-    if (error instanceof MiniUsageClientError) throw error;
-    throw new MiniUsageClientError("HTTP_ERROR", response.status);
+    if (error instanceof UsagiClientError) throw error;
+    throw new UsagiClientError("HTTP_ERROR", response.status);
   }
 }
 

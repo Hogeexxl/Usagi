@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 
 import {
-  miniUsageClient,
+  usagiClient,
   canonicalDashboardFilters,
   dashboardRangeKey,
   dashboardRangesEqual,
   dashboardQueryKey,
-  type MiniUsageClient,
-} from "../data/miniUsageClient";
+  type UsagiClient,
+} from "../data/usagiClient";
 import { createRevisionFeed, type RevisionEventSource, type RevisionFeed } from "../data/revisionFeed";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "./scope";
 import {
@@ -18,7 +18,7 @@ import {
   type SummaryResponse,
   type DashboardFilters,
   type FilterOptionsResponse,
-  MiniUsageClientError,
+  UsagiClientError,
 } from "../data/types";
 
 export type LoadState = "initial" | "loading" | "ready" | "error";
@@ -79,7 +79,7 @@ type InternalState = {
 };
 
 export type DashboardControllerOptions = {
-  client?: MiniUsageClient;
+  client?: UsagiClient;
   eventSourceFactory?: (url: string) => RevisionEventSource;
   pollIntervalMs?: number;
   revisionFeed?: RevisionFeed;
@@ -94,11 +94,11 @@ function isAbortError(error: unknown): boolean {
 }
 
 function clientErrorCode(error: unknown): string {
-  return error instanceof MiniUsageClientError ? error.code : "HTTP_ERROR";
+  return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
 
 function clientErrorStatus(error: unknown): number {
-  return error instanceof MiniUsageClientError ? error.status : 0;
+  return error instanceof UsagiClientError ? error.status : 0;
 }
 
 function setFailure(ref: MutableRefObject<FailureFlags>, key: keyof FailureFlags, value: boolean) {
@@ -106,7 +106,7 @@ function setFailure(ref: MutableRefObject<FailureFlags>, key: keyof FailureFlags
 }
 
 export function useDashboardController(options: DashboardControllerOptions = {}): DashboardViewModel {
-  const client = options.client ?? miniUsageClient;
+  const client = options.client ?? usagiClient;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL;
   const ownedRevisionFeedRef = useRef<RevisionFeed | null>(null);
   const revisionFeedRef = useRef<RevisionFeed | null>(null);

@@ -61,8 +61,8 @@ function session(id: string, title: string, lastActivity: number, combinedCost: 
   return {
     root_session_id: id,
     title,
-    project_name: "MiniUsage",
-    project_path: "/work/MiniUsage",
+    project_name: "Usagi",
+    project_path: "/work/Usagi",
     last_activity_at_ms: lastActivity,
     models_used: ["gpt-5", "o4-mini"],
     subagent_count: 2,
@@ -175,7 +175,7 @@ function projectDistribution(range: RangeKey) {
     range: rangeDto(range),
     data_revision: REVISION,
     items: [
-      { kind: "project", project_name: "MiniUsage", project_path: "/work/MiniUsage", usage: { total_tokens: 1200, estimated_cost: 0.7, estimated_cost_status: "complete" } },
+      { kind: "project", project_name: "Usagi", project_path: "/work/Usagi", usage: { total_tokens: 1200, estimated_cost: 0.7, estimated_cost_status: "complete" } },
       { kind: "project", project_name: "Docs", project_path: "/work/Docs", usage: { total_tokens: 500, estimated_cost: 0.25, estimated_cost_status: "complete" } },
       { kind: "projectless", project_name: null, project_path: null, usage: { total_tokens: 200, estimated_cost: 0.1, estimated_cost_status: "partial" } },
       { kind: "unknown", project_name: null, project_path: null, usage: { total_tokens: 100, estimated_cost: null, estimated_cost_status: "unknown" } },
@@ -253,7 +253,7 @@ async function routeStableDashboardData(page: Page) {
       { model: "gpt-5", provider: "openai" },
       { model: "o4-mini", provider: "route-models" },
     ],
-    projects: [{ kind: "project", project_name: "MiniUsage", project_path: "/work/MiniUsage" }],
+    projects: [{ kind: "project", project_name: "Usagi", project_path: "/work/Usagi" }],
   }));
   await page.route("**/api/usage/summary*", (route) => {
     const url = new URL(route.request().url());
@@ -284,7 +284,7 @@ async function routeStableDashboardData(page: Page) {
 }
 
 async function waitForDashboard(page: Page) {
-  await expect(page.getByRole("heading", { name: "MiniUsage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usagi" })).toBeVisible();
   await expect(page.getByLabel("KPI 指标")).toBeVisible();
   await expect(page.getByRole("table")).toBeVisible();
 }
@@ -298,7 +298,7 @@ test.beforeEach(async ({ page }) => {
     const originalSetItem = Storage.prototype.setItem;
     Object.defineProperty(window, "__miniIllegalStorageWrites", { value: 0, writable: true, configurable: true });
     Storage.prototype.setItem = function patchedSetItem(key: string, value: string) {
-      if (key === "miniusage.theme") {
+      if (key === "usagi.theme") {
         originalSetItem.call(this, key, value);
         return;
       }
@@ -458,7 +458,7 @@ test("C2 covers the approved v0.2.0 core interaction flow", async ({ page }) => 
     expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--beui-vt-origin"))).toBe("50% 100%");
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains("dark"))).toBe(false);
-  expect(await page.evaluate(() => localStorage.getItem("miniusage.theme"))).toBe("light");
+  expect(await page.evaluate(() => localStorage.getItem("usagi.theme"))).toBe("light");
   await page.getByRole("button", { name: "Switch to dark mode" }).click();
   await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains("dark"))).toBe(true);
 
@@ -490,7 +490,7 @@ test("C2 covers the approved v0.2.0 core interaction flow", async ({ page }) => 
   await expect(kpi.locator('span[title="1,150"]')).toHaveCount(1);
 
   await page.getByRole("button", { name: "项目筛选，全部" }).click();
-  await page.getByRole("checkbox", { name: "MiniUsage" }).click();
+  await page.getByRole("checkbox", { name: "Usagi" }).click();
   await page.keyboard.press("Escape");
   await expect(kpi.locator('span[title="750"]')).toHaveCount(1);
 

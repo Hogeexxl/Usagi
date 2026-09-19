@@ -105,7 +105,7 @@ class GenerationError(Exception):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the four-model MiniUsage LiteLLM catalog candidate."
+        description="Generate the four-model Usagi LiteLLM catalog candidate."
     )
     parser.add_argument("--input", required=True, type=Path, help="pinned LiteLLM JSON")
     parser.add_argument("--catalog", required=True, type=Path, help="current Rust catalog")

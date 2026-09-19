@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::json;
+use usagi::{
     domain::{
         CheckpointProcessingStatus, ContinuationState, FactQualityStatus,
         MetadataCheckpointAdvance, MetadataCommitBatch, MetadataSourceCommit, MetadataThreadCommit,
@@ -15,8 +17,6 @@ use mini_usage::{
     scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator},
     storage::{Ledger, LedgerOptions},
 };
-use rusqlite::{Connection, params};
-use serde_json::json;
 use uuid::Uuid;
 
 struct TempRoot(PathBuf);
@@ -28,7 +28,7 @@ impl TempRoot {
             .expect("clock before epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-replayed-ancestor-{label}-{}-{stamp}",
+            "usagi-replayed-ancestor-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create temporary test directory");
@@ -449,7 +449,7 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
         "replay-tail source must not keep active epoch at zero"
     );
     assert_eq!(epochs.1, None);
-    assert_eq!(epochs.2, mini_usage::usage::USAGE_PARSER_VERSION);
+    assert_eq!(epochs.2, usagi::usage::USAGE_PARSER_VERSION);
 
     handle.shutdown().unwrap();
 }
@@ -637,10 +637,7 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
         .unwrap();
     assert_eq!(
         metadata_checkpoint,
-        (
-            mini_usage::codex::METADATA_PARSER_VERSION,
-            "ready".to_owned(),
-        )
+        (usagi::codex::METADATA_PARSER_VERSION, "ready".to_owned(),)
     );
     let relationship_after: (Option<String>, Option<String>, String) = after
         .query_row(

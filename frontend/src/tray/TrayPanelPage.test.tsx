@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-import type { MiniUsageClient } from "../data/miniUsageClient";
+import type { UsagiClient } from "../data/usagiClient";
 import type { RevisionFeed as RevisionFeedType } from "../data/revisionFeed";
 import type { CodexQuotaResponse, DashboardRange, RevisionTuple, StatusResponse, SummaryUsageDto } from "../data/types";
 import { ThemeProvider } from "../theme/ThemeProvider";
@@ -69,7 +69,7 @@ const revisionFeed = {
   dispose: () => undefined,
 } as unknown as RevisionFeedType;
 
-function fakeClient(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
+function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
     codexQuota: vi.fn(async () => quota),
     filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
@@ -93,7 +93,7 @@ function fakeClient(overrides: Partial<MiniUsageClient> = {}): MiniUsageClient {
     getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })),
     refresh: vi.fn(async () => ({ http_status: 202 as const, disposition: "started" as const, scan_id: "scan", status_revision: 2 })),
     ...overrides,
-  } as MiniUsageClient;
+  } as UsagiClient;
 }
 
 function viewFor(overrides: Partial<TrayPanelViewModel> = {}): TrayPanelViewModel {

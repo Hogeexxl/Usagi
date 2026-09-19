@@ -26,7 +26,7 @@ const view: DashboardChartsView = {
   projects: {
     range,
     data_revision: 1,
-    items: [{ kind: "project", project_name: "MiniUsage", project_path: "/tmp/MiniUsage", usage }],
+    items: [{ kind: "project", project_name: "Usagi", project_path: "/tmp/Usagi", usage }],
   },
   skills: null,
   loading: false,

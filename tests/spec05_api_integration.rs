@@ -12,7 +12,10 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use futures_util::StreamExt;
-use mini_usage::{
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use usagi::{
     api::{AppContext, QueryApi, listen_address},
     codex::quota::CodexQuotaService,
     domain::{ScanCompletedEvent, ScanFailedEvent, ScanStartEvent, ScanTrigger},
@@ -22,9 +25,6 @@ use mini_usage::{
     update::UpdateService,
     usage::{SummaryQuery, TimeRange, UsageFilter, UsageLedger},
 };
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 const ROOT_A: &str = "00000000-03e8-7000-8000-000000000001";
@@ -54,7 +54,7 @@ impl TempRoot {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "miniusage-spec05-{label}-{}-{stamp}",
+            "usagi-spec05-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();
@@ -86,7 +86,7 @@ impl Fixture {
         fs::create_dir_all(&static_dir).unwrap();
         fs::write(
             static_dir.join("index.html"),
-            "<html>MINIUSAGE_STATIC_SENTINEL</html>",
+            "<html>USAGI_STATIC_SENTINEL</html>",
         )
         .unwrap();
         Self {
@@ -655,7 +655,7 @@ async fn t_s05_017_018_http_guard_no_store_sse_and_static_fallback_are_exact() {
             .to_vec(),
     )
     .unwrap();
-    assert!(page_body.contains("MINIUSAGE_STATIC_SENTINEL"));
+    assert!(page_body.contains("USAGI_STATIC_SENTINEL"));
 
     let forbidden_page = app
         .clone()
@@ -836,7 +836,7 @@ async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snap
             .collect::<Vec<_>>()
     };
     UsageLedger::new(&ledger)
-        .begin_rebuild(mini_usage::usage::USAGE_PARSER_VERSION, source_ids, 100)
+        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, source_ids, 100)
         .unwrap();
     let during =
         json_body(call(&app, Method::GET, "/api/usage/summary?range=year", &[]).await).await;
@@ -1820,7 +1820,7 @@ async fn t_s05_009_010_012_014_015_refresh_target_and_revision_watch_use_durable
         &app,
         Method::POST,
         "/api/refresh",
-        &[("x-miniusage-request", "1")],
+        &[("x-usagi-request", "1")],
     )
     .await;
     assert!(matches!(
@@ -1957,7 +1957,7 @@ async fn t_s05_013_source_changed_refresh_is_rejected_before_scanner_request() {
         &app,
         Method::POST,
         "/api/refresh",
-        &[("x-miniusage-request", "1")],
+        &[("x-usagi-request", "1")],
     )
     .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);

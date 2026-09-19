@@ -685,8 +685,7 @@ mod tests {
                 .expect("clock before epoch")
                 .as_nanos();
             let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("mini-usage-lifecycle-{timestamp}-{sequence}"));
+            let path = std::env::temp_dir().join(format!("usagi-lifecycle-{timestamp}-{sequence}"));
             fs::create_dir_all(&path).expect("create temporary lifecycle directory");
             Self(path)
         }

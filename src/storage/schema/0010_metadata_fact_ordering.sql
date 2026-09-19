@@ -1,4 +1,4 @@
--- MiniUsage schema version 10: durable metadata ordering and relationship quality.
+-- Usagi schema version 10: durable metadata ordering and relationship quality.
 -- The migration runner executes this script inside one BEGIN IMMEDIATE transaction.
 
 ALTER TABLE rollout_metadata_facts

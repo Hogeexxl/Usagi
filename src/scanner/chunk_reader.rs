@@ -424,7 +424,7 @@ mod tests {
                 .as_nanos();
             let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::temp_dir().join(format!(
-                "mini-usage-chunk-reader-{}-{nonce}-{sequence}",
+                "usagi-chunk-reader-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
             std::fs::create_dir(&directory).unwrap();

@@ -1,10 +1,10 @@
-# MiniUsage Spec 01：数据库骨架与来源检查点
+# Usagi Spec 01：数据库骨架与来源检查点
 
 > 版本：v0.2  
 > 状态：当前契约修订版（Spec08 实施目标）  
 > 更新日期：2026-08-09  
-> 上游文档：`MiniUsage_Codex本地数据口径_v0.2.md`、`MiniUsage_程序运行机制与数据持久化方案_v0.3.md`、`Spec_02_Codex原始数据与元数据适配_v0.2.md`  
-> 当前唯一测试标准：`MiniUsage_测试标准_Spec01-06_v0.17.md`  
+> 上游文档：`Usagi_Codex本地数据口径_v0.2.md`、`Usagi_程序运行机制与数据持久化方案_v0.3.md`、`Spec_02_Codex原始数据与元数据适配_v0.2.md`  
+> 当前唯一测试标准：`Usagi_测试标准_Spec01-06_v0.17.md`  
 > 当前版本范围：完整实现 Token 用量；仅 Token 美元费用 `estimated_cost` 占位
 
 ---
@@ -35,7 +35,7 @@ current latest user_version = 4
 
 ## 1. 文档目标
 
-本 Spec 把 MiniUsage（下文简称 MU）的数据库基础落实为可独立实施、测试和验收的工程方案。
+本 Spec 把 Usagi（下文简称 MU）的数据库基础落实为可独立实施、测试和验收的工程方案。
 
 本 Spec 完成后，项目应具备：
 
@@ -396,7 +396,7 @@ Spec 02 必须遵守以下最低规则：
 默认位置：
 
 ```text
-~/Library/Application Support/MiniUsage/mu.sqlite3
+~/Library/Application Support/Usagi/mu.sqlite3
 ```
 
 WAL 文件：

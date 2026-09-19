@@ -376,7 +376,7 @@ mod tests {
                 .as_nanos();
             let sequence = NEXT_TEMP.fetch_add(1, AtomicOrdering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "mini-usage-discovery-{}-{nonce}-{sequence}",
+                "usagi-discovery-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();

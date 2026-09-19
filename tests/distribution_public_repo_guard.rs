@@ -44,7 +44,7 @@ fn t_dist_010_public_repository_static_guard() {
     // Assemble machine-specific markers so this guard cannot match its own
     // source while checking the complete tracked tree.
     let private_home = marker(&["/", "Users", "/", "hogee"]);
-    let private_checkout_tail = marker(&["Desktop", "/", "MiniUsage"]);
+    let private_checkout_tail = marker(&["Desktop", "/", "Usagi"]);
     let saved_cargo_config = marker(&[".cargo", "/", "config.toml", ".saved"]);
     let private_key_header = marker(&["BEGIN ", "PRIVATE ", "KEY"]);
     let secret_prefixes = [
@@ -147,7 +147,7 @@ fn t_dist_010_public_repository_static_guard() {
 
     for forbidden in [
         "macOS Intel x64",
-        "MiniUsage-v0.1.0-macos-x64.dmg",
+        "Usagi-v0.1.0-macos-x64.dmg",
         "macos-15-intel",
         "x86_64 dmg",
     ] {

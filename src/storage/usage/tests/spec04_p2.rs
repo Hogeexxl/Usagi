@@ -2,7 +2,7 @@ use super::*;
 
 fn fixture_path(name: &str) -> String {
     std::env::temp_dir()
-        .join("miniusage-storage-usage")
+        .join("usagi-storage-usage")
         .join(name.trim_start_matches('/'))
         .to_string_lossy()
         .into_owned()

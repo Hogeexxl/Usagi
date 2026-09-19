@@ -92,7 +92,7 @@ impl CodexQuotaClient {
         refresh_url: impl Into<String>,
         auth_save_diagnostic: fn(),
     ) -> Result<Self, reqwest::Error> {
-        let user_agent = format!("MiniUsage/{}", env!("CARGO_PKG_VERSION"));
+        let user_agent = format!("Usagi/{}", env!("CARGO_PKG_VERSION"));
         let usage_client = Client::builder().timeout(USAGE_TIMEOUT).build()?;
         let refresh_client = Client::builder().timeout(REFRESH_TIMEOUT).build()?;
         Ok(Self {
@@ -141,7 +141,7 @@ impl CodexQuotaClient {
             .credentials()
             .needs_refresh(auth.last_refresh(), now_seconds)
         {
-            // Codex may rotate the refresh token while MiniUsage is idle.  A
+            // Codex may rotate the refresh token while Usagi is idle.  A
             // fresh read prevents reusing the token that the CLI already
             // consumed.
             before_reload();
@@ -472,7 +472,7 @@ mod tests {
             .as_nanos();
         let sequence = AUTH_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "miniusage-quota-auth-{}-{stamp}-{sequence}.json",
+            "usagi-quota-auth-{}-{stamp}-{sequence}.json",
             std::process::id()
         ))
     }
