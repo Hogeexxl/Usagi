@@ -12,7 +12,6 @@ use std::{
 
 use directories::BaseDirs;
 use image::ImageFormat;
-use usagi::platform::browser::{self, SystemBrowser};
 use tao::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{Event, StartCause, WindowEvent},
@@ -23,6 +22,7 @@ use tao::{
 use tray_icon::{
     MouseButton, MouseButtonState, Rect as TrayRect, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
+use usagi::platform::browser::{self, SystemBrowser};
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
@@ -418,8 +418,7 @@ impl ShellState {
 }
 
 pub fn run() -> ! {
-    if std::env::var_os("USAGI_WINDOWS_HEADLESS_SMOKE").is_some()
-    {
+    if std::env::var_os("USAGI_WINDOWS_HEADLESS_SMOKE").is_some() {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
