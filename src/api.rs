@@ -59,6 +59,7 @@ pub struct AppContext {
 struct ApiState {
     context: AppContext,
     process_shutdown: Option<ProcessShutdown>,
+    listen_port: u16,
 }
 
 pub struct QueryApi;
@@ -76,6 +77,7 @@ impl QueryApi {
         let state = ApiState {
             context,
             process_shutdown: None,
+            listen_port: LISTEN_PORT,
         };
         Ok(build_router(
             state,
@@ -88,10 +90,20 @@ impl QueryApi {
         static_dir: impl Into<PathBuf>,
         process_shutdown: ProcessShutdown,
     ) -> Result<Router, ApiError> {
+        Self::router_with_shutdown_on_port(context, static_dir, process_shutdown, LISTEN_PORT)
+    }
+
+    pub fn router_with_shutdown_on_port(
+        context: AppContext,
+        static_dir: impl Into<PathBuf>,
+        process_shutdown: ProcessShutdown,
+        listen_port: u16,
+    ) -> Result<Router, ApiError> {
         let static_dir = static_dir.into();
         let state = ApiState {
             context,
             process_shutdown: Some(process_shutdown),
+            listen_port,
         };
         Ok(build_router(
             state,
@@ -112,6 +124,7 @@ impl QueryApi {
         let state = ApiState {
             context,
             process_shutdown: None,
+            listen_port: LISTEN_PORT,
         };
         Ok(build_router(state, static_assets::FrontendSource::Embedded))
     }
@@ -121,9 +134,23 @@ impl QueryApi {
         context: AppContext,
         process_shutdown: ProcessShutdown,
     ) -> Result<Router, ApiError> {
+        Self::router_with_embedded_frontend_and_shutdown_on_port(
+            context,
+            process_shutdown,
+            LISTEN_PORT,
+        )
+    }
+
+    #[cfg(feature = "embedded-frontend")]
+    pub fn router_with_embedded_frontend_and_shutdown_on_port(
+        context: AppContext,
+        process_shutdown: ProcessShutdown,
+        listen_port: u16,
+    ) -> Result<Router, ApiError> {
         let state = ApiState {
             context,
             process_shutdown: Some(process_shutdown),
+            listen_port,
         };
         Ok(build_router(state, static_assets::FrontendSource::Embedded))
     }
@@ -188,10 +215,10 @@ fn build_router(state: ApiState, frontend: static_assets::FrontendSource) -> Rou
         .route("/events", get(events))
         .fallback(api_not_found)
         .layer(middleware::from_fn(api_no_store))
-        .with_state(state);
+        .with_state(state.clone());
 
     static_assets::with_fallback(Router::new().nest("/api", api), frontend)
-        .layer(middleware::from_fn(local_request_guard))
+        .layer(middleware::from_fn_with_state(state, local_request_guard))
 }
 
 async fn health() -> Response {
@@ -675,15 +702,27 @@ async fn api_no_store(request: Request<axum::body::Body>, next: Next) -> Respons
     response
 }
 
-async fn local_request_guard(request: Request<axum::body::Body>, next: Next) -> Response {
+fn allowed_local_authority(value: &str, port: u16) -> bool {
+    value == format!("127.0.0.1:{port}") || value == format!("localhost:{port}")
+}
+
+fn allowed_local_origin(value: &str, port: u16) -> bool {
+    value == format!("http://127.0.0.1:{port}") || value == format!("http://localhost:{port}")
+}
+
+async fn local_request_guard(
+    State(state): State<ApiState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let is_api = request.uri().path() == "/api" || request.uri().path().starts_with("/api/");
     let headers = request.headers();
-    match headers
+    if !headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| allowed_local_authority(value, state.listen_port))
     {
-        Some("127.0.0.1:3210" | "localhost:3210") => {}
-        _ => return guarded_error(ApiError::ForbiddenHost, is_api),
+        return guarded_error(ApiError::ForbiddenHost, is_api);
     }
 
     if headers
@@ -695,10 +734,10 @@ async fn local_request_guard(request: Request<axum::body::Body>, next: Next) -> 
     }
 
     if let Some(origin) = headers.get(header::ORIGIN)
-        && !matches!(
-            origin.to_str().ok(),
-            Some("http://127.0.0.1:3210" | "http://localhost:3210")
-        )
+        && !origin
+            .to_str()
+            .ok()
+            .is_some_and(|value| allowed_local_origin(value, state.listen_port))
     {
         return guarded_error(ApiError::ForbiddenOrigin, is_api);
     }
