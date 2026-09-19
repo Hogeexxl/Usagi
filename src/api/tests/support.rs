@@ -15,8 +15,10 @@ use tower::ServiceExt;
 use crate::{
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::{BrowserOpener, SystemBrowser},
-    scanner::{CodexMetadata, ScanConfig, ScanCoordinator, ScanHandle},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, ScanHandle},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
 };
@@ -94,10 +96,17 @@ impl ApiFixture {
         let ledger = Arc::new(
             Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap(),
         );
-        let scanner = ScanCoordinator::start(
-            ScanConfig::new(home.clone()).with_interval(std::time::Duration::from_secs(3_600)),
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                home.clone(),
+                CodexMetadata::from_home(home.clone()),
+            ))
+            .expect("register Codex source");
+        let scanner = IngestionCoordinator::start(
+            IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
             Arc::clone(&ledger),
-            CodexMetadata::from_home(home.clone()),
+            registry,
         )
         .unwrap();
         wait_scan(&ledger);

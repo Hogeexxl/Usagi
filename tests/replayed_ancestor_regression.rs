@@ -14,7 +14,9 @@ use usagi::{
         MetadataCheckpointAdvance, MetadataCommitBatch, MetadataSourceCommit, MetadataThreadCommit,
         OwnershipConfidence, RolloutMetadataFact, ScanResult, ScanTrigger,
     },
-    scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator},
+    ingestion::{IngestionConfig, IngestionCoordinator},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
 };
 use uuid::Uuid;
@@ -405,12 +407,16 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
 
     let db_path = root.path().join("mu.sqlite3");
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path, &home)).unwrap());
-    let handle = ScanCoordinator::start(
-        ScanConfig::new(home.clone()),
-        Arc::clone(&ledger),
-        CodexMetadata::from_home(home),
-    )
-    .expect("start scanner");
+    let mut registry = SourceRegistry::new();
+    registry
+        .register(LegacyCodexSourceAdapter::new(
+            home.clone(),
+            CodexMetadata::from_home(home.clone()),
+        ))
+        .unwrap();
+    let handle =
+        IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
+            .expect("start scanner");
     wait_for_startup(&ledger);
 
     let scan = ledger.app_state().unwrap().scan;
@@ -517,12 +523,16 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
 
     let db_path = root.path().join("mu.sqlite3");
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path, &home)).unwrap());
-    let handle = ScanCoordinator::start(
-        ScanConfig::new(home.clone()),
-        Arc::clone(&ledger),
-        CodexMetadata::from_home(home.clone()),
-    )
-    .unwrap();
+    let mut registry = SourceRegistry::new();
+    registry
+        .register(LegacyCodexSourceAdapter::new(
+            home.clone(),
+            CodexMetadata::from_home(home.clone()),
+        ))
+        .unwrap();
+    let handle =
+        IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
+            .unwrap();
     wait_for_startup(&ledger);
     assert_eq!(
         ledger.app_state().unwrap().scan.last_finished_scan_result,

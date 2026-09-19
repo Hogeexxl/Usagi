@@ -8,9 +8,11 @@ use std::path::PathBuf;
 use usagi::{
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
+    ingestion::{IngestionConfig, IngestionCoordinator},
     launcher::{self, BindOutcome},
     platform::browser::{self, BrowserOpener, SystemBrowser},
-    scanner::{CodexMetadata, ScanConfig, ScanCoordinator},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
 };
@@ -107,11 +109,17 @@ where
         Ledger::open(ledger_options)
             .map_err(|error| format!("could not open Usagi ledger: {error}"))?,
     );
-    let scan_config = ScanConfig::new(ledger.codex_home().to_path_buf());
-    let scanner = ScanCoordinator::start(
-        scan_config,
+    let mut source_registry = SourceRegistry::new();
+    source_registry
+        .register(LegacyCodexSourceAdapter::new(
+            ledger.codex_home().to_path_buf(),
+            CodexMetadata::from_home(ledger.codex_home()),
+        ))
+        .map_err(|error| format!("could not register Codex source: {error}"))?;
+    let scanner = IngestionCoordinator::start(
+        IngestionConfig::default(),
         Arc::clone(&ledger),
-        CodexMetadata::from_home(ledger.codex_home()),
+        source_registry,
     )
     .map_err(|error| format!("could not start Usagi scanner: {error:?}"))?;
     let codex_quota_service = match CodexQuotaService::new_with_diagnostic(

@@ -19,8 +19,10 @@ use usagi::{
     api::{AppContext, QueryApi, listen_address},
     codex::quota::CodexQuotaService,
     domain::{ScanCompletedEvent, ScanFailedEvent, ScanStartEvent, ScanTrigger},
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator, ScanHandle},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition, ScanHandle},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
     usage::{SummaryQuery, TimeRange, UsageFilter, UsageLedger},
@@ -102,10 +104,17 @@ impl Fixture {
     }
 
     fn start(&self, ledger: Arc<Ledger>) -> ScanHandle {
-        ScanCoordinator::start(
-            ScanConfig::new(self.home.clone()).with_interval(std::time::Duration::from_secs(3_600)),
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                self.home.clone(),
+                CodexMetadata::from_home(self.home.clone()),
+            ))
+            .unwrap();
+        IngestionCoordinator::start(
+            IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
             ledger,
-            CodexMetadata::from_home(self.home.clone()),
+            registry,
         )
         .unwrap()
     }
@@ -1938,7 +1947,7 @@ async fn t_s05_009_010_012_014_015_refresh_target_and_revision_watch_use_durable
 }
 
 #[tokio::test]
-async fn t_s05_013_source_changed_refresh_is_rejected_before_scanner_request() {
+async fn t_s05_013_source_changed_refresh_reaches_coordinator_before_adapter_failure() {
     let fixture = Fixture::new("source-changed-refresh");
     let ledger = fixture.ledger();
     let scanner = fixture.start(Arc::clone(&ledger));
@@ -1960,15 +1969,17 @@ async fn t_s05_013_source_changed_refresh_is_rejected_before_scanner_request() {
         &[("x-usagi-request", "1")],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(response).await["error"]["code"], "SOURCE_CHANGED");
+    assert!(matches!(
+        response.status(),
+        StatusCode::OK | StatusCode::ACCEPTED
+    ));
+    let body = json_body(response).await;
+    assert!(body["scan_id"].as_str().is_some());
 
-    // The HTTP rejection happens before ScanHandle::request: there is no new
-    // active or queued lifecycle row and no status revision is consumed.
+    // The request is acknowledged by the global coordinator. The Codex
+    // adapter performs the binding check while executing the scan.
     let after = ledger.app_state().unwrap();
-    assert_eq!(after.scan.status_revision, before.scan.status_revision);
-    assert_eq!(after.scan.active_scan_id, before.scan.active_scan_id);
-    assert_eq!(after.scan.followup_scan_id, before.scan.followup_scan_id);
+    assert!(after.scan.status_revision > before.scan.status_revision);
     scanner.shutdown().unwrap();
 }
 

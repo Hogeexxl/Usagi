@@ -20,9 +20,11 @@ use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     domain::ScanResult,
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
     platform::file_identity,
-    scanner::{CodexMetadata, ScanConfig, ScanCoordinator, ScanHandle, ScanTrigger},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, ScanHandle, ScanTrigger},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
     usage::{CompletionStatus, USAGE_PARSER_VERSION, UsageLedger},
@@ -717,12 +719,16 @@ async fn spec06_real_axum_browser_gate() {
             .any(|member| member.completion_status == CompletionStatus::Blocked)
     );
     let state_index = codex_home.join("state_5.sqlite");
-    let scanner: ScanHandle = ScanCoordinator::start(
-        ScanConfig::new(codex_home.clone()),
-        Arc::clone(&ledger),
-        CodexMetadata::from_home(codex_home),
-    )
-    .expect("temporary scanner");
+    let mut registry = SourceRegistry::new();
+    registry
+        .register(LegacyCodexSourceAdapter::new(
+            codex_home.clone(),
+            CodexMetadata::from_home(codex_home.clone()),
+        ))
+        .unwrap();
+    let scanner: ScanHandle =
+        IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
+            .expect("temporary scanner");
     wait_for_scan(&ledger);
     assert_eq!(
         ledger

@@ -13,8 +13,10 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use usagi::{
     domain::{ScanResult, ScanTrigger},
+    ingestion::{IngestionConfig, IngestionCoordinator},
     range::ResolvedDay,
-    scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     usage::{USAGE_PARSER_VERSION, UsageFilter, UsageLedger, analytics::skills_usage_snapshot},
 };
@@ -96,12 +98,15 @@ impl SkillFixture {
     }
 
     fn scanner(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
-        ScanCoordinator::start(
-            ScanConfig::new(self.home.clone()),
-            ledger,
-            CodexMetadata::from_home(self.home.clone()),
-        )
-        .expect("start skill scanner")
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                self.home.clone(),
+                CodexMetadata::from_home(self.home.clone()),
+            ))
+            .expect("register Codex source");
+        IngestionCoordinator::start(IngestionConfig::default(), ledger, registry)
+            .expect("start skill scanner")
     }
 }
 
@@ -137,12 +142,15 @@ impl Fixture {
     }
 
     fn scanner(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
-        ScanCoordinator::start(
-            ScanConfig::new(self.home.clone()),
-            ledger,
-            CodexMetadata::from_home(self.home.clone()),
-        )
-        .expect("start scanner")
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                self.home.clone(),
+                CodexMetadata::from_home(self.home.clone()),
+            ))
+            .expect("register Codex source");
+        IngestionCoordinator::start(IngestionConfig::default(), ledger, registry)
+            .expect("start scanner")
     }
 }
 

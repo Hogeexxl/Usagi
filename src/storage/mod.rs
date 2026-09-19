@@ -13,6 +13,7 @@ use std::{
 
 use crate::domain::{
     DomainError, FollowupState, ScanLifecycleState, ScanResult, ScanState, ScanTrigger,
+    UsageEpochState,
 };
 use crate::platform::paths;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -568,6 +569,32 @@ impl Ledger {
 
     pub fn source_binding_status(&self) -> Result<SourceBindingStatus> {
         Ok(self.app_state()?.source_binding_status)
+    }
+
+    /// Read the v10 usage epoch projection for the source-bound compatibility
+    /// capability. The global v10 row remains until the v11 source epoch
+    /// migration; adapters cannot select another source through this seam.
+    pub(crate) fn load_usage_epoch_state(&self) -> Result<UsageEpochState> {
+        let connection = self.connection()?;
+        let (active_epoch, build_epoch, active_parser_version, build_parser_version): (
+            i64,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        ) = connection.query_row(
+            "SELECT usage_active_epoch, usage_build_epoch, usage_parser_version,
+                    usage_build_parser_version
+             FROM app_meta WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        UsageEpochState::new(
+            active_epoch,
+            build_epoch,
+            active_parser_version,
+            build_parser_version,
+        )
+        .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
 
     /// Return an error for consumers that would write source-derived facts.

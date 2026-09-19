@@ -8,8 +8,9 @@ mod registry;
 
 pub use adapter::{
     AdapterAvailability, CanonicalUsageEventWrite, SourceAdapter, SourceAdapterError,
-    SourceContextError, SourceRunContext, SourceRunResult, SourceStorage, SourceStorageError,
-    SourceWriteTxn, UsageWriteTarget,
+    SourceContextError, SourceRunContext, SourceRunReport, SourceRunResult, SourceRunState,
+    SourceStorage, SourceStorageError, SourceWriteTxn, UsageWriteTarget,
 };
+pub(crate) use adapter::{CodexCompatRequest, SourceStorageFactory};
 pub use id::{SourceId, SourceIdError};
 pub use registry::{SourceDescriptor, SourceDescriptorError, SourceRegistry, SourceRegistryError};

@@ -20,8 +20,10 @@ use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, ScanConfig, ScanCoordinator},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
 };
@@ -104,10 +106,17 @@ impl Fixture {
         let ledger = Arc::new(
             Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap(),
         );
-        let scanner = ScanCoordinator::start(
-            ScanConfig::new(home.clone()).with_interval(std::time::Duration::from_secs(3_600)),
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                home.clone(),
+                CodexMetadata::from_home(home.clone()),
+            ))
+            .unwrap();
+        let scanner = IngestionCoordinator::start(
+            IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
             Arc::clone(&ledger),
-            CodexMetadata::from_home(home.clone()),
+            registry,
         )
         .unwrap();
         wait_quiet(&ledger, Duration::from_secs(8));

@@ -581,13 +581,9 @@ async fn refresh(State(state): State<ApiState>, headers: HeaderMap) -> Result<Re
     let header_value = headers
         .get(REFRESH_HEADER)
         .and_then(|value| value.to_str().ok());
-    let accepted = live::refresh(
-        header_value,
-        Arc::clone(&state.context.ledger),
-        state.context.scanner.clone(),
-    )
-    .await
-    .map_err(map_live_error)?;
+    let accepted = live::refresh(header_value, state.context.scanner.clone())
+        .await
+        .map_err(map_live_error)?;
     let status = StatusCode::from_u16(accepted.http_status).map_err(|_| ApiError::InternalError)?;
     Ok((status, Json(accepted)).into_response())
 }
@@ -759,7 +755,6 @@ fn guarded_error(error: ApiError, is_api: bool) -> Response {
 fn map_live_error(error: live::LiveError) -> ApiError {
     match error {
         live::LiveError::Forbidden => ApiError::Forbidden,
-        live::LiveError::SourceChanged => ApiError::SourceChanged,
         live::LiveError::ScannerUnavailable => ApiError::ScannerUnavailable,
         live::LiveError::DatabaseBusy => ApiError::DatabaseBusy,
         live::LiveError::ScanStartFailed => ApiError::ScanStartFailed,

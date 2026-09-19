@@ -49,7 +49,6 @@ impl Ledger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read_app_state(&transaction)?;
-        require_ready(self, &transaction, &current)?;
         if current.active_scan_id.is_some() || current.scan_state == ScanLifecycleState::Running {
             return Err(StorageError::invalid_state(
                 "a scan is already active".to_owned(),
@@ -109,7 +108,6 @@ impl Ledger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read_app_state(&transaction)?;
-        require_ready(self, &transaction, &current)?;
         if current.scan_state != ScanLifecycleState::Running || current.active_scan_id.is_none() {
             return Err(StorageError::invalid_state(
                 "follow-up reservation requires an active scan".to_owned(),
@@ -180,7 +178,6 @@ impl Ledger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read_app_state(&transaction)?;
-        require_ready(self, &transaction, &current)?;
         if current.active_scan_id.is_some() || current.scan_state == ScanLifecycleState::Running {
             return Err(StorageError::invalid_state(
                 "cannot start a follow-up while another scan is active".to_owned(),
@@ -401,44 +398,6 @@ fn increment_status_revision(current: i64) -> Result<i64> {
     current
         .checked_add(1)
         .ok_or_else(|| StorageError::invalid_state("status_revision overflow"))
-}
-
-fn require_ready(ledger: &Ledger, transaction: &Transaction<'_>, state: &AppState) -> Result<()> {
-    match state.source_binding_status {
-        crate::domain::SourceBindingStatus::Ready => {
-            let stored_fingerprint: Option<String> = transaction
-                .query_row(
-                    "SELECT codex_home_fingerprint FROM app_meta WHERE id = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match stored_fingerprint {
-                Some(expected) if expected == ledger.codex_home_fingerprint => Ok(()),
-                Some(expected) => Err(StorageError::source_changed(
-                    expected,
-                    ledger.codex_home_fingerprint.clone(),
-                )),
-                None => Err(StorageError::invalid_state(
-                    "ready CODEX_HOME binding has no fingerprint",
-                )),
-            }
-        }
-        crate::domain::SourceBindingStatus::Unbound => Err(StorageError::source_unbound()),
-        crate::domain::SourceBindingStatus::SourceChanged => {
-            let stored_fingerprint: Option<String> = transaction
-                .query_row(
-                    "SELECT codex_home_fingerprint FROM app_meta WHERE id = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Err(StorageError::source_changed(
-                stored_fingerprint.unwrap_or_default(),
-                ledger.codex_home_fingerprint.clone(),
-            ))
-        }
-    }
 }
 
 fn require_active_scan(transaction: &Transaction<'_>, scan_id: &str) -> Result<AppState> {
@@ -915,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn source_changed_and_invalid_start_failure_do_not_write_lifecycle_state() {
+    fn source_changed_does_not_gate_global_lifecycle_state() {
         let root = TempDir::new();
         let db = root.path().join("mu.sqlite3");
         let home_a = root.path().join("codex-a");
@@ -925,15 +884,12 @@ mod tests {
         drop(first);
 
         let changed = Ledger::open(LedgerOptions::new(&db, &home_b)).unwrap();
-        let error = changed
+        let state = changed
             .mark_scan_started(ScanStartEvent::new("scan-a", ScanTrigger::Manual, 10).unwrap());
-        assert_eq!(
-            error.unwrap_err().kind(),
-            crate::storage::StorageErrorKind::SourceChanged
-        );
+        assert_eq!(state.unwrap().active_scan_id.as_deref(), Some("scan-a"));
         assert_eq!(
             changed.app_state().unwrap().status_revision,
-            before.status_revision + 1
+            before.status_revision + 2
         );
     }
 

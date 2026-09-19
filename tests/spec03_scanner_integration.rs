@@ -17,8 +17,10 @@ use usagi::{
         ScanResult, ScanTrigger, SourceArea, SourceObservation, SourceObservationBatch,
         SourceRegionStatus,
     },
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::file_identity,
-    scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
 };
 use uuid::Uuid;
@@ -107,12 +109,15 @@ impl ScannerFixture {
     }
 
     fn start(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
-        ScanCoordinator::start(
-            ScanConfig::new(self.home.clone()),
-            ledger,
-            CodexMetadata::from_home(self.home.clone()),
-        )
-        .expect("start public scan coordinator")
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                self.home.clone(),
+                CodexMetadata::from_home(self.home.clone()),
+            ))
+            .expect("register Codex source");
+        IngestionCoordinator::start(IngestionConfig::default(), ledger, registry)
+            .expect("start public scan coordinator")
     }
 
     fn wait_for_startup(&self, ledger: &Ledger) {

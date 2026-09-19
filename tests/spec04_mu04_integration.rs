@@ -18,8 +18,10 @@ use usagi::{
     api::{AppContext, QueryApi},
     codex::quota::CodexQuotaService,
     domain::{ScanResult, ScanTrigger},
+    ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, RequestDisposition, ScanConfig, ScanCoordinator, ScanHandle},
+    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition, ScanHandle},
+    source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
     usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
@@ -99,10 +101,17 @@ impl Fixture {
     }
 
     fn scanner(&self, ledger: Arc<Ledger>) -> ScanHandle {
-        ScanCoordinator::start(
-            ScanConfig::new(self.home.clone()).with_interval(Duration::from_secs(3_600)),
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::new(
+                self.home.clone(),
+                CodexMetadata::from_home(self.home.clone()),
+            ))
+            .expect("register Codex source");
+        IngestionCoordinator::start(
+            IngestionConfig::default().with_interval(Duration::from_secs(3_600)),
             ledger,
-            CodexMetadata::from_home(self.home.clone()),
+            registry,
         )
         .expect("start fixture scanner")
     }

@@ -24,6 +24,10 @@ use crate::{
     },
     domain::{CheckpointRebuildCommand, ConsumerKind, MetadataScanStateEntry, SafeFactState},
     platform::paths,
+    source::{
+        AdapterAvailability, SourceAdapter, SourceAdapterError, SourceDescriptor, SourceRunContext,
+        SourceRunResult,
+    },
     storage::Ledger,
 };
 
@@ -39,9 +43,9 @@ mod report;
 mod usage_consumer;
 
 pub use crate::domain::ScanTrigger;
-pub use coordinator::{
-    CommitFailureKind, RequestDisposition, ScanConfig, ScanConfigError, ScanHandle,
-    ScanRequestError, ScanShutdownError, ScanStartError,
+pub use crate::ingestion::coordinator::{
+    CommitFailureKind, RequestDisposition, ScanHandle, ScanRequestError, ScanShutdownError,
+    ScanStartError,
 };
 
 use chunk_reader::read_chunk;
@@ -85,33 +89,187 @@ impl CodexMetadata {
     }
 }
 
-impl From<&ScanConfig> for CodexMetadata {
-    fn from(config: &ScanConfig) -> Self {
-        Self::from_home(config.codex_home.clone())
-    }
+/// Transitional adapter that keeps the mature Codex metadata/usage pipeline
+/// behind the source-neutral ingestion seam.  It deliberately reports
+/// `Available` from `availability`: binding, discovery, parser, and storage
+/// failures are execution failures and must remain failed Codex runs rather
+/// than being reclassified as skipped sources.
+pub struct LegacyCodexSourceAdapter {
+    descriptor: SourceDescriptor,
+    codex_home: PathBuf,
+    codex_metadata: CodexMetadata,
 }
 
-/// Start the coordinator with Usagi's fixed metadata worker.
-pub struct ScanCoordinator;
-
-impl ScanCoordinator {
-    pub fn start(
-        config: ScanConfig,
-        ledger: Arc<Ledger>,
-        codex_metadata: CodexMetadata,
-    ) -> Result<ScanHandle, ScanStartError> {
-        let worker = Arc::new(MetadataWorker {
-            config: config.clone(),
-            ledger: Arc::clone(&ledger),
+impl LegacyCodexSourceAdapter {
+    pub fn new(codex_home: impl Into<PathBuf>, codex_metadata: CodexMetadata) -> Self {
+        let codex_home = codex_home.into();
+        Self {
+            descriptor: SourceDescriptor::codex(),
+            codex_home,
             codex_metadata,
-        });
-        coordinator::ScanCoordinator::start(config, ledger, worker)
+        }
+    }
+
+    pub fn from_home(codex_home: impl Into<PathBuf>) -> Self {
+        let codex_home = codex_home.into();
+        Self::new(codex_home.clone(), CodexMetadata::from_home(codex_home))
+    }
+
+    pub fn descriptor(&self) -> &SourceDescriptor {
+        &self.descriptor
+    }
+
+    pub fn codex_home(&self) -> &Path {
+        &self.codex_home
     }
 }
 
-struct MetadataWorker {
-    config: ScanConfig,
-    ledger: Arc<Ledger>,
+impl SourceAdapter for LegacyCodexSourceAdapter {
+    fn descriptor(&self) -> &SourceDescriptor {
+        &self.descriptor
+    }
+
+    fn availability(&self) -> Result<AdapterAvailability, SourceAdapterError> {
+        if !self.codex_home.is_absolute() {
+            return Err(SourceAdapterError::with_code(
+                "CODEX_HOME_NOT_ABSOLUTE",
+                "Codex home must be an absolute path",
+            ));
+        }
+        if !metadata_path_within_home(&self.codex_metadata.state_index_path, &self.codex_home)
+            || !metadata_path_within_home(&self.codex_metadata.session_index_path, &self.codex_home)
+            || !metadata_path_within_home(&self.codex_metadata.global_state_path, &self.codex_home)
+        {
+            return Err(SourceAdapterError::with_code(
+                "CODEX_METADATA_HOME_MISMATCH",
+                "Codex metadata paths must remain under the bound Codex home",
+            ));
+        }
+        Ok(AdapterAvailability::Available)
+    }
+
+    fn run_scan(&self, context: &SourceRunContext, cancellation: &AtomicBool) -> SourceRunResult {
+        if cancellation.load(Ordering::Acquire) {
+            return Err(SourceAdapterError::with_code(
+                "SCAN_CANCELLED",
+                "Codex scan was cancelled before execution",
+            ));
+        }
+        let request = crate::source::CodexCompatRequest {
+            codex_home: &self.codex_home,
+            state_index_path: &self.codex_metadata.state_index_path,
+            session_index_path: &self.codex_metadata.session_index_path,
+            global_state_path: &self.codex_metadata.global_state_path,
+            cancellation,
+        };
+        context
+            .storage()
+            .run_codex_compat(request)
+            .map_err(|error| match error {
+                crate::source::SourceStorageError::CompatibilityOperationFailed(code) => {
+                    SourceAdapterError::with_code(
+                        code,
+                        format!("Codex metadata pipeline failed: {code}"),
+                    )
+                }
+                error => SourceAdapterError::with_code(
+                    codex_storage_error_code(&error),
+                    error.to_string(),
+                ),
+            })
+    }
+}
+
+fn metadata_path_within_home(path: &Path, home: &Path) -> bool {
+    let Some(home) = paths::normalize_absolute_path(home) else {
+        return false;
+    };
+    let Some(path) = paths::normalize_absolute_path(path) else {
+        return false;
+    };
+    let Ok(canonical_home) = std::fs::canonicalize(&home) else {
+        return false;
+    };
+    if let Ok(canonical_path) = std::fs::canonicalize(&path) {
+        return canonical_path.starts_with(&canonical_home);
+    }
+
+    // A missing final component can still be safe, but only when the entire
+    // existing prefix proves the path remains under the bound home.  Any
+    // non-missing canonicalization failure is fail-closed.
+    let mut existing = path.clone();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => return false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !existing.pop() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+        if let Ok(existing_metadata) = std::fs::symlink_metadata(&existing) {
+            if !existing_metadata.is_dir() && !existing_metadata.file_type().is_symlink() {
+                return false;
+            }
+            break;
+        }
+    }
+    let Ok(canonical_existing) = std::fs::canonicalize(&existing) else {
+        return false;
+    };
+    if !canonical_existing.starts_with(&canonical_home) {
+        return false;
+    }
+
+    // Reject dangling or escaping symlink components.  Platform aliases such
+    // as macOS /var -> /private/var remain valid when their resolved target is
+    // an ancestor of the canonical bound home.
+    let mut component_path = PathBuf::new();
+    for component in path.components() {
+        component_path.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&component_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return false,
+        };
+        if metadata.file_type().is_symlink() {
+            let Ok(resolved) = std::fs::canonicalize(&component_path) else {
+                return false;
+            };
+            let is_home_alias = !component_path.starts_with(&canonical_home)
+                && canonical_home.starts_with(&resolved);
+            if !is_home_alias {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn codex_storage_error_code(error: &crate::source::SourceStorageError) -> &'static str {
+    match error {
+        crate::source::SourceStorageError::Storage(
+            crate::storage::StorageErrorKind::SourceChanged,
+        ) => "SOURCE_CHANGED",
+        crate::source::SourceStorageError::Storage(
+            crate::storage::StorageErrorKind::SourceUnbound,
+        ) => "SOURCE_UNBOUND",
+        crate::source::SourceStorageError::Storage(_) => "CODEX_SOURCE_STORAGE_FAILED",
+        crate::source::SourceStorageError::NotImplemented
+        | crate::source::SourceStorageError::UnsupportedOperation(_)
+        | crate::source::SourceStorageError::TransactionClosed
+        | crate::source::SourceStorageError::SourceMismatch
+        | crate::source::SourceStorageError::InvalidRequest(_) => "CODEX_SOURCE_BINDING_FAILED",
+        crate::source::SourceStorageError::CompatibilityOperationFailed(_) => {
+            "CODEX_COMPATIBILITY_FAILED"
+        }
+    }
+}
+
+pub(crate) struct MetadataWorker {
+    codex_home: PathBuf,
+    ledger: Option<Arc<Ledger>>,
     codex_metadata: CodexMetadata,
 }
 
@@ -126,12 +284,16 @@ struct ParseSourcesInput<'a> {
     hard_error: &'a mut Option<&'static str>,
 }
 
+#[allow(deprecated)]
 impl coordinator::ScanWorker for MetadataWorker {
     fn run(&self, _scan_id: &str, cancellation: &AtomicBool) -> coordinator::WorkerResult {
         if cancellation.load(Ordering::Acquire) {
             return coordinator::WorkerResult::Completed;
         }
-        match self.run_round(cancellation) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return coordinator::WorkerResult::Failed("CODEX_LEDGER_UNAVAILABLE");
+        };
+        match self.run_round_with_ledger(ledger, cancellation) {
             Ok(()) => coordinator::WorkerResult::Completed,
             Err(error_code) => coordinator::WorkerResult::Failed(error_code),
         }
@@ -139,14 +301,35 @@ impl coordinator::ScanWorker for MetadataWorker {
 }
 
 impl MetadataWorker {
+    pub(crate) fn for_codex_compat(codex_home: &Path, codex_metadata: CodexMetadata) -> Self {
+        Self {
+            codex_home: codex_home.to_owned(),
+            ledger: None,
+            codex_metadata,
+        }
+    }
+
+    #[cfg(test)]
     fn run_round(&self, cancellation: &AtomicBool) -> Result<(), &'static str> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Err("CODEX_LEDGER_UNAVAILABLE");
+        };
+        self.run_round_with_ledger(ledger, cancellation)
+    }
+
+    pub(crate) fn run_round_with_ledger(
+        &self,
+        ledger: &Ledger,
+        cancellation: &AtomicBool,
+    ) -> Result<(), &'static str> {
         let round_at_ms = now_ms();
         let mut report = ScanReport::new(round_at_ms);
-        self.run_round_with_report(cancellation, &mut report)
+        self.run_round_with_report(ledger, cancellation, &mut report)
     }
 
     fn run_round_with_report(
         &self,
+        ledger: &Ledger,
         cancellation: &AtomicBool,
         report: &mut ScanReport,
     ) -> Result<(), &'static str> {
@@ -172,7 +355,7 @@ impl MetadataWorker {
             return Ok(());
         }
 
-        let discovery = Discovery::discover_at(&self.config.codex_home, round_at_ms);
+        let discovery = Discovery::discover_at(&self.codex_home, round_at_ms);
         report.observe_discovery(discovery.files.len());
         for diagnostic in &discovery.diagnostics {
             if diagnostic.code != "DUPLICATE_PHYSICAL_ALIAS" {
@@ -187,15 +370,13 @@ impl MetadataWorker {
             Err(_) => return finish_round_error(report, "METADATA_PIPELINE_INVALID"),
         };
         let usage_carry_proofs = match usage_consumer::collect_usage_carry_observation_proofs(
-            &self.ledger,
-            &discovery,
-            report,
+            ledger, &discovery, report,
         ) {
             Ok(proofs) => proofs,
             Err(error_code) => return finish_round_error(report, error_code),
         };
         let (outcome, scan_state) = match pipeline.record_and_load_with_usage_carry_proofs(
-            &self.ledger,
+            ledger,
             &discovery,
             &usage_carry_proofs,
         ) {
@@ -227,7 +408,7 @@ impl MetadataWorker {
             report,
             hard_error: &mut hard_error,
         });
-        if let Err(error_code) = self.persist_metadata_rebuilds(&parsed_sources) {
+        if let Err(error_code) = self.persist_metadata_rebuilds(ledger, &parsed_sources) {
             return finish_round_error(report, error_code);
         }
         if cancelled(cancellation) {
@@ -235,7 +416,7 @@ impl MetadataWorker {
             return Ok(());
         }
 
-        let existing_threads = match self.ledger.load_existing_threads() {
+        let existing_threads = match ledger.load_existing_threads() {
             Ok(threads) => threads,
             Err(_) => return finish_round_error(report, "METADATA_STATE_LOAD_FAILED"),
         }
@@ -254,11 +435,11 @@ impl MetadataWorker {
             Ok(resolution) => resolution,
             Err(_) => return finish_round_error(report, "METADATA_RESOLUTION_FAILED"),
         };
-        if pipeline.commit(&self.ledger, &resolution).is_err() {
+        if pipeline.commit(ledger, &resolution).is_err() {
             return finish_round_error(report, "METADATA_COMMIT_FAILED");
         }
         if let Err(error_code) = usage_consumer::run_usage_round(
-            &self.ledger,
+            ledger,
             &discovery,
             &outcome,
             &state_snapshot,
@@ -325,6 +506,7 @@ impl MetadataWorker {
 
     fn persist_metadata_rebuilds(
         &self,
+        ledger: &Ledger,
         parsed_sources: &[ParsedSource],
     ) -> Result<(), &'static str> {
         let mut source_file_ids = parsed_sources
@@ -339,7 +521,7 @@ impl MetadataWorker {
         source_file_ids.dedup();
         let command = CheckpointRebuildCommand::new(ConsumerKind::Metadata, source_file_ids)
             .map_err(|_| "STORAGE_COMMIT_FAILED")?;
-        self.ledger
+        ledger
             .require_checkpoint_rebuild(command)
             .map_err(|_| "STORAGE_COMMIT_FAILED")?;
         Ok(())
@@ -633,6 +815,61 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn metadata_path_rejects_external_symlink_with_missing_child() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new("metadata-path-symlink");
+        let home = temp.path().join("codex");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, home.join("alias")).unwrap();
+
+        assert!(!metadata_path_within_home(
+            &home.join("alias").join("missing.sqlite"),
+            &home
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_path_accepts_private_var_alias_for_missing_child() {
+        let temp = TempDir::new("metadata-path-private-var");
+        let canonical_home = fs::canonicalize(temp.path()).unwrap();
+        let relative = canonical_home
+            .strip_prefix("/private/var")
+            .expect("temporary directory is under /private/var");
+        let var_home = PathBuf::from("/var").join(relative);
+        let private_home = PathBuf::from("/private/var").join(relative);
+
+        assert!(metadata_path_within_home(
+            &var_home.join("missing.sqlite"),
+            &private_home
+        ));
+        assert!(metadata_path_within_home(
+            &private_home.join("missing.sqlite"),
+            &var_home
+        ));
+    }
+
+    #[test]
+    fn codex_storage_error_codes_preserve_binding_categories() {
+        assert_eq!(
+            codex_storage_error_code(&crate::source::SourceStorageError::Storage(
+                crate::storage::StorageErrorKind::SourceChanged,
+            )),
+            "SOURCE_CHANGED"
+        );
+        assert_eq!(
+            codex_storage_error_code(&crate::source::SourceStorageError::Storage(
+                crate::storage::StorageErrorKind::SourceUnbound,
+            )),
+            "SOURCE_UNBOUND"
+        );
+    }
+
     struct Fixture {
         _temp: TempDir,
         home: PathBuf,
@@ -730,8 +967,8 @@ mod tests {
 
         fn worker(&self) -> MetadataWorker {
             MetadataWorker {
-                config: ScanConfig::new(self.home.clone()),
-                ledger: Arc::clone(&self.ledger),
+                codex_home: self.home.clone(),
+                ledger: Some(Arc::clone(&self.ledger)),
                 codex_metadata: CodexMetadata::from_home(self.home.clone()),
             }
         }
@@ -749,7 +986,8 @@ mod tests {
         fn run_observed(&self) -> (Result<(), &'static str>, ScanReport) {
             let worker = self.worker();
             let mut report = ScanReport::new(now_ms());
-            let result = worker.run_round_with_report(&AtomicBool::new(false), &mut report);
+            let result =
+                worker.run_round_with_report(&self.ledger, &AtomicBool::new(false), &mut report);
             (result, report)
         }
     }
@@ -837,17 +1075,19 @@ mod tests {
 
         fn worker(&self) -> MetadataWorker {
             MetadataWorker {
-                config: ScanConfig::new(self.home.clone()),
-                ledger: Arc::clone(&self.ledger),
+                codex_home: self.home.clone(),
+                ledger: Some(Arc::clone(&self.ledger)),
                 codex_metadata: CodexMetadata::from_home(self.home.clone()),
             }
         }
 
         fn run_observed(&self) -> (Result<(), &'static str>, ScanReport) {
             let mut report = ScanReport::new(now_ms());
-            let result = self
-                .worker()
-                .run_round_with_report(&AtomicBool::new(false), &mut report);
+            let result = self.worker().run_round_with_report(
+                &self.ledger,
+                &AtomicBool::new(false),
+                &mut report,
+            );
             (result, report)
         }
 
@@ -1798,8 +2038,8 @@ not-json
                 .unwrap();
 
         let worker = MetadataWorker {
-            config: ScanConfig::new(fixture.home.clone()),
-            ledger: Arc::clone(&fixture.ledger),
+            codex_home: fixture.home.clone(),
+            ledger: Some(Arc::clone(&fixture.ledger)),
             codex_metadata: CodexMetadata::with_paths(
                 fixture.home.join("missing-state.sqlite"),
                 fixture.home.join("session_index.jsonl"),
@@ -1813,8 +2053,8 @@ not-json
         let unavailable_session_path = fixture.home.join("session-index-unavailable");
         fs::create_dir(&unavailable_session_path).unwrap();
         let worker = MetadataWorker {
-            config: ScanConfig::new(fixture.home.clone()),
-            ledger: Arc::clone(&fixture.ledger),
+            codex_home: fixture.home.clone(),
+            ledger: Some(Arc::clone(&fixture.ledger)),
             codex_metadata: CodexMetadata::with_paths(
                 fixture.home.join("state_5.sqlite"),
                 unavailable_session_path,

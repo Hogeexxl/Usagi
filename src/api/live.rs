@@ -9,9 +9,8 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::{
-    domain::{ScanTrigger, SourceBindingStatus},
+    domain::ScanTrigger,
     scanner::{CommitFailureKind, RequestDisposition, ScanHandle, ScanRequestError},
-    storage::{Ledger, StorageError, StorageErrorKind},
 };
 
 pub const REFRESH_HEADER_VALUE: &str = "1";
@@ -28,7 +27,6 @@ pub struct RefreshAccepted {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveError {
     Forbidden,
-    SourceChanged,
     ScannerUnavailable,
     DatabaseBusy,
     ScanStartFailed,
@@ -49,39 +47,20 @@ impl ManualScanRequester for ScanHandle {
 /// The blocking coordinator channel is kept off the Tokio executor.
 pub async fn refresh(
     header_value: Option<&str>,
-    ledger: Arc<Ledger>,
     scanner: ScanHandle,
 ) -> Result<RefreshAccepted, LiveError> {
     if header_value != Some(REFRESH_HEADER_VALUE) {
         return Err(LiveError::Forbidden);
     }
-    let binding = tokio::task::spawn_blocking(move || ledger.source_binding_status())
-        .await
-        .map_err(|_| LiveError::ScanStartFailed)?
-        .map_err(map_binding_error)?;
-    refresh_with(header_value, binding, Arc::new(scanner)).await
-}
-
-fn map_binding_error(error: StorageError) -> LiveError {
-    match error.kind() {
-        StorageErrorKind::SourceChanged | StorageErrorKind::SourceUnbound => {
-            LiveError::SourceChanged
-        }
-        StorageErrorKind::DatabaseBusy => LiveError::DatabaseBusy,
-        _ => LiveError::ScanStartFailed,
-    }
+    refresh_with(header_value, Arc::new(scanner)).await
 }
 
 async fn refresh_with(
     header_value: Option<&str>,
-    binding: SourceBindingStatus,
     scanner: Arc<dyn ManualScanRequester>,
 ) -> Result<RefreshAccepted, LiveError> {
     if header_value != Some(REFRESH_HEADER_VALUE) {
         return Err(LiveError::Forbidden);
-    }
-    if binding != SourceBindingStatus::Ready {
-        return Err(LiveError::SourceChanged);
     }
     let disposition = tokio::task::spawn_blocking(move || scanner.request_manual())
         .await
@@ -111,7 +90,6 @@ async fn refresh_with(
 impl From<ScanRequestError> for LiveError {
     fn from(error: ScanRequestError) -> Self {
         match error {
-            ScanRequestError::SourceChanged => Self::SourceChanged,
             ScanRequestError::Recovering | ScanRequestError::ShuttingDown => {
                 Self::ScannerUnavailable
             }
@@ -187,17 +165,12 @@ mod tests {
             scan_id: "unused".to_owned(),
             started_status_revision: 1,
         }));
-        for (header, binding, expected) in [
-            (None, SourceBindingStatus::Ready, LiveError::Forbidden),
-            (Some("0"), SourceBindingStatus::Ready, LiveError::Forbidden),
-            (
-                Some("1"),
-                SourceBindingStatus::SourceChanged,
-                LiveError::SourceChanged,
-            ),
+        for (header, expected) in [
+            (None, LiveError::Forbidden),
+            (Some("0"), LiveError::Forbidden),
         ] {
             assert_eq!(
-                refresh_with(header, binding, never_called.clone()).await,
+                refresh_with(header, never_called.clone()).await,
                 Err(expected)
             );
         }
@@ -207,11 +180,7 @@ mod tests {
             scan_id: "scan-started".to_owned(),
             started_status_revision: 8,
         }));
-        let task = tokio::spawn(refresh_with(
-            Some("1"),
-            SourceBindingStatus::Ready,
-            started.clone(),
-        ));
+        let task = tokio::spawn(refresh_with(Some("1"), started.clone()));
         tokio::task::yield_now().await;
         assert!(!task.is_finished());
         started.release();
@@ -230,9 +199,7 @@ mod tests {
             enqueued_status_revision: 9,
         }));
         assert_eq!(
-            refresh_with(Some("1"), SourceBindingStatus::Ready, coalesced)
-                .await
-                .unwrap(),
+            refresh_with(Some("1"), coalesced).await.unwrap(),
             RefreshAccepted {
                 http_status: 200,
                 disposition: "coalesced",
@@ -245,7 +212,6 @@ mod tests {
     #[tokio::test]
     async fn refresh_maps_all_safe_coordinator_failures() {
         for (error, expected) in [
-            (ScanRequestError::SourceChanged, LiveError::SourceChanged),
             (ScanRequestError::Recovering, LiveError::ScannerUnavailable),
             (
                 ScanRequestError::ShuttingDown,
@@ -277,10 +243,7 @@ mod tests {
             ),
         ] {
             let stub = RequestStub::ready(Err(error));
-            assert_eq!(
-                refresh_with(Some("1"), SourceBindingStatus::Ready, stub).await,
-                Err(expected)
-            );
+            assert_eq!(refresh_with(Some("1"), stub).await, Err(expected));
         }
     }
 }
