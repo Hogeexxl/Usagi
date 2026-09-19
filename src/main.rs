@@ -1,7 +1,4 @@
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions), not(test)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
 use std::sync::Arc;
 
@@ -9,7 +6,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 
 use usagi::{
-    api::{AppContext, ProcessShutdown, QueryApi, listen_address},
+    api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
     launcher::{self, BindOutcome},
     platform::browser::{self, BrowserOpener, SystemBrowser},
@@ -58,37 +55,53 @@ where
     B: BrowserOpener + Clone + 'static,
     F: FnOnce() -> Result<Arc<UpdateService>, String> + Send + 'static,
 {
-    run_with_update_factory_and_ready(browser_opener, ledger_options, update_factory, || {}).await
+    run_with_update_factory_and_ready(
+        browser_opener,
+        ledger_options,
+        update_factory,
+        false,
+        |_| {},
+    )
+    .await
 }
 
 async fn run_with_update_factory_and_ready<B, F, R>(
     browser_opener: B,
     ledger_options: LedgerOptions,
     update_factory: F,
+    allow_port_fallback: bool,
     on_ready: R,
 ) -> Result<(), String>
 where
     B: BrowserOpener + Clone + 'static,
     F: FnOnce() -> Result<Arc<UpdateService>, String> + Send + 'static,
-    R: FnOnce() + Send + 'static,
+    R: FnOnce(std::net::SocketAddr) + Send + 'static,
 {
     let browser_opener: Arc<dyn BrowserOpener> = Arc::new(browser_opener);
-    let listener = match launcher::bind_or_detect_existing()
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        BindOutcome::ExistingInstance => {
-            println!("Usagi is already running at {}", browser::DASHBOARD_URL);
-            if let Err(error) = browser::open_dashboard(browser_opener.as_ref()) {
+    let bind_outcome = if allow_port_fallback {
+        launcher::bind_or_detect_existing_with_port_fallback().await
+    } else {
+        launcher::bind_or_detect_existing().await
+    }
+    .map_err(|error| error.to_string())?;
+
+    let listener = match bind_outcome {
+        BindOutcome::ExistingInstance(address) => {
+            let dashboard_url = browser::dashboard_url(address);
+            println!("Usagi is already running at {dashboard_url}");
+            if let Err(error) = browser::open_dashboard_at(browser_opener.as_ref(), address) {
                 eprintln!(
                     "Usagi is already running, but the browser could not be opened: {error}\n"
                 );
-                eprintln!("Open {} manually.", browser::DASHBOARD_URL);
+                eprintln!("Open {dashboard_url} manually.");
             }
             return Ok(());
         }
         BindOutcome::Listener(listener) => listener,
     };
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("could not resolve Usagi listener address: {error}"))?;
 
     let ledger = Arc::new(
         Ledger::open(ledger_options)
@@ -121,7 +134,7 @@ where
     };
 
     #[cfg(feature = "embedded-frontend")]
-    let app = QueryApi::router_with_embedded_frontend_and_shutdown(
+    let app = QueryApi::router_with_embedded_frontend_and_shutdown_on_port(
         AppContext {
             ledger,
             scanner,
@@ -130,11 +143,12 @@ where
             browser_opener: Arc::clone(&browser_opener),
         },
         process_shutdown,
+        address.port(),
     )
     .map_err(|error| format!("could not construct Usagi embedded router: {error}"))?;
 
     #[cfg(not(feature = "embedded-frontend"))]
-    let app = QueryApi::router_with_shutdown(
+    let app = QueryApi::router_with_shutdown_on_port(
         AppContext {
             ledger,
             scanner,
@@ -144,10 +158,10 @@ where
         },
         PathBuf::from("frontend/dist"),
         process_shutdown,
+        address.port(),
     )
     .map_err(|error| format!("could not construct Usagi router: {error}"))?;
 
-    let address = listen_address();
     println!("Usagi is running at http://{address}");
     let mut server = Box::pin(
         axum::serve(listener, app)
@@ -166,13 +180,13 @@ where
         }
     }
 
-    on_ready();
+    on_ready(address);
 
     let codex_quota_task = codex_quota_service.spawn_background();
 
-    if let Err(error) = browser::open_dashboard(browser_opener.as_ref()) {
+    if let Err(error) = browser::open_dashboard_at(browser_opener.as_ref(), address) {
         eprintln!("Usagi server is ready, but the browser could not be opened: {error}");
-        eprintln!("Open {} manually.", browser::DASHBOARD_URL);
+        eprintln!("Open {} manually.", browser::dashboard_url(address));
     }
 
     let update_task = update_service.spawn_background();
@@ -190,12 +204,13 @@ where
 #[cfg(target_os = "windows")]
 async fn run_windows_backend<R>(on_ready: R) -> Result<(), String>
 where
-    R: FnOnce() + Send + 'static,
+    R: FnOnce(std::net::SocketAddr) + Send + 'static,
 {
     run_with_update_factory_and_ready(
         SystemBrowser,
         LedgerOptions::default(),
         || UpdateService::new_github().map_err(|error| error.to_string()),
+        true,
         on_ready,
     )
     .await
@@ -211,14 +226,14 @@ mod tests {
     };
 
     use futures_util::{FutureExt, future::BoxFuture};
-    use reqwest::StatusCode;
-    use semver::Version;
-    use tokio::sync::Notify;
     use usagi::{
         api::listen_address,
         platform::browser::{BrowserError, BrowserOpener},
         update::{ReleaseInfo, ReleaseProvider, UpdateFailureKind, UpdateService},
     };
+    use reqwest::StatusCode;
+    use semver::Version;
+    use tokio::sync::Notify;
 
     use super::run_with_update_factory;
 
