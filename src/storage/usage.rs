@@ -1378,8 +1378,8 @@ fn load_source_plan(
             })?,
         None => None,
     };
-    let build = read_build_plan_state(transaction, epoch.build_epoch, source_file_id)
-        .map_err(|error| {
+    let build =
+        read_build_plan_state(transaction, epoch.build_epoch, source_file_id).map_err(|error| {
             #[cfg(test)]
             eprintln!("usage source {source_file_id} build-plan read failed: {error:?}");
             error
