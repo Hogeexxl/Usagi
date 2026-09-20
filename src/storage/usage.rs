@@ -710,7 +710,7 @@ impl Ledger {
 #[derive(Debug)]
 pub(crate) struct CodexUsageCommitBridgeResult {
     pub outcome: UsageCommitOutcome,
-    pub publish_revisions: Option<(i64, i64)>,
+    pub visible_changed: bool,
 }
 
 pub(crate) fn apply_codex_usage_batch(
@@ -805,12 +805,6 @@ pub(crate) fn apply_codex_usage_batch(
     } else {
         current_revision
     };
-    let status_revision: i64 = transaction.query_row(
-        "SELECT status_revision FROM app_meta WHERE id=1",
-        [],
-        |row| row.get(0),
-    )?;
-
     Ok(CodexUsageCommitBridgeResult {
         outcome: UsageCommitOutcome {
             sources_committed: batch.sources.len(),
@@ -818,8 +812,7 @@ pub(crate) fn apply_codex_usage_batch(
             events_deduplicated: deduplicated,
             data_revision,
         },
-        publish_revisions: (canonical_changed && batch.ledger_epoch == active_epoch)
-            .then_some((data_revision, status_revision)),
+        visible_changed: canonical_changed && batch.ledger_epoch == active_epoch,
     })
 }
 
