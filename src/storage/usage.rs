@@ -718,7 +718,9 @@ impl Ledger {
             [],
             |row| row.get(0),
         )?;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         if canonical_changed && batch.ledger_epoch == active_epoch {
             self.publish_revisions(data_revision, status_revision);
         }
@@ -804,7 +806,9 @@ impl Ledger {
                 "carry-in-progress retained working source state",
             ));
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         Ok(())
     }
 
@@ -882,7 +886,9 @@ impl Ledger {
                 ));
             }
         };
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         Ok(outcome)
     }
 
@@ -944,7 +950,9 @@ impl Ledger {
             source_file_id,
         )
         .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         Ok(())
     }
 
@@ -1020,7 +1028,9 @@ impl Ledger {
                 break;
             }
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         Ok(deleted)
     }
 }
