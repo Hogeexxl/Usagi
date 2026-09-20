@@ -1708,8 +1708,7 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     );
     assert!(build.is_none());
     assert_eq!(
-        revision,
-        revision_before,
+        revision, revision_before,
         "failed LocalReplay and identical shadow activation must not change query facts"
     );
     assert_eq!(offset, raw);
