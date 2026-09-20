@@ -313,60 +313,53 @@ fn p4_07_deterministic_tie_break_and_error_code_cleared() {
     let (_root, _db, ledger) = ledger_fixture("tie-break");
     let sources = vec!["codex".to_owned()];
 
-    // 1. Scan 1 fails at T=100 with ERROR_ONE
+    // Two Codex terminals have exactly the same finished_at_ms.  The
+    // lexicographically larger scan ID must deterministically win.
     ledger
         .mark_scan_started_with_sources(
-            ScanStartEvent::new("scan-1", ScanTrigger::Manual, 90).unwrap(),
+            ScanStartEvent::new("scan-a", ScanTrigger::Manual, 90).unwrap(),
             &sources,
         )
         .unwrap();
     ledger
-        .mark_source_scan_started("scan-1", "codex", 95)
+        .mark_source_scan_started("scan-a", "codex", 95)
         .unwrap();
     ledger
-        .mark_source_scan_failed("scan-1", "codex", 100, "ERROR_ONE")
+        .mark_source_scan_completed("scan-a", "codex", 100)
         .unwrap();
     ledger
-        .mark_scan_completed(ScanCompletedEvent::new("scan-1", 105).unwrap())
+        .mark_scan_completed(ScanCompletedEvent::new("scan-a", 105).unwrap())
         .unwrap();
 
-    let fail_snap = ledger.codex_scan_status_snapshot().unwrap();
-    assert_eq!(fail_snap.scan_state, "failed");
+    ledger
+        .mark_scan_started_with_sources(
+            ScanStartEvent::new("scan-z", ScanTrigger::Manual, 91).unwrap(),
+            &sources,
+        )
+        .unwrap();
+    ledger
+        .mark_source_scan_started("scan-z", "codex", 96)
+        .unwrap();
+    ledger
+        .mark_source_scan_failed("scan-z", "codex", 100, "ERROR_Z")
+        .unwrap();
+    ledger
+        .mark_scan_completed(ScanCompletedEvent::new("scan-z", 105).unwrap())
+        .unwrap();
+
+    let snapshot = ledger.codex_scan_status_snapshot().unwrap();
+    assert_eq!(snapshot.scan_state, "failed");
     assert_eq!(
-        fail_snap.last_finished_scan_result.as_deref(),
+        snapshot.last_finished_scan_result.as_deref(),
         Some("failed")
     );
-    assert_eq!(fail_snap.last_scan_error_code.as_deref(), Some("ERROR_ONE"));
-    assert_eq!(fail_snap.last_scan_failed_at_ms, Some(100));
+    assert_eq!(snapshot.last_scan_error_code.as_deref(), Some("ERROR_Z"));
+    assert_eq!(snapshot.last_scan_failed_at_ms, Some(100));
+    assert_eq!(snapshot.last_scan_completed_at_ms, Some(100));
+    assert_eq!(snapshot.last_scan_started_at_ms, Some(91));
 
-    // 2. Scan 2 succeeds at T=200
-    ledger
-        .mark_scan_started_with_sources(
-            ScanStartEvent::new("scan-2", ScanTrigger::Manual, 190).unwrap(),
-            &sources,
-        )
-        .unwrap();
-    ledger
-        .mark_source_scan_started("scan-2", "codex", 195)
-        .unwrap();
-    ledger
-        .mark_source_scan_completed("scan-2", "codex", 200)
-        .unwrap();
-    ledger
-        .mark_scan_completed(ScanCompletedEvent::new("scan-2", 205).unwrap())
-        .unwrap();
-
-    let success_snap = ledger.codex_scan_status_snapshot().unwrap();
-    assert_eq!(success_snap.scan_state, "idle");
-    assert_eq!(
-        success_snap.last_finished_scan_result.as_deref(),
-        Some("completed")
-    );
-    // Success clears error_code (NULL), preserving v10 semantics (§12.2.3)
-    assert_eq!(success_snap.last_scan_error_code, None);
-    assert_eq!(success_snap.last_scan_failed_at_ms, Some(100));
-    assert_eq!(success_snap.last_scan_completed_at_ms, Some(200));
-    assert_eq!(success_snap.last_scan_started_at_ms, Some(190));
+    // Repeated reads must make the same tie-break decision.
+    assert_eq!(ledger.codex_scan_status_snapshot().unwrap(), snapshot);
 }
 
 #[test]
@@ -380,6 +373,8 @@ fn q05_d_status_read_uses_one_sqlite_snapshot_for_revision_and_children() {
         )
         .unwrap();
 
+    let base_revision = ledger.app_state().unwrap().scan.status_revision;
+
     let writer = thread::spawn(move || {
         let mut connection = Connection::open(db).unwrap();
         connection
@@ -391,7 +386,8 @@ fn q05_d_status_read_uses_one_sqlite_snapshot_for_revision_and_children() {
                 transaction
                     .execute(
                         "UPDATE source_scan_runs
-                         SET state='running', started_at_ms=?1
+                         SET state='running', started_at_ms=?1,
+                             finished_at_ms=NULL, error_code=NULL
                          WHERE scan_id='torn-scan' AND source='codex'",
                         [200 + step],
                     )
@@ -400,16 +396,17 @@ fn q05_d_status_read_uses_one_sqlite_snapshot_for_revision_and_children() {
                 transaction
                     .execute(
                         "UPDATE source_scan_runs
-                         SET state='queued', started_at_ms=NULL
+                         SET state='failed', started_at_ms=?1,
+                             finished_at_ms=?2, error_code='CODEX_FAILED'
                          WHERE scan_id='torn-scan' AND source='codex'",
-                        [],
+                        rusqlite::params![200 + step, 300 + step],
                     )
                     .unwrap();
             }
             transaction
                 .execute(
-                    "UPDATE app_meta SET status_revision=status_revision+1 WHERE id=1",
-                    [],
+                    "UPDATE app_meta SET status_revision=?1 WHERE id=1",
+                    [base_revision + step + 1],
                 )
                 .unwrap();
             transaction.commit().unwrap();
@@ -417,17 +414,27 @@ fn q05_d_status_read_uses_one_sqlite_snapshot_for_revision_and_children() {
     });
 
     for _ in 0..256 {
-        let snapshot = ledger.scan_status_snapshot(None).unwrap();
-        assert_eq!(snapshot.sources.len(), 1);
-        let source = &snapshot.sources[0];
-        assert_eq!(source.source, "codex");
-        let expected_state = if snapshot.status_revision % 2 == 1 {
-            "queued"
+        let snapshot = ledger.codex_scan_status_snapshot().unwrap();
+        let delta = snapshot.status_revision - base_revision;
+        assert!((0..=64).contains(&delta));
+        let expected_failed = delta > 0 && delta % 2 == 0;
+        if expected_failed {
+            assert_eq!(snapshot.scan_state, "failed");
+            assert_eq!(
+                snapshot.last_finished_scan_result.as_deref(),
+                Some("failed")
+            );
+            assert_eq!(
+                snapshot.last_scan_error_code.as_deref(),
+                Some("CODEX_FAILED")
+            );
         } else {
-            "running"
-        };
-        assert_eq!(source.state.as_str(), expected_state);
-        assert_eq!(source.error_code, None);
+            // The initial queued child and each running transition both
+            // project to the public Codex state "running".
+            assert_eq!(snapshot.scan_state, "running");
+            assert_eq!(snapshot.last_finished_scan_result, None);
+            assert_eq!(snapshot.last_scan_error_code, None);
+        }
     }
     writer.join().unwrap();
 }

@@ -786,6 +786,215 @@ async fn t_public_api_v1_revision_and_status_expose_only_public_contract() {
 }
 
 #[tokio::test]
+async fn q05_c_public_status_excludes_zero_child_followup_from_prev11_fallback() {
+    let fixture = support::ApiFixture::new("public-v1-followup-fallback");
+    let base_t = fixture
+        .ledger
+        .codex_scan_status_snapshot()
+        .unwrap()
+        .last_scan_started_at_ms
+        .unwrap_or(0)
+        + 10_000;
+
+    fixture
+        .ledger
+        .mark_scan_started(
+            crate::domain::ScanStartEvent::new(
+                "q05-parent",
+                crate::domain::ScanTrigger::Manual,
+                base_t,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    fixture
+        .ledger
+        .reserve_scan_followup(
+            crate::domain::ReserveScanFollowupEvent::new(
+                "q05-followup",
+                crate::domain::ScanTrigger::Scheduled,
+                base_t + 1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    fixture
+        .ledger
+        .mark_scan_completed(
+            crate::domain::ScanCompletedEvent::new("q05-parent", base_t + 2).unwrap(),
+        )
+        .unwrap();
+
+    let db_path = fixture._root.path().join("mu.sqlite3");
+    let read_followup = || {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .query_row(
+                "SELECT state,
+                        (SELECT count(*) FROM source_scan_runs WHERE scan_id = ?1)
+                 FROM scan_runs WHERE scan_id = ?1",
+                ["q05-followup"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(read_followup(), ("queued".to_owned(), 0));
+
+    let queued = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(queued.status(), StatusCode::OK);
+    let queued = json_body(queued).await;
+    assert_eq!(queued["scan_state"], "idle");
+    assert_eq!(queued["last_finished_scan_result"], "completed");
+    assert_eq!(queued["last_scan_started_at_ms"], base_t);
+    assert_eq!(queued["last_scan_completed_at_ms"], base_t + 2);
+    let queued_failed_at = queued["last_scan_failed_at_ms"].clone();
+    let queued_error_code = queued["last_scan_error_code"].clone();
+
+    fixture
+        .ledger
+        .mark_followup_start_failed(
+            crate::domain::FollowupStartFailedEvent::new(
+                "q05-followup",
+                base_t + 3,
+                "SCAN_START_FAILED",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(read_followup(), ("start_failed".to_owned(), 0));
+
+    let start_failed = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(start_failed.status(), StatusCode::OK);
+    let start_failed = json_body(start_failed).await;
+    assert_eq!(start_failed["scan_state"], "idle");
+    assert_eq!(start_failed["last_finished_scan_result"], "completed");
+    assert_eq!(start_failed["last_scan_started_at_ms"], base_t);
+    assert_eq!(start_failed["last_scan_completed_at_ms"], base_t + 2);
+    assert_eq!(start_failed["last_scan_failed_at_ms"], queued_failed_at);
+    assert_eq!(start_failed["last_scan_error_code"], queued_error_code);
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn q05_public_v1_status_state_matrix_keeps_ready_binding() {
+    let fixture = support::ApiFixture::new("public-v1-state-matrix");
+    let base_t = fixture
+        .ledger
+        .codex_scan_status_snapshot()
+        .unwrap()
+        .last_scan_started_at_ms
+        .unwrap_or(0)
+        + 20_000;
+
+    fixture
+        .ledger
+        .mark_scan_started_with_sources(
+            crate::domain::ScanStartEvent::new(
+                "q05-matrix-complete",
+                crate::domain::ScanTrigger::Manual,
+                base_t,
+            )
+            .unwrap(),
+            &["codex".to_owned()],
+        )
+        .unwrap();
+
+    // A queued Codex child is publicly observable as running.
+    let queued = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(queued.status(), StatusCode::OK);
+    let queued = json_body(queued).await;
+    assert_eq!(queued["scan_state"], "running");
+    assert_eq!(queued["source_binding_status"], "ready");
+    assert_eq!(queued["last_scan_started_at_ms"], base_t);
+
+    fixture
+        .ledger
+        .mark_source_scan_started("q05-matrix-complete", "codex", base_t + 1)
+        .unwrap();
+    let running = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(running.status(), StatusCode::OK);
+    let running = json_body(running).await;
+    assert_eq!(running["scan_state"], "running");
+    assert_eq!(running["source_binding_status"], "ready");
+
+    fixture
+        .ledger
+        .mark_source_scan_completed("q05-matrix-complete", "codex", base_t + 2)
+        .unwrap();
+    // A completed Codex child projects idle/completed even before the global
+    // parent terminal commit; this is the public Codex projection contract.
+    let completed_child = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(completed_child.status(), StatusCode::OK);
+    let completed_child = json_body(completed_child).await;
+    assert_eq!(completed_child["scan_state"], "idle");
+    assert_eq!(completed_child["last_finished_scan_result"], "completed");
+    assert_eq!(completed_child["last_scan_completed_at_ms"], base_t + 2);
+    assert!(completed_child["last_scan_error_code"].is_null());
+    assert_eq!(completed_child["source_binding_status"], "ready");
+
+    fixture
+        .ledger
+        .mark_scan_completed(
+            crate::domain::ScanCompletedEvent::new("q05-matrix-complete", base_t + 3).unwrap(),
+        )
+        .unwrap();
+    let completed = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    let completed = json_body(completed).await;
+    assert_eq!(completed["scan_state"], "idle");
+    assert_eq!(completed["last_finished_scan_result"], "completed");
+    assert_eq!(completed["last_scan_completed_at_ms"], base_t + 2);
+    assert_eq!(completed["source_binding_status"], "ready");
+
+    fixture
+        .ledger
+        .mark_scan_started_with_sources(
+            crate::domain::ScanStartEvent::new(
+                "q05-matrix-failed",
+                crate::domain::ScanTrigger::Manual,
+                base_t + 10,
+            )
+            .unwrap(),
+            &["codex".to_owned()],
+        )
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("q05-matrix-failed", "codex", base_t + 11)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_failed("q05-matrix-failed", "codex", base_t + 12, "CODEX_FAILED")
+        .unwrap();
+    let failed_child = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(failed_child.status(), StatusCode::OK);
+    let failed_child = json_body(failed_child).await;
+    assert_eq!(failed_child["scan_state"], "failed");
+    assert_eq!(failed_child["last_finished_scan_result"], "failed");
+    assert_eq!(failed_child["last_scan_failed_at_ms"], base_t + 12);
+    assert_eq!(failed_child["last_scan_error_code"], "CODEX_FAILED");
+    assert_eq!(failed_child["source_binding_status"], "ready");
+
+    fixture
+        .ledger
+        .mark_scan_completed(
+            crate::domain::ScanCompletedEvent::new("q05-matrix-failed", base_t + 13).unwrap(),
+        )
+        .unwrap();
+    let failed = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(failed.status(), StatusCode::OK);
+    let failed = json_body(failed).await;
+    assert_eq!(failed["scan_state"], "failed");
+    assert_eq!(failed["last_finished_scan_result"], "failed");
+    assert_eq!(failed["last_scan_failed_at_ms"], base_t + 12);
+    assert_eq!(failed["last_scan_error_code"], "CODEX_FAILED");
+    assert_eq!(failed["source_binding_status"], "ready");
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn t_internal_status_projects_current_source_children_in_stable_order() {
     let fixture = support::ApiFixture::new("internal-status-sources");
     let sources = vec!["zeta".to_owned(), "codex".to_owned(), "alpha".to_owned()];
