@@ -96,6 +96,7 @@ impl Ledger {
             let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
                 "legacy-codex-metadata-commit",
                 &mut connection,
+            Some(self.revision_publisher()),
             )?;
             let changed = source_tx.apply_codex_metadata_group(self, group)?;
             if changed {
@@ -110,9 +111,6 @@ impl Ledger {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            if changed {
-                self.publish_revisions(revision, status_revision);
-            }
             if revision < 0 {
                 return Err(StorageError::invalid_state(
                     "app_meta.data_revision must be non-negative".to_owned(),
