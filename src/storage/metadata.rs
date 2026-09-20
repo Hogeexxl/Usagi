@@ -11,7 +11,7 @@ use crate::domain::{
     MetadataSourceCommit, MetadataThreadCommit, ParentHintProvenance, Patch, ProjectKind,
     ResolvedThreadPatch, RolloutMetadataFact, SourceArea, SourceFileState,
 };
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{Ledger, Result as StorageResult, StorageError};
 
@@ -131,6 +131,15 @@ impl Ledger {
         CommitOutcome::new(batch.groups.len(), data_revision, data_changed)
             .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
+}
+
+pub(crate) fn apply_codex_metadata_group(
+    transaction: &Connection,
+    ledger: &Ledger,
+    group: &MetadataThreadCommit,
+) -> StorageResult<bool> {
+    ensure_source_ready(transaction, ledger)?;
+    commit_group(transaction, group)
 }
 
 fn commit_group(
