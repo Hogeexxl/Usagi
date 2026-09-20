@@ -794,7 +794,7 @@ struct FrozenMember {
 }
 
 fn freeze_initial_members(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     parser: i64,
@@ -818,7 +818,7 @@ fn freeze_initial_members(
 }
 
 fn add_new_present_members(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     parser: i64,
@@ -846,7 +846,7 @@ fn add_new_present_members(
 }
 
 fn replace_target_preserving_members(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     parser: i64,
@@ -899,7 +899,7 @@ fn replace_target_preserving_members(
 /// intact, including pending-ready progress, completion proofs and carry
 /// cursors. Only invalidated/new members are initialized from zero.
 pub(crate) fn replace_build_preserving_all_members_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     parser: i64,
@@ -1111,7 +1111,7 @@ pub(crate) fn replace_build_preserving_all_members_tx(
 }
 
 pub(crate) fn cleanup_build_source(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     source_file_id: i64,
 ) -> Result<(), RebuildError> {
@@ -1154,7 +1154,7 @@ pub(crate) fn cleanup_build_source(
 /// transaction. The caller has already written `source_files` (including
 /// missing transitions) but has not committed the transaction yet.
 pub(crate) fn apply_source_observations_to_build_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     observed_source_ids: &[i64],
     results: &mut [crate::domain::SourceObservationResult],
     usage_carry_proofs: &std::collections::HashMap<
@@ -1365,7 +1365,7 @@ pub(crate) fn apply_source_observations_to_build_tx(
 }
 
 fn active_contributors(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
 ) -> Result<BTreeSet<i64>, RebuildError> {
     if active_epoch == 0 {
@@ -1383,7 +1383,7 @@ fn active_contributors(
 }
 
 fn freeze_member(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     source_file_id: i64,
     active: bool,
@@ -1546,7 +1546,7 @@ fn freeze_member(
 }
 
 pub(crate) fn active_state_fingerprint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     source_file_id: i64,
 ) -> Result<Option<Vec<u8>>, RebuildError> {
@@ -1602,7 +1602,7 @@ pub(crate) fn active_state_fingerprint(
 }
 
 fn insert_manifest(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     parser: i64,
     member: &FrozenMember,
@@ -1654,7 +1654,7 @@ fn insert_manifest(
 }
 
 fn reset_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
     parser: i64,
 ) -> Result<(), RebuildError> {
@@ -1672,7 +1672,7 @@ fn reset_checkpoint(
     Ok(())
 }
 
-fn current_build(transaction: &Transaction<'_>) -> Result<(i64, i64), RebuildError> {
+fn current_build(transaction: &Connection) -> Result<(i64, i64), RebuildError> {
     let pair = transaction.query_row(
         "SELECT build_epoch,build_parser_version FROM source_usage_epochs
          WHERE source='codex'",
@@ -1684,7 +1684,7 @@ fn current_build(transaction: &Transaction<'_>) -> Result<(i64, i64), RebuildErr
         .ok_or(RebuildError::Cas("no active build"))
 }
 
-fn load_snapshot(transaction: &Transaction<'_>) -> Result<BuildSnapshot, RebuildError> {
+fn load_snapshot(transaction: &Connection) -> Result<BuildSnapshot, RebuildError> {
     let (active_epoch, build_epoch, parser): (i64, i64, i64) = transaction.query_row(
         "SELECT active_epoch,build_epoch,build_parser_version
          FROM source_usage_epochs WHERE source='codex'",
@@ -1739,7 +1739,7 @@ fn load_snapshot(transaction: &Transaction<'_>) -> Result<BuildSnapshot, Rebuild
 }
 
 fn load_member_for_update(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     source_file_id: i64,
 ) -> Result<FrozenMember, RebuildError> {
@@ -1793,7 +1793,7 @@ fn load_member_for_update(
 }
 
 fn verify_current_identity(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     member: &FrozenMember,
 ) -> Result<(), RebuildError> {
     let matches: i64 = transaction.query_row(
@@ -1852,7 +1852,7 @@ fn tail_columns(
 }
 
 fn state_matches_progress(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     progress: &SourceProgress,
 ) -> Result<bool, RebuildError> {
@@ -1881,7 +1881,7 @@ fn state_matches_progress(
 }
 
 fn verify_quarantined_source(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     source_file_id: i64,
 ) -> Result<(), RebuildError> {
@@ -1919,7 +1919,7 @@ fn verify_quarantined_source(
 }
 
 fn query_ids_string(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     value: &str,
 ) -> Result<Vec<i64>, RebuildError> {
@@ -1929,7 +1929,7 @@ fn query_ids_string(
 }
 
 pub(crate) fn verify_completion_row_for_storage(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     source_file_id: i64,
 ) -> Result<(), RebuildError> {
@@ -1985,7 +1985,7 @@ pub(crate) fn verify_completion_row_for_storage(
 }
 
 fn verify_complete_present_set(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
     supplied: &BTreeSet<i64>,
 ) -> Result<(), RebuildError> {
@@ -2019,7 +2019,7 @@ fn verify_complete_present_set(
 }
 
 fn verify_present_ids(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     supplied: &BTreeSet<i64>,
 ) -> Result<(), RebuildError> {
     let actual = query_ids_no_param(
@@ -2045,7 +2045,7 @@ fn normalized_ids(ids: &[i64]) -> Result<BTreeSet<i64>, RebuildError> {
 }
 
 fn query_ids(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     value: i64,
 ) -> Result<Vec<i64>, RebuildError> {
@@ -2054,7 +2054,7 @@ fn query_ids(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn query_ids_no_param(transaction: &Transaction<'_>, sql: &str) -> Result<Vec<i64>, RebuildError> {
+fn query_ids_no_param(transaction: &Connection, sql: &str) -> Result<Vec<i64>, RebuildError> {
     let mut statement = transaction.prepare(sql)?;
     let rows = statement.query_map([], |row| row.get(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
