@@ -305,30 +305,12 @@ impl<'a> UsageLedger<'a> {
         let present = present_source_ids.into_iter().collect::<BTreeSet<_>>();
         let invalidated = invalidated_source_ids.into_iter().collect::<BTreeSet<_>>();
         let mut connection = self.ledger.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-usage:replace_build_sources",
             &mut connection,
         )
         .map_err(storage::StorageError::sqlite)?;
-        let tx = source_tx
-            .legacy_transaction()
-            .ok_or(UsageLedgerError::Invalid(
-                "legacy Codex SourceWriteTxn missing transaction",
-            ))?;
-        let (active, build): (i64, Option<i64>) = tx
-            .query_row(
-                "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(storage::StorageError::sqlite)?;
-        let Some(build) = build else {
-            return Err(UsageLedgerError::Invalid("no usage build to replace"));
-        };
-        super::rebuild::replace_build_preserving_all_members_tx(
-            &tx,
-            active,
-            build,
+        source_tx.apply_codex_replace_build_sources(
             parser_version,
             &present,
             &invalidated,
