@@ -96,7 +96,7 @@ impl Ledger {
             let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
                 "legacy-codex-metadata-commit",
                 &mut connection,
-            Some(self.revision_publisher()),
+                Some(self.revision_publisher()),
             )?;
             let changed = source_tx.apply_codex_metadata_group(self, group)?;
             if changed {
@@ -135,10 +135,7 @@ pub(crate) fn apply_codex_metadata_group(
     commit_group(transaction, group)
 }
 
-fn commit_group(
-    transaction: &Connection,
-    group: &MetadataThreadCommit,
-) -> StorageResult<bool> {
+fn commit_group(transaction: &Connection, group: &MetadataThreadCommit) -> StorageResult<bool> {
     let current_revision = read_data_revision(transaction)?;
     let current_thread = read_thread(transaction, &group.thread_id)?;
 
@@ -246,10 +243,7 @@ fn commit_group(
     Ok(stable_changed)
 }
 
-pub(super) fn ensure_source_ready(
-    transaction: &Connection,
-    ledger: &Ledger,
-) -> StorageResult<()> {
+pub(super) fn ensure_source_ready(transaction: &Connection, ledger: &Ledger) -> StorageResult<()> {
     let (fingerprint, status): (Option<String>, String) = transaction
         .query_row(
             "SELECT codex_home_fingerprint, source_binding_status
@@ -371,10 +365,7 @@ fn read_thread(transaction: &Connection, thread_id: &str) -> StorageResult<Optio
         .map_err(StorageError::from)
 }
 
-fn read_source(
-    transaction: &Connection,
-    source_file_id: i64,
-) -> StorageResult<SourceFileState> {
+fn read_source(transaction: &Connection, source_file_id: i64) -> StorageResult<SourceFileState> {
     let source = transaction
         .query_row(
             "SELECT
@@ -969,11 +960,7 @@ fn validate_thread_relationships(
     Ok(())
 }
 
-fn write_thread(
-    transaction: &Connection,
-    thread: &ThreadRow,
-    existed: bool,
-) -> StorageResult<()> {
+fn write_thread(transaction: &Connection, thread: &ThreadRow, existed: bool) -> StorageResult<()> {
     if existed {
         let changed = transaction.execute(
             "UPDATE threads SET
