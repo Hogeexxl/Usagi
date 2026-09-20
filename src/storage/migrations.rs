@@ -3008,7 +3008,8 @@ mod tests {
                 "UPDATE usage_source_states
                  SET device_id=?1,inode=?2,usage_parser_version=?3,
                      canonical_algorithm_version=?4,resolved_through_offset=?5,
-                     observed_raw_size=?5,raw_tail_status='none',raw_tail_start_offset=NULL
+                     observed_raw_size=?5,raw_tail_status='none',raw_tail_start_offset=NULL,
+                     active_turn_key=NULL
                  WHERE ledger_epoch=1 AND source_file_id=1",
                 params![
                     device_id,
