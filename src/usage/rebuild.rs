@@ -681,6 +681,33 @@ pub(crate) fn apply_codex_rebuild_quarantine_session(
 }
 
 
+pub(crate) fn apply_codex_replace_build_sources(
+    transaction: &Connection,
+    parser_version: i64,
+    present: &BTreeSet<i64>,
+    invalidated: &BTreeSet<i64>,
+    now_ms: i64,
+) -> Result<(), RebuildError> {
+    let (active, build): (i64, Option<i64>) = transaction.query_row(
+        "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let Some(build) = build else {
+        return Err(RebuildError::Invalid("no usage build to replace"));
+    };
+    replace_build_preserving_all_members_tx(
+        transaction,
+        active,
+        build,
+        parser_version,
+        present,
+        invalidated,
+        now_ms,
+    )
+}
+
+
 pub(crate) fn apply_codex_rebuild_block_source(
     transaction: &Connection,
     source_file_id: i64,
