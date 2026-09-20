@@ -1219,7 +1219,7 @@ fn read_session_visibility(
 }
 
 fn update_session_row(
-    connection: &mut rusqlite::Connection,
+    connection: &rusqlite::Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
@@ -1318,7 +1318,7 @@ fn update_session_row(
 }
 
 fn insert_session_row(
-    connection: &mut rusqlite::Connection,
+    connection: &rusqlite::Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
@@ -1388,7 +1388,7 @@ fn option_i64_patch(patch: &Patch<i64>) -> Option<i64> {
 }
 
 fn validate_session_relationships(
-    connection: &mut rusqlite::Connection,
+    connection: &rusqlite::Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
@@ -1417,7 +1417,7 @@ fn validate_session_relationships(
 }
 
 fn validate_event_session_source(
-    connection: &mut rusqlite::Connection,
+    connection: &rusqlite::Connection,
     source: &SourceId,
     thread_id: &str,
     root_session_id: &str,
