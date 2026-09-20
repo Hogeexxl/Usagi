@@ -278,6 +278,57 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_begin_usage_carry(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<()> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_begin_usage_carry(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_resume_usage_carry(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<crate::storage::usage::CarryStepOutcome> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_resume_usage_carry(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_complete_usage_build_source(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<()> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_complete_usage_build_source(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_cleanup_inactive_usage(
+        &mut self,
+        max_rows: usize,
+    ) -> crate::storage::Result<usize> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_cleanup_inactive_usage(connection, max_rows)
+        })
+    }
+
     fn apply_codex_storage<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
