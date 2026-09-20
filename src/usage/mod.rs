@@ -39,7 +39,6 @@ pub use rebuild::{
     RebuildError, RebuildLedger, SourceProgress, TailProof,
 };
 
-
 /// Compare the user-visible usage projection that would be selected by two
 /// epochs for one source. Epoch identity itself is deliberately ignored.
 pub(crate) fn usage_epochs_visible_equal(
@@ -141,7 +140,6 @@ pub use ledger::{
     UsageCommitOutcome, UsageLedger, UsageLedgerError, UsageScanState, UsageSourceScanPlan,
 };
 
-
 #[cfg(test)]
 mod visibility_tests {
     use super::*;
@@ -177,9 +175,7 @@ mod visibility_tests {
             )
             .unwrap();
         let parser = analytics::SKILL_USAGE_PARSER_VERSION;
-        assert!(
-            usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap()
-        );
+        assert!(usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap());
 
         connection
             .execute(
@@ -187,18 +183,14 @@ mod visibility_tests {
                 [],
             )
             .unwrap();
-        assert!(
-            !usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap()
-        );
+        assert!(!usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap());
         connection
             .execute(
                 "INSERT INTO skill_usage_events VALUES (2,10,'root','gpt','review')",
                 [],
             )
             .unwrap();
-        assert!(
-            usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap()
-        );
+        assert!(usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap());
 
         connection
             .execute(
@@ -223,18 +215,14 @@ mod visibility_tests {
                 [],
             )
             .unwrap();
-        assert!(
-            !usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap()
-        );
+        assert!(!usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap());
         connection
             .execute(
                 "INSERT INTO usage_session_quarantine VALUES (2,'root','BROKEN',10)",
                 [],
             )
             .unwrap();
-        assert!(
-            usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap()
-        );
+        assert!(usage_epochs_visible_equal(&connection, "codex", 1, parser, 2, parser).unwrap());
         assert!(
             !usage_epochs_visible_equal(&connection, "codex", 1, parser - 1, 2, parser).unwrap(),
             "a visible Skills ready-state transition must advance revision"

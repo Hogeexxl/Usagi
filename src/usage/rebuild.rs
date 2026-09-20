@@ -2264,12 +2264,7 @@ mod tests {
                 chain_block_reason,updated_at_ms)
              VALUES (1,?1,1,?1,?1,?2,?3,?4,?4,'none',NULL,'root','root',
                      'owning_live','continuous',NULL,1)",
-                params![
-                    source_id,
-                    parser_version,
-                    canonical_algorithm_version,
-                    size
-                ],
+                params![source_id, parser_version, canonical_algorithm_version, size],
             )
             .unwrap();
     }
@@ -2544,9 +2539,7 @@ mod tests {
             })
             .unwrap();
 
-        let activated = RebuildLedger::new(&mut connection)
-            .activate(&[1])
-            .unwrap();
+        let activated = RebuildLedger::new(&mut connection).activate(&[1]).unwrap();
 
         assert_eq!(activated.active_epoch, 2);
         assert_eq!(activated.data_revision, before_revision);
@@ -2571,9 +2564,7 @@ mod tests {
             })
             .unwrap();
 
-        let activated = RebuildLedger::new(&mut connection)
-            .activate(&[1])
-            .unwrap();
+        let activated = RebuildLedger::new(&mut connection).activate(&[1]).unwrap();
 
         assert_eq!(activated.active_epoch, 2);
         assert_eq!(activated.data_revision, before_revision + 1);

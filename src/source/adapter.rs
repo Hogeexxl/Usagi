@@ -1234,7 +1234,6 @@ impl<'a> SourceWriteTxn<'a> {
         Ok(())
     }
 
-
     pub fn commit(mut self) -> Result<(), SourceStorageError> {
         self.require_open()?;
         let revisions = if self.data_changed {
