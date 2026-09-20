@@ -636,79 +636,14 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative carry time"));
         }
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(begin_usage_carry)),
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-        })?;
-        let epoch = read_epoch(&transaction)?;
-        let build_epoch = epoch
-            .build_epoch
-            .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
-        let parser = epoch.working_parser_version();
-        let plan = load_source_plan(&transaction, source_file_id, parser, epoch.clone())?;
-        if plan.action != UsagePlanAction::BeginCarry {
-            return Err(StorageError::invalid_state(
-                "usage source is not eligible for BeginCarry",
-            ));
-        }
-        let build = plan
-            .build
-            .as_ref()
-            .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
-        verify_carry_canonical_events(&transaction, build_epoch)?;
-
-        let partial_seed = plan.checkpoint.as_ref().is_some_and(|checkpoint| {
-            checkpoint.processing_status == CheckpointProcessingStatus::Ready
-        });
-        if partial_seed {
-            transaction.execute(
-                "DELETE FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
-                params![build_epoch, source_file_id],
-            )?;
-        }
-        let changed = transaction.execute(
-            "UPDATE source_checkpoints SET parser_version=?1,committed_offset=0,guard_hash=NULL,
-                    processing_status='rebuild_required',last_error_code=NULL
-             WHERE source_file_id=?2 AND consumer_kind='usage'",
-            params![parser, source_file_id],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::invalid_state(
-                "usage carry checkpoint CAS failed",
-            ));
-        }
-        let changed = transaction.execute(
-            "UPDATE usage_build_sources SET carry_from_epoch=?1,carry_phase='occurrences',
-                    carry_after_start_offset=NULL,carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,
-                    completion_status='pending',completion_error_code=NULL,
-                    completed_generation=NULL,completed_through_offset=NULL,updated_at_ms=?2
-             WHERE build_epoch=?3 AND source_file_id=?4
-               AND carry_phase='none' AND completion_status IN ('pending','blocked')
-               AND required_through_offset=?5 AND active_committed_offset=?5",
-            params![epoch.active_epoch, now_ms, build_epoch, source_file_id, build.active_committed_offset],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::invalid_state(
-                "usage carry manifest CAS failed",
-            ));
-        }
-        let working_state_count: i64 = transaction.query_row(
-            "SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
-            params![build_epoch, source_file_id],
-            |row| row.get(0),
-        )?;
-        if working_state_count != 0 {
-            return Err(StorageError::invalid_state(
-                "carry-in-progress retained working source state",
-            ));
-        }
+        source_tx.apply_codex_begin_usage_carry(source_file_id, now_ms)?;
         source_tx
             .commit()
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-        Ok(())
+            .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
 
     pub(crate) fn resume_usage_carry(
@@ -720,71 +655,11 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative carry time"));
         }
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(resume_usage_carry)),
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-        })?;
-        let epoch = read_epoch(&transaction)?;
-        let build_epoch = epoch
-            .build_epoch
-            .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
-        let parser = epoch.working_parser_version();
-        let plan = load_source_plan(&transaction, source_file_id, parser, epoch.clone())?;
-        if plan.action != UsagePlanAction::ResumeCarry {
-            return Err(StorageError::invalid_state(
-                "usage source is not in ResumeCarry",
-            ));
-        }
-        let build = plan
-            .build
-            .as_ref()
-            .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
-        verify_carry_db_proof(&transaction, epoch.clone(), source_file_id, build)?;
-
-        let phase = build.carry_phase;
-        let outcome = match phase {
-            UsageCarryPhase::Occurrences => {
-                carry_occurrence_page(
-                    &transaction,
-                    epoch.active_epoch,
-                    build_epoch,
-                    source_file_id,
-                    now_ms,
-                )?;
-                CarryStepOutcome::Progress
-            }
-            UsageCarryPhase::Turns => {
-                carry_turn_page(
-                    &transaction,
-                    epoch.active_epoch,
-                    build_epoch,
-                    source_file_id,
-                    now_ms,
-                )?;
-                CarryStepOutcome::Progress
-            }
-            UsageCarryPhase::Anomalies => {
-                carry_anomaly_page(
-                    &transaction,
-                    epoch.active_epoch,
-                    build_epoch,
-                    source_file_id,
-                    now_ms,
-                )?;
-                CarryStepOutcome::Progress
-            }
-            UsageCarryPhase::Finalize => {
-                finalize_carry(&transaction, epoch, source_file_id, build, now_ms)?
-            }
-            UsageCarryPhase::None => {
-                return Err(StorageError::invalid_state(
-                    "usage carry cursor is not initialized",
-                ));
-            }
-        };
+        let outcome = source_tx.apply_codex_resume_usage_carry(source_file_id, now_ms)?;
         source_tx
             .commit()
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
@@ -800,133 +675,29 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative completion time"));
         }
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!(
                 "legacy-codex-usage:",
                 stringify!(complete_usage_build_source)
             ),
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-        })?;
-        let epoch = read_epoch(&transaction)?;
-        let build_epoch = epoch
-            .build_epoch
-            .ok_or_else(|| StorageError::invalid_state("CompleteOnly requires a build"))?;
-        let plan = load_source_plan(
-            &transaction,
-            source_file_id,
-            epoch.working_parser_version(),
-            epoch,
-        )?;
-        if plan.action != UsagePlanAction::CompleteOnly {
-            return Err(StorageError::invalid_state(
-                "usage source is not eligible for CompleteOnly",
-            ));
-        }
-        let build = plan
-            .build
-            .ok_or_else(|| StorageError::invalid_state("usage build manifest is missing"))?;
-        let changed = transaction.execute(
-            "UPDATE usage_build_sources SET completion_status='rebuilt',completion_error_code=NULL,
-                    completed_generation=required_generation,completed_through_offset=required_through_offset,
-                    carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                    carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?1
-             WHERE build_epoch=?2 AND source_file_id=?3 AND carry_phase='none'
-               AND completion_status IN ('pending','blocked')
-               AND required_generation=?4 AND required_through_offset=?5",
-            params![now_ms, build_epoch, source_file_id, build.expected_file_generation, build.required_through_offset],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::invalid_state(
-                "CompleteOnly manifest CAS failed",
-            ));
-        }
-        crate::usage::rebuild::verify_completion_row_for_storage(
-            &transaction,
-            build_epoch,
-            source_file_id,
-        )
-        .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+        source_tx.apply_codex_complete_usage_build_source(source_file_id, now_ms)?;
         source_tx
             .commit()
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-        Ok(())
+            .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
 
     pub(crate) fn cleanup_inactive_usage(&self, max_rows: usize) -> StorageResult<usize> {
         if max_rows == 0 {
             return Ok(0);
         }
-        let limit = i64::try_from(max_rows)
-            .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(cleanup_inactive_usage)),
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-        })?;
-        let (active, build): (i64, Option<i64>) = transaction.query_row(
-            "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let excluded_build = build.unwrap_or(-1);
-        let statements = [
-            "DELETE FROM usage_session_quarantine_sources WHERE rowid IN (
-                SELECT rowid FROM usage_session_quarantine_sources
-                WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-            "DELETE FROM usage_session_quarantine WHERE rowid IN (
-                SELECT q.rowid FROM usage_session_quarantine q
-                WHERE q.ledger_epoch<>?1 AND q.ledger_epoch<>?2
-                  AND NOT EXISTS (
-                    SELECT 1 FROM usage_session_quarantine_sources qs
-                    WHERE qs.ledger_epoch=q.ledger_epoch AND qs.root_session_id=q.root_session_id)
-                ORDER BY q.ledger_epoch,q.rowid LIMIT ?3)",
-            "DELETE FROM usage_event_occurrences WHERE rowid IN (
-                SELECT rowid FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-            "DELETE FROM usage_events WHERE rowid IN (
-                SELECT e.rowid FROM usage_events e
-                JOIN source_usage_epochs sue ON sue.source=e.source
-                WHERE e.source_epoch<>sue.active_epoch
-                  AND (sue.build_epoch IS NULL OR e.source_epoch<>sue.build_epoch)
-                AND NOT EXISTS (SELECT 1 FROM usage_event_occurrences o
-                                  WHERE o.source='codex' AND o.source=e.source
-                                    AND o.ledger_epoch=e.source_epoch AND o.event_id=e.event_id)
-                ORDER BY e.source,e.source_epoch,e.rowid LIMIT ?3)",
-            "DELETE FROM skill_usage_events WHERE rowid IN (
-                SELECT rowid FROM skill_usage_events WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-            "DELETE FROM turns WHERE rowid IN (
-                SELECT rowid FROM turns WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-            "DELETE FROM ingest_anomalies WHERE rowid IN (
-                SELECT rowid FROM ingest_anomalies WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-            "DELETE FROM usage_source_states WHERE rowid IN (
-                SELECT rowid FROM usage_source_states WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
-                ORDER BY ledger_epoch,rowid LIMIT ?3)",
-        ];
-        let mut deleted = 0usize;
-        for sql in statements {
-            if deleted >= max_rows {
-                break;
-            }
-            let remaining = i64::try_from(max_rows - deleted)
-                .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
-            let count =
-                transaction.execute(sql, params![active, excluded_build, remaining.min(limit)])?;
-            deleted += count;
-            if count > 0 {
-                // Preserve FK-safe phase ordering across bounded cleanup calls.
-                break;
-            }
-        }
+        let deleted = source_tx.apply_codex_cleanup_inactive_usage(max_rows)?;
         source_tx
             .commit()
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
@@ -1048,6 +819,265 @@ pub(crate) fn apply_codex_usage_batch(
         publish_revisions: (canonical_changed && batch.ledger_epoch == active_epoch)
             .then_some((data_revision, status_revision)),
     })
+}
+
+pub(crate) fn apply_codex_begin_usage_carry(
+    transaction: &Connection,
+    source_file_id: i64,
+    now_ms: i64,
+) -> StorageResult<()> {
+    if now_ms < 0 {
+        return Err(StorageError::invalid_state("negative carry time"));
+    }
+    let epoch = read_epoch(transaction)?;
+    let build_epoch = epoch
+        .build_epoch
+        .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
+    let parser = epoch.working_parser_version();
+    let plan = load_source_plan(transaction, source_file_id, parser, epoch.clone())?;
+    if plan.action != UsagePlanAction::BeginCarry {
+        return Err(StorageError::invalid_state(
+            "usage source is not eligible for BeginCarry",
+        ));
+    }
+    let build = plan
+        .build
+        .as_ref()
+        .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
+    verify_carry_canonical_events(transaction, build_epoch)?;
+
+    let partial_seed = plan.checkpoint.as_ref().is_some_and(|checkpoint| {
+        checkpoint.processing_status == CheckpointProcessingStatus::Ready
+    });
+    if partial_seed {
+        transaction.execute(
+            "DELETE FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
+            params![build_epoch, source_file_id],
+        )?;
+    }
+    let changed = transaction.execute(
+        "UPDATE source_checkpoints SET parser_version=?1,committed_offset=0,guard_hash=NULL,
+                processing_status='rebuild_required',last_error_code=NULL
+         WHERE source_file_id=?2 AND consumer_kind='usage'",
+        params![parser, source_file_id],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "usage carry checkpoint CAS failed",
+        ));
+    }
+    let changed = transaction.execute(
+        "UPDATE usage_build_sources SET carry_from_epoch=?1,carry_phase='occurrences',
+                carry_after_start_offset=NULL,carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,
+                completion_status='pending',completion_error_code=NULL,
+                completed_generation=NULL,completed_through_offset=NULL,updated_at_ms=?2
+         WHERE build_epoch=?3 AND source_file_id=?4
+           AND carry_phase='none' AND completion_status IN ('pending','blocked')
+           AND required_through_offset=?5 AND active_committed_offset=?5",
+        params![epoch.active_epoch, now_ms, build_epoch, source_file_id, build.active_committed_offset],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "usage carry manifest CAS failed",
+        ));
+    }
+    let working_state_count: i64 = transaction.query_row(
+        "SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
+        params![build_epoch, source_file_id],
+        |row| row.get(0),
+    )?;
+    if working_state_count != 0 {
+        return Err(StorageError::invalid_state(
+            "carry-in-progress retained working source state",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_codex_resume_usage_carry(
+    transaction: &Connection,
+    source_file_id: i64,
+    now_ms: i64,
+) -> StorageResult<CarryStepOutcome> {
+    if now_ms < 0 {
+        return Err(StorageError::invalid_state("negative carry time"));
+    }
+    let epoch = read_epoch(transaction)?;
+    let build_epoch = epoch
+        .build_epoch
+        .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
+    let parser = epoch.working_parser_version();
+    let plan = load_source_plan(transaction, source_file_id, parser, epoch.clone())?;
+    if plan.action != UsagePlanAction::ResumeCarry {
+        return Err(StorageError::invalid_state(
+            "usage source is not in ResumeCarry",
+        ));
+    }
+    let build = plan
+        .build
+        .as_ref()
+        .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
+    verify_carry_db_proof(transaction, epoch.clone(), source_file_id, build)?;
+
+    match build.carry_phase {
+        UsageCarryPhase::Occurrences => {
+            carry_occurrence_page(
+                transaction,
+                epoch.active_epoch,
+                build_epoch,
+                source_file_id,
+                now_ms,
+            )?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Turns => {
+            carry_turn_page(
+                transaction,
+                epoch.active_epoch,
+                build_epoch,
+                source_file_id,
+                now_ms,
+            )?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Anomalies => {
+            carry_anomaly_page(
+                transaction,
+                epoch.active_epoch,
+                build_epoch,
+                source_file_id,
+                now_ms,
+            )?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Finalize => finalize_carry(transaction, epoch, source_file_id, build, now_ms),
+        UsageCarryPhase::None => Err(StorageError::invalid_state(
+            "usage carry cursor is not initialized",
+        )),
+    }
+}
+
+pub(crate) fn apply_codex_complete_usage_build_source(
+    transaction: &Connection,
+    source_file_id: i64,
+    now_ms: i64,
+) -> StorageResult<()> {
+    if now_ms < 0 {
+        return Err(StorageError::invalid_state("negative completion time"));
+    }
+    let epoch = read_epoch(transaction)?;
+    let build_epoch = epoch
+        .build_epoch
+        .ok_or_else(|| StorageError::invalid_state("CompleteOnly requires a build"))?;
+    let plan = load_source_plan(
+        transaction,
+        source_file_id,
+        epoch.working_parser_version(),
+        epoch,
+    )?;
+    if plan.action != UsagePlanAction::CompleteOnly {
+        return Err(StorageError::invalid_state(
+            "usage source is not eligible for CompleteOnly",
+        ));
+    }
+    let build = plan
+        .build
+        .ok_or_else(|| StorageError::invalid_state("usage build manifest is missing"))?;
+    let changed = transaction.execute(
+        "UPDATE usage_build_sources SET completion_status='rebuilt',completion_error_code=NULL,
+                completed_generation=required_generation,completed_through_offset=required_through_offset,
+                carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?1
+         WHERE build_epoch=?2 AND source_file_id=?3 AND carry_phase='none'
+           AND completion_status IN ('pending','blocked')
+           AND required_generation=?4 AND required_through_offset=?5",
+        params![
+            now_ms,
+            build_epoch,
+            source_file_id,
+            build.expected_file_generation,
+            build.required_through_offset
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "CompleteOnly manifest CAS failed",
+        ));
+    }
+    crate::usage::rebuild::verify_completion_row_for_storage(
+        transaction,
+        build_epoch,
+        source_file_id,
+    )
+    .map_err(|error| StorageError::invalid_state(error.to_string()))
+}
+
+pub(crate) fn apply_codex_cleanup_inactive_usage(
+    transaction: &Connection,
+    max_rows: usize,
+) -> StorageResult<usize> {
+    if max_rows == 0 {
+        return Ok(0);
+    }
+    let limit = i64::try_from(max_rows)
+        .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
+    let (active, build): (i64, Option<i64>) = transaction.query_row(
+        "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let excluded_build = build.unwrap_or(-1);
+    let statements = [
+        "DELETE FROM usage_session_quarantine_sources WHERE rowid IN (
+            SELECT rowid FROM usage_session_quarantine_sources
+            WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM usage_session_quarantine WHERE rowid IN (
+            SELECT q.rowid FROM usage_session_quarantine q
+            WHERE q.ledger_epoch<>?1 AND q.ledger_epoch<>?2
+              AND NOT EXISTS (
+                SELECT 1 FROM usage_session_quarantine_sources qs
+                WHERE qs.ledger_epoch=q.ledger_epoch AND qs.root_session_id=q.root_session_id)
+            ORDER BY q.ledger_epoch,q.rowid LIMIT ?3)",
+        "DELETE FROM usage_event_occurrences WHERE rowid IN (
+            SELECT rowid FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM usage_events WHERE rowid IN (
+            SELECT e.rowid FROM usage_events e
+            JOIN source_usage_epochs sue ON sue.source=e.source
+            WHERE e.source_epoch<>sue.active_epoch
+              AND (sue.build_epoch IS NULL OR e.source_epoch<>sue.build_epoch)
+            AND NOT EXISTS (SELECT 1 FROM usage_event_occurrences o
+                              WHERE o.source='codex' AND o.source=e.source
+                                AND o.ledger_epoch=e.source_epoch AND o.event_id=e.event_id)
+            ORDER BY e.source,e.source_epoch,e.rowid LIMIT ?3)",
+        "DELETE FROM skill_usage_events WHERE rowid IN (
+            SELECT rowid FROM skill_usage_events WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM turns WHERE rowid IN (
+            SELECT rowid FROM turns WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM ingest_anomalies WHERE rowid IN (
+            SELECT rowid FROM ingest_anomalies WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM usage_source_states WHERE rowid IN (
+            SELECT rowid FROM usage_source_states WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+    ];
+    let mut deleted = 0usize;
+    for sql in statements {
+        if deleted >= max_rows {
+            break;
+        }
+        let remaining = i64::try_from(max_rows - deleted)
+            .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
+        let count = transaction.execute(sql, params![active, excluded_build, remaining.min(limit)])?;
+        deleted += count;
+        if count > 0 {
+            break;
+        }
+    }
+    Ok(deleted)
 }
 
 fn read_epoch(transaction: &Connection) -> StorageResult<SourceUsageEpochState> {
