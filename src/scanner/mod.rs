@@ -155,16 +155,9 @@ impl SourceAdapter for LegacyCodexSourceAdapter {
                 "Codex scan was cancelled before execution",
             ));
         }
-        let request = crate::source::CodexCompatRequest {
-            codex_home: &self.codex_home,
-            state_index_path: &self.codex_metadata.state_index_path,
-            session_index_path: &self.codex_metadata.session_index_path,
-            global_state_path: &self.codex_metadata.global_state_path,
-            cancellation,
-        };
         context
             .storage()
-            .run_codex_compat(request)
+            .ensure_codex_home(&self.codex_home)
             .map_err(|error| match error {
                 crate::source::SourceStorageError::CompatibilityOperationFailed(code) => {
                     SourceAdapterError::with_code(
@@ -176,7 +169,18 @@ impl SourceAdapter for LegacyCodexSourceAdapter {
                     codex_storage_error_code(&error),
                     error.to_string(),
                 ),
-            })
+            })?;
+
+        let worker = MetadataWorker::for_codex_compat(
+            &self.codex_home,
+            self.codex_metadata.clone(),
+        );
+        worker
+            .run_round_with_source_storage(context.storage(), cancellation)
+            .map_err(|code| SourceAdapterError::with_code(
+                code,
+                format!("Codex metadata pipeline failed: {code}"),
+            ))
     }
 }
 
