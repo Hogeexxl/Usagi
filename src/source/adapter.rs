@@ -586,8 +586,7 @@ impl<'a> SourceWriteTxn<'a> {
         scan_id: impl Into<String>,
         connection: &'a mut Connection,
     ) -> rusqlite::Result<Self> {
-        let transaction =
-            connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Ok(Self {
             scan_id: scan_id.into(),
             source: SourceId::CODEX,
@@ -617,7 +616,10 @@ impl<'a> SourceWriteTxn<'a> {
         if self.committed || self.connection.is_none() {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let connection = self.connection.take().ok_or(rusqlite::Error::InvalidQuery)?;
+        let connection = self
+            .connection
+            .take()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
         match connection {
             SourceWriteConnection::Legacy(transaction) => transaction.commit()?,
             SourceWriteConnection::Locked(connection) => {

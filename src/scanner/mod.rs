@@ -171,16 +171,16 @@ impl SourceAdapter for LegacyCodexSourceAdapter {
                 ),
             })?;
 
-        let worker = MetadataWorker::for_codex_compat(
-            &self.codex_home,
-            self.codex_metadata.clone(),
-        );
+        let worker =
+            MetadataWorker::for_codex_compat(&self.codex_home, self.codex_metadata.clone());
         worker
             .run_round_with_source_storage(context.storage(), cancellation)
-            .map_err(|code| SourceAdapterError::with_code(
-                code,
-                format!("Codex metadata pipeline failed: {code}"),
-            ))
+            .map_err(|code| {
+                SourceAdapterError::with_code(
+                    code,
+                    format!("Codex metadata pipeline failed: {code}"),
+                )
+            })
     }
 }
 

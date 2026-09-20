@@ -423,9 +423,9 @@ impl Ledger {
             "legacy-codex-source-state",
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
 
         for source_file_id in &command.source_file_ids {

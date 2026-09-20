@@ -153,13 +153,13 @@ impl<'connection> RebuildLedger<'connection> {
             ));
         }
         let present = normalized_ids(present_source_ids)?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(begin_or_resume)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         verify_present_ids(&transaction, &present)?;
         let (active_epoch, existing_build, existing_target): (i64, Option<i64>, Option<i64>) =
             transaction.query_row(
@@ -226,13 +226,13 @@ impl<'connection> RebuildLedger<'connection> {
         progress: SourceProgress,
     ) -> Result<ProgressOutcome, RebuildError> {
         validate_progress_shape(&progress)?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(record_progress)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         let (build_epoch, parser_version) = current_build(&transaction)?;
         let member = load_member_for_update(&transaction, build_epoch, progress.source_file_id)?;
         if matches!(
@@ -400,13 +400,13 @@ impl<'connection> RebuildLedger<'connection> {
         if error_code.is_empty() || now_ms < 0 {
             return Err(RebuildError::Invalid("invalid block details"));
         }
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(block_source)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         let (build_epoch, _) = current_build(&transaction)?;
         let changed = transaction.execute(
             "UPDATE usage_build_sources SET completion_status='blocked',
@@ -435,13 +435,13 @@ impl<'connection> RebuildLedger<'connection> {
         if root_session_id.is_empty() || error_code.is_empty() || now_ms < 0 {
             return Err(RebuildError::Invalid("invalid session quarantine details"));
         }
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(quarantine_session)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         let (build_epoch, target_parser) = current_build(&transaction)?;
         let mut statement = transaction.prepare(
             "SELECT source_file_id,expected_file_generation,expected_device_id,expected_inode,observed_raw_size
@@ -631,13 +631,13 @@ impl<'connection> RebuildLedger<'connection> {
     }
 
     pub fn retry_blocked(&mut self, source_file_id: i64, now_ms: i64) -> Result<(), RebuildError> {
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(retry_blocked)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         let (build_epoch, _) = current_build(&transaction)?;
         let changed = transaction.execute(
             "UPDATE usage_build_sources SET completion_status='pending',
@@ -668,13 +668,13 @@ impl<'connection> RebuildLedger<'connection> {
         complete_present_source_ids: &[i64],
     ) -> Result<ActivationOutcome, RebuildError> {
         let present = normalized_ids(complete_present_source_ids)?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(activate)),
             self.connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or(RebuildError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
+            "legacy Codex SourceWriteTxn missing transaction",
+        ))?;
         let (build_epoch, target_parser) = current_build(&transaction)?;
         verify_complete_present_set(&transaction, build_epoch, &present)?;
 

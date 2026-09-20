@@ -617,13 +617,13 @@ impl Ledger {
     ) -> StorageResult<UsageCommitOutcome> {
         validate_batch(batch)?;
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(commit_usage)),
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         super::metadata::ensure_source_ready(&transaction, self)?;
         let epoch = read_epoch(&transaction)?;
         if batch.ledger_epoch != epoch.working_epoch()
@@ -735,13 +735,13 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative carry time"));
         }
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(begin_usage_carry)),
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         let epoch = read_epoch(&transaction)?;
         let build_epoch = epoch
             .build_epoch
@@ -817,13 +817,13 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative carry time"));
         }
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(resume_usage_carry)),
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         let epoch = read_epoch(&transaction)?;
         let build_epoch = epoch
             .build_epoch
@@ -895,13 +895,16 @@ impl Ledger {
             return Err(StorageError::invalid_state("negative completion time"));
         }
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
-            concat!("legacy-codex-usage:", stringify!(complete_usage_build_source)),
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            concat!(
+                "legacy-codex-usage:",
+                stringify!(complete_usage_build_source)
+            ),
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         let epoch = read_epoch(&transaction)?;
         let build_epoch = epoch
             .build_epoch
@@ -952,13 +955,13 @@ impl Ledger {
         let limit = i64::try_from(max_rows)
             .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(cleanup_inactive_usage)),
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         let (active, build): (i64, Option<i64>) = transaction.query_row(
             "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],

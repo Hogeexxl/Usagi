@@ -93,13 +93,13 @@ impl Ledger {
         let mut data_revision = None;
 
         for group in &batch.groups {
-            let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
                 "legacy-codex-metadata-commit",
                 &mut connection,
             )?;
-            let transaction = source_tx
-                .legacy_transaction()
-                .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+            let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+                StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+            })?;
             ensure_source_ready(&transaction, self)?;
 
             let changed = commit_group(&transaction, group)?;
