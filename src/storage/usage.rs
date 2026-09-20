@@ -1035,7 +1035,7 @@ impl Ledger {
     }
 }
 
-fn read_epoch(transaction: &Transaction<'_>) -> StorageResult<SourceUsageEpochState> {
+fn read_epoch(transaction: &Connection) -> StorageResult<SourceUsageEpochState> {
     let values: (i64, Option<i64>, i64, Option<i64>) = transaction.query_row(
         "SELECT active_epoch, build_epoch, active_parser_version,
                 build_parser_version FROM source_usage_epochs WHERE source='codex'",
@@ -1078,7 +1078,7 @@ fn usage_id_values_cte(source_file_ids: &[i64]) -> String {
 }
 
 fn load_usage_stable_work_list_chunk(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     parser_version: i64,
     canonical_algorithm: i64,
@@ -1179,7 +1179,7 @@ fn load_usage_stable_work_list_chunk(
 }
 
 fn load_usage_build_work_list_chunk(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     parser_version: i64,
     canonical_algorithm: i64,
@@ -1266,7 +1266,7 @@ struct SourcePlanRow {
 }
 
 fn load_source_plan(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
     requested_parser: i64,
     epoch: SourceUsageEpochState,
@@ -1620,7 +1620,7 @@ fn load_source_plan(
 }
 
 fn read_build_plan_state(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: Option<i64>,
     source_file_id: i64,
 ) -> StorageResult<Option<UsageBuildPlanState>> {
@@ -1728,7 +1728,7 @@ fn durable_tail_matches_build(
 }
 
 fn local_replay_safe(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     source: &SourcePlanRow,
     source_file_id: i64,
@@ -1780,7 +1780,7 @@ struct CarryEligibility<'a> {
 }
 
 fn begin_carry_eligible(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     source_file_id: i64,
     input: CarryEligibility<'_>,
@@ -1862,7 +1862,7 @@ fn begin_carry_eligible(
 }
 
 fn verify_carry_db_proof(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     source_file_id: i64,
     build: &UsageBuildPlanState,
@@ -1926,7 +1926,7 @@ fn verify_carry_db_proof(
 const CARRY_PAGE_ROWS: i64 = 2048;
 
 fn carry_occurrence_page(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2011,7 +2011,7 @@ fn carry_occurrence_page(
 }
 
 fn carry_canonical_event(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     event_id: &str,
@@ -2069,7 +2069,7 @@ fn carry_canonical_event(
 }
 
 fn carry_occurrence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2105,7 +2105,7 @@ fn carry_occurrence(
 }
 
 fn carry_turn_page(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2166,7 +2166,7 @@ fn carry_turn_page(
 }
 
 fn carry_turn(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2251,7 +2251,7 @@ fn carry_turn(
 }
 
 fn carry_anomaly_page(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2312,7 +2312,7 @@ fn carry_anomaly_page(
 }
 
 fn carry_anomaly(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2346,7 +2346,7 @@ fn carry_anomaly(
 }
 
 fn finalize_carry(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     source_file_id: i64,
     build: &UsageBuildPlanState,
@@ -2470,7 +2470,7 @@ fn finalize_carry(
 }
 
 fn verify_carry_sets(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -2568,7 +2568,7 @@ fn verify_carry_sets(
 }
 
 fn verify_carry_canonical_events(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     build_epoch: i64,
 ) -> StorageResult<()> {
     let extra: Option<String> = transaction
@@ -2596,7 +2596,7 @@ fn verify_carry_canonical_events(
 }
 
 fn carry_table_fingerprint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     table: &str,
     epoch: i64,
     source_file_id: i64,
@@ -2648,7 +2648,7 @@ fn carry_table_fingerprint(
 }
 
 fn read_usage_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> StorageResult<Option<UsageCheckpointExpectation>> {
     transaction
@@ -2673,7 +2673,7 @@ fn read_usage_checkpoint(
 }
 
 fn read_usage_source_state(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source_file_id: i64,
 ) -> StorageResult<Option<UsageSourceStateWrite>> {
@@ -2751,7 +2751,7 @@ fn read_usage_source_state(
 }
 
 fn read_open_turn(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source_file_id: i64,
     state: &UsageSourceStateWrite,
@@ -3084,7 +3084,7 @@ fn valid_hash_id(value: &str) -> bool {
 }
 
 fn validate_group_relationship(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     thread_id: &str,
     root_session_id: &str,
 ) -> StorageResult<()> {
@@ -3117,7 +3117,7 @@ fn validate_group_relationship(
 }
 
 fn validate_source_preconditions(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -3168,7 +3168,7 @@ fn validate_source_preconditions(
 }
 
 fn prepare_local_replay(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -3247,7 +3247,7 @@ fn prepare_local_replay(
 }
 
 fn capture_affected_canonical_visibility(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
 ) -> StorageResult<HashSet<String>> {
     let mut ids = HashSet::new();
@@ -3288,7 +3288,7 @@ fn capture_affected_canonical_visibility(
 }
 
 fn affected_canonical_visibility_changed(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger_epoch: i64,
     before: &HashSet<String>,
 ) -> StorageResult<bool> {
@@ -3311,7 +3311,7 @@ fn affected_canonical_visibility_changed(
 }
 
 fn cleanup_local_replay_orphans(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger_epoch: i64,
 ) -> StorageResult<()> {
     transaction.execute(
@@ -3350,7 +3350,7 @@ struct CanonicalEventRow {
 }
 
 fn write_or_compare_event(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source: &UsageSourceCommit,
     event: &UsageEventWrite,
@@ -3443,7 +3443,7 @@ fn write_or_compare_event(
 }
 
 fn write_or_compare_skill_event(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source: &UsageSourceCommit,
     event: &SkillUsageEventWrite,
@@ -3508,7 +3508,7 @@ fn write_or_compare_skill_event(
 }
 
 fn skill_source_fingerprint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source_file_id: i64,
 ) -> StorageResult<Vec<u8>> {
@@ -3543,7 +3543,7 @@ fn skill_source_fingerprint(
 }
 
 fn capture_skill_visibility(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
 ) -> StorageResult<Vec<(i64, Vec<u8>)>> {
     batch
@@ -3559,7 +3559,7 @@ fn capture_skill_visibility(
 }
 
 fn affected_skill_visibility_changed(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     before: &[(i64, Vec<u8>)],
 ) -> StorageResult<bool> {
@@ -3572,7 +3572,7 @@ fn affected_skill_visibility_changed(
 }
 
 fn carry_skill_events_at_offset(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
@@ -3619,7 +3619,7 @@ fn carry_skill_events_at_offset(
 }
 
 fn write_or_compare_occurrence(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: i64,
     source: &UsageSourceCommit,
     occurrence: &UsageOccurrenceWrite,
@@ -3678,7 +3678,7 @@ fn snapshot_columns(snapshot: Option<&UsageSnapshot>) -> SnapshotColumns {
 }
 
 fn write_turn(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger_epoch: i64,
     source_file_id: i64,
     file_generation: i64,
@@ -3805,7 +3805,7 @@ fn write_turn(
 }
 
 fn write_anomaly(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger_epoch: i64,
     thread_id: &str,
     source_file_id: i64,
@@ -3883,7 +3883,7 @@ fn write_anomaly(
 }
 
 fn write_source_state(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -3896,7 +3896,7 @@ fn write_source_state(
 }
 
 fn write_source_state_row(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger_epoch: i64,
     source_file_id: i64,
     state: &UsageSourceStateWrite,
@@ -3956,7 +3956,7 @@ fn write_source_state_row(
 }
 
 fn write_usage_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -4008,7 +4008,7 @@ fn write_usage_checkpoint(
 }
 
 fn update_build_progress(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     epoch: SourceUsageEpochState,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
@@ -4079,7 +4079,7 @@ fn update_build_progress(
 }
 
 fn verify_source_postconditions(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -4136,7 +4136,7 @@ fn verify_source_postconditions(
 }
 
 pub(super) fn reconcile_usage_metadata_change(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     thread_id: &str,
     previous_root: Option<&str>,
     next_root: Option<&str>,
@@ -4558,7 +4558,7 @@ mod tests {
     }
 
     fn durable_turn_snapshot(
-        transaction: &Transaction<'_>,
+        transaction: &Connection,
         source_file_id: i64,
     ) -> (String, Option<String>, i64, i64, i64, i64) {
         transaction
