@@ -357,7 +357,9 @@ impl Ledger {
         // phase as an accidental no-op.  All paths have been restored by the
         // second phase; no temporary value is ever committed.
         let _ = temporary_paths;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
 
         SourceOutcome::new(results).map_err(|error| StorageError::invalid_state(error.to_string()))
     }
@@ -458,7 +460,9 @@ impl Ledger {
                 )));
             }
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
 
         Ok(CheckpointOutcome {
             consumer_kind: command.consumer_kind,
