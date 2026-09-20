@@ -57,8 +57,17 @@ export function usePopoverPortalPosition<
     setLayout((current) => (sameLayout(current, next) ? current : next));
   }, [contentRef, triggerRef]);
   useLayoutEffect(() => {
+    if (!active) {
+      // MorphPopover unmounts its panel while closed. Keeping the previous
+      // measurement here makes the next open paint one frame at stale
+      // coordinates before the new portal content has been measured, which
+      // shows up as a visible flash. Drop the cached geometry while inactive
+      // so every open stays hidden until the current panel is measured.
+      setLayout(null);
+      return;
+    }
+
     update();
-    if (!active) return;
     const trigger = triggerRef.current;
     const content = contentRef.current;
     const observer = new ResizeObserver(update);
