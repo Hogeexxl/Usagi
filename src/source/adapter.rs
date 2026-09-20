@@ -268,6 +268,16 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_usage_batch(
+        &mut self,
+        ledger: &Ledger,
+        batch: &crate::storage::usage::UsageCommitBatch,
+    ) -> crate::storage::Result<crate::storage::usage::CodexUsageCommitBridgeResult> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
+        })
+    }
+
     fn apply_codex_storage<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
