@@ -3161,7 +3161,7 @@ mod tests {
             after_sessions
                 .rows
                 .iter()
-                .any(|row| row.root_session_id == "root"),
+                .any(|row| row.root_session_id == root_id),
             "production startup must preserve the original migrated thread identity"
         );
 
