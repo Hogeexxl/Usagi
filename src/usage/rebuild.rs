@@ -10,7 +10,7 @@ use std::{
     fmt,
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 type OldBuildProof = (
     i64,
