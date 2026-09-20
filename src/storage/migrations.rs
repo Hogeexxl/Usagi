@@ -226,10 +226,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "usagi-{label}-{}-{suffix}",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("usagi-{label}-{}-{suffix}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -379,7 +377,6 @@ mod tests {
             .unwrap();
         connection
     }
-
 
     fn file_v10_connection_with_rows() -> (TestDatabase, Connection) {
         let suffix = SystemTime::now()
@@ -3001,16 +2998,19 @@ mod tests {
 
         let range = TimeRange::new(0, i64::MAX).unwrap();
         let usage = UsageLedger::new(&ledger);
-        let before = usage.summary(SummaryQuery::new(range, UsageFilter::default())).unwrap();
+        let before = usage
+            .summary(SummaryQuery::new(range, UsageFilter::default()))
+            .unwrap();
         assert!(
             before.totals.total_tokens > 0,
             "migrated v10 usage must be visible before startup scan"
         );
-        let before_sessions = usage
-            .sessions(range, SessionPageRequest::new(10))
-            .unwrap();
+        let before_sessions = usage.sessions(range, SessionPageRequest::new(10)).unwrap();
         assert!(
-            before_sessions.rows.iter().any(|row| row.root_session_id == "root"),
+            before_sessions
+                .rows
+                .iter()
+                .any(|row| row.root_session_id == "root"),
             "migrated v10 session must be visible before startup scan"
         );
 
@@ -3036,16 +3036,19 @@ mod tests {
         }
         coordinator.shutdown().unwrap();
 
-        let after = usage.summary(SummaryQuery::new(range, UsageFilter::default())).unwrap();
+        let after = usage
+            .summary(SummaryQuery::new(range, UsageFilter::default()))
+            .unwrap();
         assert!(
             after.totals.total_tokens > 0,
             "production startup must not activate an empty Codex dataset"
         );
-        let after_sessions = usage
-            .sessions(range, SessionPageRequest::new(10))
-            .unwrap();
+        let after_sessions = usage.sessions(range, SessionPageRequest::new(10)).unwrap();
         assert!(
-            after_sessions.rows.iter().any(|row| row.root_session_id == "root"),
+            after_sessions
+                .rows
+                .iter()
+                .any(|row| row.root_session_id == "root"),
             "production startup must preserve a visible migrated Codex session"
         );
 
@@ -3066,5 +3069,4 @@ mod tests {
             "active Codex epoch must still contain canonical usage after startup"
         );
     }
-
 }
