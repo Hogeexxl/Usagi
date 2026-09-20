@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     domain::{Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
@@ -503,7 +503,7 @@ impl SourceStorage {
         Ok(SourceWriteTxn {
             scan_id: self.scan_id.clone(),
             source: self.source.clone(),
-            connection: Some(guard),
+            connection: Some(SourceWriteConnection::Locked(guard)),
             ledger: Some(Arc::clone(ledger)),
             committed: false,
             poisoned: false,
@@ -553,10 +553,31 @@ pub struct CanonicalUsageEventWrite {
 
 /// Source-bound transaction.  All mutation methods live here; the source is
 /// captured when the transaction is created and is not accepted by any method.
+enum SourceWriteConnection<'a> {
+    Locked(MutexGuard<'a, Connection>),
+    Legacy(Transaction<'a>),
+}
+
+impl SourceWriteConnection<'_> {
+    fn connection(&self) -> &Connection {
+        match self {
+            Self::Locked(connection) => connection,
+            Self::Legacy(transaction) => transaction,
+        }
+    }
+
+    fn connection_mut(&mut self) -> &mut Connection {
+        match self {
+            Self::Locked(connection) => connection,
+            Self::Legacy(transaction) => transaction,
+        }
+    }
+}
+
 pub struct SourceWriteTxn<'a> {
     scan_id: String,
     source: SourceId,
-    connection: Option<MutexGuard<'a, rusqlite::Connection>>,
+    connection: Option<SourceWriteConnection<'a>>,
     ledger: Option<Arc<Ledger>>,
     committed: bool,
     poisoned: bool,
@@ -591,6 +612,57 @@ impl SourceWriteTxn<'static> {
 }
 
 impl<'a> SourceWriteTxn<'a> {
+    /// Transitional Codex-only constructor used while the mature scanner
+    /// algorithms are retained. The returned transaction is still
+    /// source-bound and owns the only durable commit boundary; legacy
+    /// algorithms receive only the inner rusqlite transaction and therefore
+    /// cannot commit independently of SourceWriteTxn.
+    pub(crate) fn begin_legacy_codex(
+        scan_id: impl Into<String>,
+        connection: &'a mut Connection,
+    ) -> rusqlite::Result<Self> {
+        let transaction =
+            connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Ok(Self {
+            scan_id: scan_id.into(),
+            source: SourceId::CODEX,
+            connection: Some(SourceWriteConnection::Legacy(transaction)),
+            ledger: None,
+            committed: false,
+            poisoned: false,
+            data_changed: false,
+        })
+    }
+
+    /// Borrow the transitional Codex transaction. This accessor is crate-only
+    /// and cannot select a source; it exists solely so the current mature
+    /// Codex private-state algorithms can be migrated without reimplementing
+    /// their SQL/CAS rules.
+    pub(crate) fn legacy_transaction(&self) -> Option<&Transaction<'_>> {
+        match self.connection.as_ref()? {
+            SourceWriteConnection::Legacy(transaction) => Some(transaction),
+            SourceWriteConnection::Locked(_) => None,
+        }
+    }
+
+    /// Commit a transitional Codex batch. Revision publication remains owned
+    /// by the existing caller until that caller is moved fully onto the
+    /// source-bound facade, but the SQLite COMMIT itself is owned here.
+    pub(crate) fn commit_legacy(mut self) -> rusqlite::Result<()> {
+        if self.committed || self.connection.is_none() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let connection = self.connection.take().ok_or(rusqlite::Error::InvalidQuery)?;
+        match connection {
+            SourceWriteConnection::Legacy(transaction) => transaction.commit()?,
+            SourceWriteConnection::Locked(mut connection) => {
+                connection.execute_batch("COMMIT")?;
+            }
+        }
+        self.committed = true;
+        Ok(())
+    }
+
     pub fn scan_id(&self) -> &str {
         &self.scan_id
     }
@@ -1045,14 +1117,19 @@ impl<'a> SourceWriteTxn<'a> {
         } else {
             None
         };
-        self.connection_mut()?
-            .execute_batch("COMMIT")
-            .map_err(|error| {
-                self.poisoned = true;
-                map_sql_error(error)
-            })?;
+        let connection = self
+            .connection
+            .take()
+            .ok_or(SourceStorageError::TransactionClosed)?;
+        let commit_result = match connection {
+            SourceWriteConnection::Locked(mut connection) => connection.execute_batch("COMMIT"),
+            SourceWriteConnection::Legacy(transaction) => transaction.commit(),
+        };
+        commit_result.map_err(|error| {
+            self.poisoned = true;
+            map_sql_error(error)
+        })?;
         self.committed = true;
-        self.connection.take();
         if let (Some(ledger), Some((data_revision, status_revision))) =
             (self.ledger.as_ref(), revisions)
         {
@@ -1083,19 +1160,28 @@ impl<'a> SourceWriteTxn<'a> {
         result
     }
 
-    fn connection_mut(&mut self) -> Result<&mut rusqlite::Connection, SourceStorageError> {
+    fn connection_mut(&mut self) -> Result<&mut Connection, SourceStorageError> {
         self.connection
-            .as_deref_mut()
+            .as_mut()
+            .map(SourceWriteConnection::connection_mut)
             .ok_or(SourceStorageError::TransactionClosed)
     }
 }
 
 impl Drop for SourceWriteTxn<'_> {
     fn drop(&mut self) {
-        if !self.committed
-            && let Some(connection) = self.connection.as_deref_mut()
-        {
-            let _ = connection.execute_batch("ROLLBACK");
+        if self.committed {
+            return;
+        }
+        if let Some(connection) = self.connection.as_mut() {
+            match connection {
+                SourceWriteConnection::Locked(connection) => {
+                    let _ = connection.execute_batch("ROLLBACK");
+                }
+                SourceWriteConnection::Legacy(_) => {
+                    // rusqlite::Transaction rolls back on drop.
+                }
+            }
         }
     }
 }
