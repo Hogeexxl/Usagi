@@ -791,6 +791,20 @@ pub(crate) fn apply_codex_rebuild_activate(
             verify_completion_row_for_storage(transaction, build_epoch, source_file_id)?;
         }
     }
+    let (active_epoch, active_parser): (i64, i64) = transaction.query_row(
+        "SELECT active_epoch,active_parser_version
+         FROM source_usage_epochs WHERE source='codex'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let visible_changed = !crate::usage::usage_epochs_visible_equal(
+        transaction,
+        "codex",
+        active_epoch,
+        active_parser,
+        build_epoch,
+        target_parser,
+    )?;
     let changed = transaction.execute(
         "UPDATE source_usage_epochs
          SET active_epoch=?1, active_parser_version=?2,
@@ -801,10 +815,12 @@ pub(crate) fn apply_codex_rebuild_activate(
     if changed != 1 {
         return Err(RebuildError::Cas("build changed before activation"));
     }
-    transaction.execute(
-        "UPDATE app_meta SET data_revision=data_revision+1 WHERE id=1",
-        [],
-    )?;
+    if visible_changed {
+        transaction.execute(
+            "UPDATE app_meta SET data_revision=data_revision+1 WHERE id=1",
+            [],
+        )?;
+    }
     transaction.execute(
         "DELETE FROM usage_build_sources WHERE build_epoch=?1",
         [build_epoch],
@@ -2221,12 +2237,22 @@ mod tests {
     }
 
     fn active_state(connection: &Connection, source_id: i64, size: i64) {
+        active_state_with_versions(connection, source_id, size, 2, 2);
+    }
+
+    fn active_state_with_versions(
+        connection: &Connection,
+        source_id: i64,
+        size: i64,
+        parser_version: i64,
+        canonical_algorithm_version: i64,
+    ) {
         connection
             .execute(
                 "INSERT INTO source_checkpoints(source_file_id,consumer_kind,parser_version,
                 committed_offset,guard_hash,processing_status)
-                VALUES (?1,'usage',2,?2,X'01','ready')",
-                params![source_id, size],
+                VALUES (?1,'usage',?2,?3,X'01','ready')",
+                params![source_id, parser_version, size],
             )
             .unwrap();
         connection
@@ -2236,11 +2262,59 @@ mod tests {
                 resolved_through_offset,observed_raw_size,raw_tail_status,raw_tail_start_offset,
                 owning_thread_id,root_session_id,continuation_state,chain_state,
                 chain_block_reason,updated_at_ms)
-             VALUES (1,?1,1,?1,?1,2,2,?2,?2,'none',NULL,'root','root',
+             VALUES (1,?1,1,?1,?1,?2,?3,?4,?4,'none',NULL,'root','root',
                      'owning_live','continuous',NULL,1)",
-                params![source_id, size],
+                params![
+                    source_id,
+                    parser_version,
+                    canonical_algorithm_version,
+                    size
+                ],
             )
             .unwrap();
+    }
+
+    fn visible_usage_event(connection: &Connection, epoch: i64, model: &str) {
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                    turn_key,model,input_tokens,cached_tokens,cache_write_tokens,output_tokens,
+                    reasoning_tokens,total_tokens,quality_status,source_file_id,file_generation,
+                    source_start_offset,source_end_offset,created_at_ms,reasoning_effort,
+                    estimated_cost_nanos_usd,source,source_epoch)
+                 VALUES (?1,'visible-event','normal',10,'root','root','turn-1',?2,
+                         10,1,0,5,1,15,'complete',1,1,0,10,10,'medium',100,'codex',?1)",
+                params![epoch, model],
+            )
+            .unwrap();
+    }
+
+    fn prepare_visible_rebuild(connection: &mut Connection, build_model: &str) {
+        thread(connection, "root");
+        source(connection, 1, "root", 100, "present");
+        let parser = crate::usage::USAGE_PARSER_VERSION;
+        let canonical = crate::usage::canonical_algorithm_for(parser).unwrap();
+        connection
+            .execute(
+                "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=?1 WHERE id=1",
+                [parser],
+            )
+            .unwrap();
+        active_state_with_versions(connection, 1, 100, parser, canonical);
+        visible_usage_event(connection, 1, "gpt-visible");
+
+        let snapshot = RebuildLedger::new(connection)
+            .begin_or_resume(parser, &[1], 1)
+            .unwrap();
+        assert_eq!((snapshot.active_epoch, snapshot.build_epoch), (1, 2));
+        assert_eq!(
+            RebuildLedger::new(connection)
+                .record_progress(progress(1, 0, 100, 100, TailProof::None))
+                .unwrap(),
+            ProgressOutcome::Rebuilt
+        );
+        visible_usage_event(connection, 2, build_model);
     }
 
     fn progress(source: i64, start: u64, end: u64, size: u64, tail: TailProof) -> SourceProgress {
@@ -2460,6 +2534,57 @@ mod tests {
             .unwrap();
         assert_eq!(activated.active_epoch, 1);
     }
+    #[test]
+    fn identical_active_and_build_activation_keeps_data_revision_stable() {
+        let mut connection = database();
+        prepare_visible_rebuild(&mut connection, "gpt-visible");
+        let before_revision: i64 = connection
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let activated = RebuildLedger::new(&mut connection)
+            .activate(&[1])
+            .unwrap();
+
+        assert_eq!(activated.active_epoch, 2);
+        assert_eq!(activated.data_revision, before_revision);
+        let state: (i64, Option<i64>, i64) = connection
+            .query_row(
+                "SELECT active_epoch,build_epoch,(SELECT data_revision FROM app_meta WHERE id=1)
+                 FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (2, None, before_revision));
+    }
+
+    #[test]
+    fn changed_active_and_build_activation_bumps_data_revision_once() {
+        let mut connection = database();
+        prepare_visible_rebuild(&mut connection, "gpt-changed");
+        let before_revision: i64 = connection
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let activated = RebuildLedger::new(&mut connection)
+            .activate(&[1])
+            .unwrap();
+
+        assert_eq!(activated.active_epoch, 2);
+        assert_eq!(activated.data_revision, before_revision + 1);
+        let revision: i64 = connection
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(revision, before_revision + 1);
+    }
+
     #[test]
     fn parser_target_replacement_keeps_manifest_and_resets_every_build_member() {
         let mut connection = database();

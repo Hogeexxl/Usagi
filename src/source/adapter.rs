@@ -1110,22 +1110,31 @@ impl<'a> SourceWriteTxn<'a> {
         self.require_open()?;
         let bound_source = self.source.as_str().to_owned();
         let connection = self.connection_mut()?;
-        let current_epochs: (i64, Option<i64>) = connection
+        let current_epochs: (i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
-                "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source=?1",
+                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
+                 FROM source_usage_epochs WHERE source=?1",
                 [bound_source.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(map_sql_error)?;
         let build_epoch = current_epochs.1.ok_or_else(|| {
             SourceStorageError::InvalidRequest("usage build epoch is not active".to_owned())
         })?;
-        let visible_changed = !Self::canonical_epochs_equal(
+        let build_parser_version = current_epochs.3.ok_or_else(|| {
+            SourceStorageError::InvalidRequest(
+                "usage build parser version is not active".to_owned(),
+            )
+        })?;
+        let visible_changed = !crate::usage::usage_epochs_visible_equal(
             connection,
             bound_source.as_str(),
             current_epochs.0,
+            current_epochs.2,
             build_epoch,
-        )?;
+            build_parser_version,
+        )
+        .map_err(map_sql_error)?;
         let changed = connection
             .execute(
                 "UPDATE source_usage_epochs
@@ -1225,37 +1234,6 @@ impl<'a> SourceWriteTxn<'a> {
         Ok(())
     }
 
-    fn canonical_epochs_equal(
-        connection: &rusqlite::Connection,
-        source: &str,
-        active_epoch: i64,
-        build_epoch: i64,
-    ) -> Result<bool, SourceStorageError> {
-        let columns = "event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
-                       reasoning_effort,estimated_cost_nanos_usd,input_tokens,cached_tokens,
-                       cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status";
-        let sql = format!(
-            "SELECT NOT EXISTS(
-                 SELECT {columns} FROM usage_events
-                 WHERE source=?1 AND source_epoch=?2
-                 EXCEPT
-                 SELECT {columns} FROM usage_events
-                 WHERE source=?1 AND source_epoch=?3
-             ) AND NOT EXISTS(
-                 SELECT {columns} FROM usage_events
-                 WHERE source=?1 AND source_epoch=?3
-                 EXCEPT
-                 SELECT {columns} FROM usage_events
-                 WHERE source=?1 AND source_epoch=?2
-             )"
-        );
-        let equal: i64 = connection
-            .query_row(&sql, params![source, active_epoch, build_epoch], |row| {
-                row.get(0)
-            })
-            .map_err(map_sql_error)?;
-        Ok(equal != 0)
-    }
 
     pub fn commit(mut self) -> Result<(), SourceStorageError> {
         self.require_open()?;
