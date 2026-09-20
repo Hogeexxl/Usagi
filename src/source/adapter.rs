@@ -258,221 +258,6 @@ impl SourceRunContext {
         &self.source
     }
 
-    pub(crate) fn apply_codex_metadata_group(
-        &mut self,
-        ledger: &Ledger,
-        group: &MetadataThreadCommit,
-    ) -> crate::storage::Result<bool> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::apply_codex_metadata_group(connection, ledger, group)
-        })
-    }
-
-    pub(crate) fn apply_codex_usage_batch(
-        &mut self,
-        ledger: &Ledger,
-        batch: &crate::storage::usage::UsageCommitBatch,
-    ) -> crate::storage::Result<crate::storage::usage::CodexUsageCommitBridgeResult> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
-        })
-    }
-
-    pub(crate) fn apply_codex_begin_usage_carry(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<()> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_begin_usage_carry(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_resume_usage_carry(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<crate::storage::usage::CarryStepOutcome> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_resume_usage_carry(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_complete_usage_build_source(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<()> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_complete_usage_build_source(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_cleanup_inactive_usage(
-        &mut self,
-        max_rows: usize,
-    ) -> crate::storage::Result<usize> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_cleanup_inactive_usage(connection, max_rows)
-        })
-    }
-
-    fn apply_codex_storage<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
-    ) -> crate::storage::Result<T> {
-        self.require_open()
-            .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
-        let result = {
-            let connection = self
-                .connection_mut()
-                .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
-            operation(connection)
-        };
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
-    fn apply_codex_rebuild<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> Result<T, crate::usage::rebuild::RebuildError>,
-    ) -> Result<T, crate::usage::rebuild::RebuildError> {
-        self.require_open().map_err(|_| {
-            crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
-        })?;
-        let result = {
-            let connection = self.connection_mut().map_err(|_| {
-                crate::usage::rebuild::RebuildError::Invalid(
-                    "source write transaction unavailable",
-                )
-            })?;
-            operation(connection)
-        };
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
-    pub(crate) fn apply_codex_rebuild_begin_or_resume(
-        &mut self,
-        target_parser_version: i64,
-        present: &std::collections::BTreeSet<i64>,
-        now_ms: i64,
-    ) -> Result<crate::usage::rebuild::BuildSnapshot, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_begin_or_resume(
-                connection,
-                target_parser_version,
-                present,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_block_source(
-        &mut self,
-        source_file_id: i64,
-        error_code: &str,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_block_source(
-                connection,
-                source_file_id,
-                error_code,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_retry_blocked(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_retry_blocked(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_activate(
-        &mut self,
-        present: &std::collections::BTreeSet<i64>,
-    ) -> Result<crate::usage::rebuild::ActivationOutcome, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_activate(connection, present)
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_quarantine_session(
-        &mut self,
-        root_session_id: &str,
-        error_code: &str,
-        now_ms: i64,
-    ) -> Result<usize, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_quarantine_session(
-                connection,
-                root_session_id,
-                error_code,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_record_progress(
-        &mut self,
-        progress: &crate::usage::rebuild::SourceProgress,
-    ) -> Result<crate::usage::rebuild::ProgressOutcome, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_record_progress(connection, progress)
-        })
-    }
-
-    pub(crate) fn apply_codex_replace_build_sources(
-        &mut self,
-        parser_version: i64,
-        present: &std::collections::BTreeSet<i64>,
-        invalidated: &std::collections::BTreeSet<i64>,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_replace_build_sources(
-                connection,
-                parser_version,
-                present,
-                invalidated,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn with_codex_private_state<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
-    ) -> crate::storage::Result<T> {
-        self.apply_codex_storage(operation)
-    }
-
     pub fn scan_id(&self) -> &str {
         &self.scan_id
     }
@@ -812,6 +597,223 @@ impl<'a> SourceWriteTxn<'a> {
             data_changed: false,
         })
     }
+
+    pub(crate) fn apply_codex_metadata_group(
+        &mut self,
+        ledger: &Ledger,
+        group: &MetadataThreadCommit,
+    ) -> crate::storage::Result<bool> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::apply_codex_metadata_group(connection, ledger, group)
+        })
+    }
+
+    pub(crate) fn apply_codex_usage_batch(
+        &mut self,
+        ledger: &Ledger,
+        batch: &crate::storage::usage::UsageCommitBatch,
+    ) -> crate::storage::Result<crate::storage::usage::CodexUsageCommitBridgeResult> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
+        })
+    }
+
+    pub(crate) fn apply_codex_begin_usage_carry(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<()> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_begin_usage_carry(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_resume_usage_carry(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<crate::storage::usage::CarryStepOutcome> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_resume_usage_carry(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_complete_usage_build_source(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> crate::storage::Result<()> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_complete_usage_build_source(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_cleanup_inactive_usage(
+        &mut self,
+        max_rows: usize,
+    ) -> crate::storage::Result<usize> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::usage::apply_codex_cleanup_inactive_usage(connection, max_rows)
+        })
+    }
+
+    fn apply_codex_storage<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
+    ) -> crate::storage::Result<T> {
+        self.require_open()
+            .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
+        let result = {
+            let connection = self
+                .connection_mut()
+                .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
+            operation(connection)
+        };
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn apply_codex_rebuild<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> Result<T, crate::usage::rebuild::RebuildError>,
+    ) -> Result<T, crate::usage::rebuild::RebuildError> {
+        self.require_open().map_err(|_| {
+            crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
+        })?;
+        let result = {
+            let connection = self.connection_mut().map_err(|_| {
+                crate::usage::rebuild::RebuildError::Invalid(
+                    "source write transaction unavailable",
+                )
+            })?;
+            operation(connection)
+        };
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    pub(crate) fn apply_codex_rebuild_begin_or_resume(
+        &mut self,
+        target_parser_version: i64,
+        present: &std::collections::BTreeSet<i64>,
+        now_ms: i64,
+    ) -> Result<crate::usage::rebuild::BuildSnapshot, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_begin_or_resume(
+                connection,
+                target_parser_version,
+                present,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_block_source(
+        &mut self,
+        source_file_id: i64,
+        error_code: &str,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_block_source(
+                connection,
+                source_file_id,
+                error_code,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_retry_blocked(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_retry_blocked(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_activate(
+        &mut self,
+        present: &std::collections::BTreeSet<i64>,
+    ) -> Result<crate::usage::rebuild::ActivationOutcome, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_activate(connection, present)
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_quarantine_session(
+        &mut self,
+        root_session_id: &str,
+        error_code: &str,
+        now_ms: i64,
+    ) -> Result<usize, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_quarantine_session(
+                connection,
+                root_session_id,
+                error_code,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_record_progress(
+        &mut self,
+        progress: &crate::usage::rebuild::SourceProgress,
+    ) -> Result<crate::usage::rebuild::ProgressOutcome, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_record_progress(connection, progress)
+        })
+    }
+
+    pub(crate) fn apply_codex_replace_build_sources(
+        &mut self,
+        parser_version: i64,
+        present: &std::collections::BTreeSet<i64>,
+        invalidated: &std::collections::BTreeSet<i64>,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_replace_build_sources(
+                connection,
+                parser_version,
+                present,
+                invalidated,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn with_codex_private_state<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
+    ) -> crate::storage::Result<T> {
+        self.apply_codex_storage(operation)
+    }
+
+
 
     pub fn scan_id(&self) -> &str {
         &self.scan_id
