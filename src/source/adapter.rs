@@ -439,6 +439,15 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_rebuild_record_progress(
+        &mut self,
+        progress: &crate::usage::rebuild::SourceProgress,
+    ) -> Result<crate::usage::rebuild::ProgressOutcome, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_record_progress(connection, progress)
+        })
+    }
+
     pub(crate) fn with_codex_private_state<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
