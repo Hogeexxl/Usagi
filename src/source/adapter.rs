@@ -264,7 +264,7 @@ impl SourceRunContext {
         group: &MetadataThreadCommit,
     ) -> crate::storage::Result<bool> {
         self.apply_codex_storage(|connection| {
-            crate::storage::metadata::apply_codex_metadata_group(connection, ledger, group)
+            crate::storage::apply_codex_metadata_group(connection, ledger, group)
         })
     }
 
