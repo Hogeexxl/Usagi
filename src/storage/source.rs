@@ -321,7 +321,11 @@ fn apply_codex_source_observations_private(
              WHERE source_file_id = ?1",
             params![
                 plan.source_file_id,
-                if replaced { None::<String> } else { thread_id.clone() },
+                if replaced {
+                    None::<String>
+                } else {
+                    thread_id.clone()
+                },
                 observation.current_path,
                 observation.source_area.as_str(),
                 observation.device_id,
@@ -348,9 +352,8 @@ fn apply_codex_source_observations_private(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(checkpoint_rows);
             for consumer in consumers {
-                rebuild_consumers.push(
-                    ConsumerKind::try_from(consumer.as_str()).map_err(domain_sql_error)?,
-                );
+                rebuild_consumers
+                    .push(ConsumerKind::try_from(consumer.as_str()).map_err(domain_sql_error)?);
             }
             transaction.execute(
                 "UPDATE source_checkpoints SET
