@@ -368,6 +368,22 @@ impl SourceRunContext {
         result
     }
 
+    pub(crate) fn apply_codex_rebuild_begin_or_resume(
+        &mut self,
+        target_parser_version: i64,
+        present: &std::collections::BTreeSet<i64>,
+        now_ms: i64,
+    ) -> Result<crate::usage::rebuild::BuildSnapshot, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_begin_or_resume(
+                connection,
+                target_parser_version,
+                present,
+                now_ms,
+            )
+        })
+    }
+
     pub(crate) fn with_codex_private_state<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
