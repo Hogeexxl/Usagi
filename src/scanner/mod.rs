@@ -155,32 +155,26 @@ impl SourceAdapter for LegacyCodexSourceAdapter {
                 "Codex scan was cancelled before execution",
             ));
         }
-        context
+        let storage = context
             .storage()
+            .legacy_codex_ingestion()
+            .map_err(|error| {
+                SourceAdapterError::with_code(codex_storage_error_code(&error), error.to_string())
+            })?;
+        storage
             .ensure_codex_home(&self.codex_home)
-            .map_err(|error| match error {
-                crate::source::SourceStorageError::CompatibilityOperationFailed(code) => {
-                    SourceAdapterError::with_code(
-                        code,
-                        format!("Codex metadata pipeline failed: {code}"),
-                    )
-                }
-                error => SourceAdapterError::with_code(
-                    codex_storage_error_code(&error),
-                    error.to_string(),
-                ),
+            .map_err(|error| {
+                SourceAdapterError::with_code(codex_storage_error_code(&error), error.to_string())
             })?;
 
         let worker =
             MetadataWorker::for_codex_compat(&self.codex_home, self.codex_metadata.clone());
-        worker
-            .run_round_with_source_storage(context.storage(), cancellation)
-            .map_err(|code| {
-                SourceAdapterError::with_code(
-                    code,
-                    format!("Codex metadata pipeline failed: {code}"),
-                )
-            })
+        storage.run_round(&worker, cancellation).map_err(|code| {
+            SourceAdapterError::with_code(
+                code,
+                format!("Codex metadata pipeline failed: {code}"),
+            )
+        })
     }
 }
 
@@ -298,7 +292,7 @@ impl coordinator::ScanWorker for MetadataWorker {
         let Some(ledger) = self.ledger.as_ref() else {
             return coordinator::WorkerResult::Failed("CODEX_LEDGER_UNAVAILABLE");
         };
-        match self.run_round_with_ledger(ledger, cancellation) {
+        match self.run_round_with_legacy_codex_storage(ledger, cancellation) {
             Ok(()) => coordinator::WorkerResult::Completed,
             Err(error_code) => coordinator::WorkerResult::Failed(error_code),
         }
@@ -319,10 +313,10 @@ impl MetadataWorker {
         let Some(ledger) = self.ledger.as_ref() else {
             return Err("CODEX_LEDGER_UNAVAILABLE");
         };
-        self.run_round_with_ledger(ledger, cancellation)
+        self.run_round_with_legacy_codex_storage(ledger, cancellation)
     }
 
-    pub(crate) fn run_round_with_ledger(
+    pub(crate) fn run_round_with_legacy_codex_storage(
         &self,
         ledger: &Ledger,
         cancellation: &AtomicBool,
