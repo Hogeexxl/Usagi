@@ -10,7 +10,9 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    domain::{MetadataThreadCommit, Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
+    domain::{
+        MetadataThreadCommit, Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState,
+    },
     storage::{Ledger, RevisionPublisher, StorageErrorKind},
     usage::{EventKind, NormalizedTokenUsage},
 };
@@ -632,11 +634,7 @@ impl<'a> SourceWriteTxn<'a> {
         now_ms: i64,
     ) -> crate::storage::Result<()> {
         self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_begin_usage_carry(
-                connection,
-                source_file_id,
-                now_ms,
-            )
+            crate::storage::usage::apply_codex_begin_usage_carry(connection, source_file_id, now_ms)
         })
     }
 
@@ -704,9 +702,7 @@ impl<'a> SourceWriteTxn<'a> {
         })?;
         let result = {
             let connection = self.connection_mut().map_err(|_| {
-                crate::usage::rebuild::RebuildError::Invalid(
-                    "source write transaction unavailable",
-                )
+                crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
             })?;
             operation(connection)
         };
@@ -822,8 +818,6 @@ impl<'a> SourceWriteTxn<'a> {
     ) -> crate::storage::Result<T> {
         self.apply_codex_storage(operation)
     }
-
-
 
     pub fn scan_id(&self) -> &str {
         &self.scan_id
