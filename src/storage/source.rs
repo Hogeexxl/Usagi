@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::domain::{
     AgentPathProvenance, AgentRoleProvenance, CheckpointOutcome, CheckpointProcessingStatus,
