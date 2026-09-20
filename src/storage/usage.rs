@@ -620,14 +620,12 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(commit_usage)),
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         let bridge = source_tx.apply_codex_usage_batch(self, batch)?;
         source_tx
             .commit()
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-        if let Some((data_revision, status_revision)) = bridge.publish_revisions {
-            self.publish_revisions(data_revision, status_revision);
-        }
         Ok(bridge.outcome)
     }
 
@@ -639,6 +637,7 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(begin_usage_carry)),
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         source_tx.apply_codex_begin_usage_carry(source_file_id, now_ms)?;
         source_tx
@@ -658,6 +657,7 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(resume_usage_carry)),
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         let outcome = source_tx.apply_codex_resume_usage_carry(source_file_id, now_ms)?;
         source_tx
@@ -681,6 +681,7 @@ impl Ledger {
                 stringify!(complete_usage_build_source)
             ),
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         source_tx.apply_codex_complete_usage_build_source(source_file_id, now_ms)?;
         source_tx
@@ -696,6 +697,7 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(cleanup_inactive_usage)),
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         let deleted = source_tx.apply_codex_cleanup_inactive_usage(max_rows)?;
         source_tx
