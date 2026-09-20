@@ -107,7 +107,9 @@ impl Ledger {
                 data_changed = true;
             }
 
-            source_tx.commit_legacy()?;
+            source_tx
+                .commit()
+                .map_err(|error| StorageError::invalid_state(error.to_string()))?;
             let (revision, status_revision): (i64, i64) = connection.query_row(
                 "SELECT data_revision,status_revision FROM app_meta WHERE id = 1",
                 [],
