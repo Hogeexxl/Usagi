@@ -153,72 +153,83 @@ impl<'connection> RebuildLedger<'connection> {
             ));
         }
         let present = normalized_ids(present_source_ids)?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(begin_or_resume)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        verify_present_ids(&transaction, &present)?;
-        let (active_epoch, existing_build, existing_target): (i64, Option<i64>, Option<i64>) =
-            transaction.query_row(
-                "SELECT active_epoch, build_epoch, build_parser_version
-                 FROM source_usage_epochs WHERE source='codex'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-        let build_epoch = active_epoch
-            .checked_add(1)
-            .ok_or(RebuildError::Invalid("epoch overflow"))?;
-
-        match (existing_build, existing_target) {
-            (None, None) => {
-                transaction.execute(
-                    "UPDATE source_usage_epochs
-                     SET build_epoch=?1, build_parser_version=?2
-                     WHERE source='codex' AND build_epoch IS NULL",
-                    params![build_epoch, target_parser_version],
-                )?;
-                freeze_initial_members(
-                    &transaction,
-                    active_epoch,
-                    build_epoch,
-                    target_parser_version,
-                    &present,
-                    now_ms,
-                )?;
-            }
-            (Some(epoch), Some(parser))
-                if epoch == build_epoch && parser == target_parser_version =>
-            {
-                add_new_present_members(
-                    &transaction,
-                    active_epoch,
-                    build_epoch,
-                    target_parser_version,
-                    &present,
-                    now_ms,
-                )?;
-            }
-            (Some(epoch), Some(_)) if epoch == build_epoch => {
-                replace_target_preserving_members(
-                    &transaction,
-                    active_epoch,
-                    build_epoch,
-                    target_parser_version,
-                    &present,
-                    now_ms,
-                )?;
-            }
-            _ => return Err(RebuildError::Invalid("invalid app build pair")),
-        }
-        let snapshot = load_snapshot(&transaction)?;
+        let snapshot = source_tx.apply_codex_rebuild_begin_or_resume(
+            target_parser_version,
+            &present,
+            now_ms,
+        )?;
         source_tx
             .commit()
             .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(snapshot)
     }
+
+pub(crate) fn apply_codex_rebuild_begin_or_resume(
+    transaction: &Connection,
+    target_parser_version: i64,
+    present: &BTreeSet<i64>,
+    now_ms: i64,
+) -> Result<BuildSnapshot, RebuildError> {
+    verify_present_ids(transaction, present)?;
+    let (active_epoch, existing_build, existing_target): (i64, Option<i64>, Option<i64>) =
+        transaction.query_row(
+            "SELECT active_epoch, build_epoch, build_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    let build_epoch = active_epoch
+        .checked_add(1)
+        .ok_or(RebuildError::Invalid("epoch overflow"))?;
+
+    match (existing_build, existing_target) {
+        (None, None) => {
+            transaction.execute(
+                "UPDATE source_usage_epochs
+                 SET build_epoch=?1, build_parser_version=?2
+                 WHERE source='codex' AND build_epoch IS NULL",
+                params![build_epoch, target_parser_version],
+            )?;
+            freeze_initial_members(
+                transaction,
+                active_epoch,
+                build_epoch,
+                target_parser_version,
+                present,
+                now_ms,
+            )?;
+        }
+        (Some(epoch), Some(parser))
+            if epoch == build_epoch && parser == target_parser_version =>
+        {
+            add_new_present_members(
+                transaction,
+                active_epoch,
+                build_epoch,
+                target_parser_version,
+                present,
+                now_ms,
+            )?;
+        }
+        (Some(epoch), Some(_)) if epoch == build_epoch => {
+            replace_target_preserving_members(
+                transaction,
+                active_epoch,
+                build_epoch,
+                target_parser_version,
+                present,
+                now_ms,
+            )?;
+        }
+        _ => return Err(RebuildError::Invalid("invalid app build pair")),
+    }
+    load_snapshot(transaction)
+}
+
 
     /// Commit one present-source reader boundary. The first successful batch
     /// changes the usage checkpoint from rebuild-required/0 to ready; later
