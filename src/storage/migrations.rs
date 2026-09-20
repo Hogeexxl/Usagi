@@ -2833,8 +2833,8 @@ mod tests {
         use crate::{
             ingestion::{IngestionConfig, IngestionCoordinator, LegacyCodexSourceAdapter},
             source::SourceRegistry,
+            domain::ScanResult,
             storage::{Ledger, LedgerOptions},
-            ScanResult,
             usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
         };
 
