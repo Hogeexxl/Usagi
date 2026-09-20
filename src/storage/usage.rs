@@ -570,23 +570,18 @@ impl Ledger {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let epoch = read_epoch(&transaction)?;
         if epoch != expected_epoch {
-            #[cfg(test)]
-            eprintln!(
-                "usage exact-plan epoch mismatch: expected={expected_epoch:?} actual={epoch:?}"
-            );
             return Err(StorageError::invalid_state(
                 "usage epoch changed while loading exact plans",
             ));
         }
         let mut plans = Vec::with_capacity(source_file_ids.len());
         for &source_file_id in source_file_ids {
-            let plan =
-                load_source_plan(&transaction, source_file_id, parser_version, epoch.clone());
-            #[cfg(test)]
-            if let Err(error) = &plan {
-                eprintln!("usage exact-plan source {source_file_id} failed: {error:?}");
-            }
-            plans.push(plan?);
+            plans.push(load_source_plan(
+                &transaction,
+                source_file_id,
+                parser_version,
+                epoch.clone(),
+            )?);
         }
         plans.sort_by_key(|plan| plan.source_file_id);
         transaction.commit()?;
@@ -1358,32 +1353,13 @@ fn load_source_plan(
         })
         .transpose()?
         .flatten();
-    let checkpoint = read_usage_checkpoint(transaction, source_file_id).map_err(|error| {
-        #[cfg(test)]
-        eprintln!("usage source {source_file_id} checkpoint read failed: {error:?}");
-        error
-    })?;
-    let state = read_usage_source_state(transaction, epoch.working_epoch(), source_file_id)
-        .map_err(|error| {
-            #[cfg(test)]
-            eprintln!("usage source {source_file_id} state read failed: {error:?}");
-            error
-        })?;
+    let checkpoint = read_usage_checkpoint(transaction, source_file_id)?;
+    let state = read_usage_source_state(transaction, epoch.working_epoch(), source_file_id)?;
     let open_turn = match state.as_ref() {
-        Some(state) => read_open_turn(transaction, epoch.working_epoch(), source_file_id, state)
-            .map_err(|error| {
-                #[cfg(test)]
-                eprintln!("usage source {source_file_id} open-turn read failed: {error:?}");
-                error
-            })?,
+        Some(state) => read_open_turn(transaction, epoch.working_epoch(), source_file_id, state)?,
         None => None,
     };
-    let build =
-        read_build_plan_state(transaction, epoch.build_epoch, source_file_id).map_err(|error| {
-            #[cfg(test)]
-            eprintln!("usage source {source_file_id} build-plan read failed: {error:?}");
-            error
-        })?;
+    let build = read_build_plan_state(transaction, epoch.build_epoch, source_file_id)?;
 
     let mut plan = UsageSourcePlan {
         source_file_id,
