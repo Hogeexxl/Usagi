@@ -305,9 +305,14 @@ impl<'a> UsageLedger<'a> {
         let present = present_source_ids.into_iter().collect::<BTreeSet<_>>();
         let invalidated = invalidated_source_ids.into_iter().collect::<BTreeSet<_>>();
         let mut connection = self.ledger.connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(storage::StorageError::sqlite)?;
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            "legacy-codex-usage:replace_build_sources",
+            &mut connection,
+        )
+        .map_err(storage::StorageError::sqlite)?;
+        let tx = source_tx
+            .legacy_transaction()
+            .ok_or(UsageLedgerError::Invalid("legacy Codex SourceWriteTxn missing transaction"))?;
         let (active, build): (i64, Option<i64>) = tx
             .query_row(
                 "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
@@ -327,7 +332,9 @@ impl<'a> UsageLedger<'a> {
             &invalidated,
             now_ms,
         )?;
-        tx.commit().map_err(storage::StorageError::sqlite)?;
+        source_tx
+            .commit_legacy()
+            .map_err(storage::StorageError::sqlite)?;
         Ok(())
     }
 
