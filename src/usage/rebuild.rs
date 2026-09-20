@@ -239,173 +239,15 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         progress: SourceProgress,
     ) -> Result<ProgressOutcome, RebuildError> {
         validate_progress_shape(&progress)?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(record_progress)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        let (build_epoch, parser_version) = current_build(&transaction)?;
-        let member = load_member_for_update(&transaction, build_epoch, progress.source_file_id)?;
-        if matches!(
-            member.completion_status,
-            CompletionStatus::Blocked | CompletionStatus::Quarantined
-        ) {
-            return Err(RebuildError::Cas(
-                "blocked/quarantined source cannot record progress",
-            ));
-        }
-        if member.completion_status == CompletionStatus::Carried {
-            return Err(RebuildError::Cas(
-                "carried source is owned by the carry protocol",
-            ));
-        }
-        if member.expected_generation != progress.expected_generation
-            || member.observed_raw_size != progress.observed_raw_size
-        {
-            return Err(RebuildError::Cas("manifest generation or raw size changed"));
-        }
-        verify_current_identity(&transaction, &member)?;
-
-        let checkpoint = transaction
-            .query_row(
-                "SELECT parser_version, committed_offset, guard_hash, processing_status
-                 FROM source_checkpoints
-                 WHERE source_file_id=?1 AND consumer_kind='usage'",
-                [progress.source_file_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, Option<Vec<u8>>>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((checkpoint_parser, committed_offset, checkpoint_guard, checkpoint_status)) =
-            checkpoint
-        else {
-            return Err(RebuildError::Cas("usage checkpoint missing"));
-        };
-        if checkpoint_parser != parser_version {
-            return Err(RebuildError::Cas("checkpoint parser changed"));
-        }
-        if committed_offset == progress.last_complete_offset
-            && state_matches_progress(&transaction, build_epoch, &progress)?
-        {
-            source_tx
-            .commit()
-            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-            return Ok(ProgressOutcome::AlreadyApplied);
-        }
-        if checkpoint_guard != progress.expected_guard_hash {
-            return Err(RebuildError::Cas("checkpoint guard changed"));
-        }
-        if committed_offset != progress.start_offset
-            || (progress.start_offset == 0
-                && checkpoint_status != "rebuild_required"
-                && checkpoint_status != "ready")
-            || (progress.start_offset > 0 && checkpoint_status != "ready")
-        {
-            return Err(RebuildError::Cas(
-                "checkpoint is not the planned start boundary",
-            ));
-        }
-
-        let (tail_status, tail_start, exhausted) = tail_columns(&progress)?;
-        let canonical_algorithm = crate::usage::canonical_algorithm_for(parser_version).ok_or(
-            RebuildError::Invalid("unknown usage parser canonical algorithm"),
-        )?;
-        transaction.execute(
-            "INSERT INTO usage_source_states (
-                ledger_epoch, source_file_id, file_generation, device_id, inode,
-                usage_parser_version, canonical_algorithm_version,
-                resolved_through_offset, observed_raw_size, raw_tail_status,
-                raw_tail_start_offset, owning_thread_id, root_session_id,
-                continuation_state, chain_state, chain_block_reason, updated_at_ms
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
-                       'owning_live','continuous',NULL,?14)
-             ON CONFLICT(ledger_epoch,source_file_id) DO UPDATE SET
-                file_generation=excluded.file_generation,
-                device_id=excluded.device_id,
-                inode=excluded.inode,
-                usage_parser_version=excluded.usage_parser_version,
-                canonical_algorithm_version=excluded.canonical_algorithm_version,
-                resolved_through_offset=excluded.resolved_through_offset,
-                observed_raw_size=excluded.observed_raw_size,
-                raw_tail_status=excluded.raw_tail_status,
-                raw_tail_start_offset=excluded.raw_tail_start_offset,
-                owning_thread_id=excluded.owning_thread_id,
-                root_session_id=excluded.root_session_id,
-                continuation_state='owning_live', chain_state='continuous',
-                chain_block_reason=NULL, updated_at_ms=excluded.updated_at_ms",
-            params![
-                build_epoch,
-                progress.source_file_id,
-                member.expected_generation,
-                member.expected_device_id,
-                member.expected_inode,
-                parser_version,
-                canonical_algorithm,
-                progress.last_complete_offset,
-                progress.observed_raw_size,
-                tail_status,
-                tail_start,
-                member.expected_owning_thread_id,
-                member.expected_root_session_id,
-                progress.updated_at_ms,
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE source_checkpoints SET parser_version=?1, committed_offset=?2,
-                    guard_hash=?3, processing_status='ready',
-                    last_successful_scan_at_ms=?4, last_error_code=NULL
-             WHERE source_file_id=?5 AND consumer_kind='usage'",
-            params![
-                parser_version,
-                progress.last_complete_offset,
-                progress.guard_hash,
-                progress.updated_at_ms,
-                progress.source_file_id,
-            ],
-        )?;
-        let completion = if exhausted { "rebuilt" } else { "pending" };
-        let changed = transaction.execute(
-            "UPDATE usage_build_sources SET
-                required_through_offset=MAX(required_through_offset,?1),
-                raw_tail_status=?2, raw_tail_start_offset=?3,
-                completion_status=?4, completion_error_code=NULL,
-                completed_generation=CASE WHEN ?4='rebuilt' THEN required_generation ELSE NULL END,
-                completed_through_offset=CASE WHEN ?4='rebuilt' THEN ?1 ELSE NULL END,
-                updated_at_ms=?5
-             WHERE build_epoch=?6 AND source_file_id=?7
-               AND expected_file_generation=?8
-               AND completion_status IN ('pending','rebuilt')",
-            params![
-                progress.last_complete_offset,
-                tail_status,
-                tail_start,
-                completion,
-                progress.updated_at_ms,
-                build_epoch,
-                progress.source_file_id,
-                progress.expected_generation,
-            ],
-        )?;
-        if changed != 1 {
-            return Err(RebuildError::Cas("manifest completion CAS failed"));
-        }
-        verify_completion_row_for_storage(&transaction, build_epoch, progress.source_file_id)?;
+        let outcome = source_tx.apply_codex_rebuild_record_progress(&progress)?;
         source_tx
             .commit()
             .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-        Ok(if exhausted {
-            ProgressOutcome::Rebuilt
-        } else {
-            ProgressOutcome::Advanced
-        })
+        Ok(outcome)
     }
 
     pub fn block_source(
@@ -565,6 +407,167 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         Ok(outcome)
     }
 }
+
+pub(crate) fn apply_codex_rebuild_record_progress(
+    transaction: &Connection,
+    progress: &SourceProgress,
+) -> Result<ProgressOutcome, RebuildError> {
+    let (build_epoch, parser_version) = current_build(transaction)?;
+    let member = load_member_for_update(transaction, build_epoch, progress.source_file_id)?;
+    if matches!(
+        member.completion_status,
+        CompletionStatus::Blocked | CompletionStatus::Quarantined
+    ) {
+        return Err(RebuildError::Cas(
+            "blocked/quarantined source cannot record progress",
+        ));
+    }
+    if member.completion_status == CompletionStatus::Carried {
+        return Err(RebuildError::Cas(
+            "carried source is owned by the carry protocol",
+        ));
+    }
+    if member.expected_generation != progress.expected_generation
+        || member.observed_raw_size != progress.observed_raw_size
+    {
+        return Err(RebuildError::Cas("manifest generation or raw size changed"));
+    }
+    verify_current_identity(transaction, &member)?;
+
+    let checkpoint = transaction
+        .query_row(
+            "SELECT parser_version, committed_offset, guard_hash, processing_status
+             FROM source_checkpoints
+             WHERE source_file_id=?1 AND consumer_kind='usage'",
+            [progress.source_file_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((checkpoint_parser, committed_offset, checkpoint_guard, checkpoint_status)) =
+        checkpoint
+    else {
+        return Err(RebuildError::Cas("usage checkpoint missing"));
+    };
+    if checkpoint_parser != parser_version {
+        return Err(RebuildError::Cas("checkpoint parser changed"));
+    }
+    if committed_offset == progress.last_complete_offset
+        && state_matches_progress(transaction, build_epoch, progress)?
+    {
+        return Ok(ProgressOutcome::AlreadyApplied);
+    }
+    if checkpoint_guard != progress.expected_guard_hash {
+        return Err(RebuildError::Cas("checkpoint guard changed"));
+    }
+    if committed_offset != progress.start_offset
+        || (progress.start_offset == 0
+            && checkpoint_status != "rebuild_required"
+            && checkpoint_status != "ready")
+        || (progress.start_offset > 0 && checkpoint_status != "ready")
+    {
+        return Err(RebuildError::Cas(
+            "checkpoint is not the planned start boundary",
+        ));
+    }
+
+    let (tail_status, tail_start, exhausted) = tail_columns(progress)?;
+    let canonical_algorithm = crate::usage::canonical_algorithm_for(parser_version).ok_or(
+        RebuildError::Invalid("unknown usage parser canonical algorithm"),
+    )?;
+    transaction.execute(
+        "INSERT INTO usage_source_states (
+            ledger_epoch, source_file_id, file_generation, device_id, inode,
+            usage_parser_version, canonical_algorithm_version,
+            resolved_through_offset, observed_raw_size, raw_tail_status,
+            raw_tail_start_offset, owning_thread_id, root_session_id,
+            continuation_state, chain_state, chain_block_reason, updated_at_ms
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
+                   'owning_live','continuous',NULL,?14)
+         ON CONFLICT(ledger_epoch,source_file_id) DO UPDATE SET
+            file_generation=excluded.file_generation,
+            device_id=excluded.device_id,
+            inode=excluded.inode,
+            usage_parser_version=excluded.usage_parser_version,
+            canonical_algorithm_version=excluded.canonical_algorithm_version,
+            resolved_through_offset=excluded.resolved_through_offset,
+            observed_raw_size=excluded.observed_raw_size,
+            raw_tail_status=excluded.raw_tail_status,
+            raw_tail_start_offset=excluded.raw_tail_start_offset,
+            owning_thread_id=excluded.owning_thread_id,
+            root_session_id=excluded.root_session_id,
+            continuation_state='owning_live', chain_state='continuous',
+            chain_block_reason=NULL, updated_at_ms=excluded.updated_at_ms",
+        params![
+            build_epoch,
+            progress.source_file_id,
+            member.expected_generation,
+            member.expected_device_id,
+            member.expected_inode,
+            parser_version,
+            canonical_algorithm,
+            progress.last_complete_offset,
+            progress.observed_raw_size,
+            tail_status,
+            tail_start,
+            member.expected_owning_thread_id,
+            member.expected_root_session_id,
+            progress.updated_at_ms,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE source_checkpoints SET parser_version=?1, committed_offset=?2,
+                guard_hash=?3, processing_status='ready',
+                last_successful_scan_at_ms=?4, last_error_code=NULL
+         WHERE source_file_id=?5 AND consumer_kind='usage'",
+        params![
+            parser_version,
+            progress.last_complete_offset,
+            progress.guard_hash,
+            progress.updated_at_ms,
+            progress.source_file_id,
+        ],
+    )?;
+    let completion = if exhausted { "rebuilt" } else { "pending" };
+    let changed = transaction.execute(
+        "UPDATE usage_build_sources SET
+            required_through_offset=MAX(required_through_offset,?1),
+            raw_tail_status=?2, raw_tail_start_offset=?3,
+            completion_status=?4, completion_error_code=NULL,
+            completed_generation=CASE WHEN ?4='rebuilt' THEN required_generation ELSE NULL END,
+            completed_through_offset=CASE WHEN ?4='rebuilt' THEN ?1 ELSE NULL END,
+            updated_at_ms=?5
+         WHERE build_epoch=?6 AND source_file_id=?7
+           AND expected_file_generation=?8
+           AND completion_status IN ('pending','rebuilt')",
+        params![
+            progress.last_complete_offset,
+            tail_status,
+            tail_start,
+            completion,
+            progress.updated_at_ms,
+            build_epoch,
+            progress.source_file_id,
+            progress.expected_generation,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(RebuildError::Cas("manifest completion CAS failed"));
+    }
+    verify_completion_row_for_storage(transaction, build_epoch, progress.source_file_id)?;
+    Ok(if exhausted {
+        ProgressOutcome::Rebuilt
+    } else {
+        ProgressOutcome::Advanced
+    })
+}
+
 
 pub(crate) fn apply_codex_rebuild_quarantine_session(
     transaction: &Connection,
