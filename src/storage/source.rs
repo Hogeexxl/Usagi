@@ -120,13 +120,13 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
         )?;
-        let transaction = source_tx
-            .legacy_transaction()
-            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
+        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
+            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        })?;
         verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
 
         let existing = load_existing_sources(&transaction)?;
@@ -399,7 +399,7 @@ impl Ledger {
                 safe_fact,
             });
         }
-        source_tx.commit_legacy()?;
+        transaction.commit()?;
         MetadataScanState::new(entries)
             .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
@@ -419,7 +419,7 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
         )?;
