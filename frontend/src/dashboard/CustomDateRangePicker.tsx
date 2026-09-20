@@ -85,6 +85,7 @@ export function CustomDateRangePicker({
         />
       ) : null}
       <PopoverContent
+        animated={false}
         className="cn-calendar-popover w-auto p-0"
         align="start"
         aria-label="自定义日期范围"

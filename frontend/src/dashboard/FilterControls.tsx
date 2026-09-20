@@ -136,7 +136,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
           <MorphPopoverTrigger>
             <FilterTrigger label="来源" count={filters.sources.length} icon={<Layers className="h-4 w-4" />} />
           </MorphPopoverTrigger>
-          <MorphPopoverContent side="bottom" align="start" className="w-64 p-2">
+          <MorphPopoverContent side="bottom" align="start" animated={false} className="w-64 p-2">
             <OptionStatus
               loading={optionsLoading}
               stale={optionsStale}
@@ -161,7 +161,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
       ) : null}
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="模型" count={filters.models.length} icon={<Cpu className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" className="w-72 p-2">
+        <MorphPopoverContent side="bottom" align="start" animated={false} className="w-72 p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={groups.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
           {groups.map((group) => {
@@ -181,7 +181,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="项目" count={filters.projects.length} icon={<Folder className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" className="w-80 p-2">
+        <MorphPopoverContent side="bottom" align="start" animated={false} className="w-80 p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={projects.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && projects.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无项目</div> : null}
           {projects.map((project) => <div key={projectKey(project)} className={rowClass} title={projectTitle(project)}><Checkbox checked={selectedProjects.has(projectKey(project))} onCheckedChange={() => toggleProject(project)} label={projectDisplay(project)} /></div>)}

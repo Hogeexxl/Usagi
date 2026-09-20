@@ -219,6 +219,8 @@ export interface MorphPopoverContentProps {
   sideOffset?: number;
   /** Panel corner radius, in px. Default 16. */
   radius?: number;
+  /** Disable entrance/exit motion while preserving the same panel structure and positioning. */
+  animated?: boolean;
   className?: string;
 }
 
@@ -228,6 +230,7 @@ export function MorphPopoverContent({
   align = "end",
   sideOffset = 8,
   radius = 16,
+  animated = true,
   className,
 }: MorphPopoverContentProps) {
   const ctx = useMorphContext("MorphPopoverContent");
@@ -251,42 +254,76 @@ export function MorphPopoverContent({
       : layout.trigger.top - layout.content.height - sideOffset
     : 0;
 
+  const shouldAnimate = animated && !reduce;
+
   // Both directions travel between the exact same hidden/show states. Exit
   // targets "hidden" directly instead of introducing separate choreography.
-  const wrap = reduce
-    ? undefined
-    : {
-        hidden: { opacity: 0, scale: 0.96, transition: SPRING_PANEL },
-        show: { opacity: 1, scale: 1, transition: SPRING_PANEL },
-      };
-  const clip = reduce
-    ? undefined
-    : {
-        hidden: {
-          clipPath: clipHidden(side, align, radius),
-          transition: MORPH_CLIP_TRANSITION,
-        },
-        show: {
-          clipPath: clipShown(radius),
-          transition: MORPH_CLIP_TRANSITION,
-        },
-      };
+  const wrap = {
+    hidden: { opacity: 0, scale: 0.96, transition: SPRING_PANEL },
+    show: { opacity: 1, scale: 1, transition: SPRING_PANEL },
+  };
+  const clip = {
+    hidden: {
+      clipPath: clipHidden(side, align, radius),
+      transition: MORPH_CLIP_TRANSITION,
+    },
+    show: {
+      clipPath: clipShown(radius),
+      transition: MORPH_CLIP_TRANSITION,
+    },
+  };
 
   // Keep the server and first client render identical, then mount the portal.
   if (!portalReady) return null;
+
+  // Filter-style menus can opt out of motion entirely. This is deliberately a
+  // plain DOM path rather than a zero-duration Motion animation: no opacity,
+  // scale, clip-path, or animation frame can become visible after measurement.
+  if (!shouldAnimate) {
+    return createPortal(
+      ctx.open ? (
+        <div
+          data-morph-popover-portal=""
+          data-morph-popover-animated="false"
+          style={{
+            left,
+            top,
+            visibility: layout ? "visible" : "hidden",
+            transformOrigin: originFor(side, align),
+          }}
+          className="fixed z-[9999] [filter:drop-shadow(0_10px_18px_rgba(0,0,0,0.14))]"
+        >
+          <div
+            ref={ctx.contentRef}
+            id={ctx.contentId}
+            role="dialog"
+            aria-labelledby={ctx.triggerId}
+            style={{ borderRadius: radius }}
+            className={cn(
+              "overflow-hidden border border-border bg-background",
+              className,
+            )}
+          >
+            {children}
+          </div>
+        </div>
+      ) : null,
+      document.body,
+    );
+  }
 
   return createPortal(
     <AnimatePresence>
       {ctx.open ? (
         <motion.div
           data-morph-popover-portal=""
+          data-morph-popover-animated="true"
           // Wrapper carries the shadow as a drop-shadow filter, which hugs the
           // clipped shape below (box-shadow would just get clipped away).
           variants={wrap}
-          initial={reduce ? { opacity: 0 } : "hidden"}
-          animate={reduce ? { opacity: 1 } : "show"}
-          exit={reduce ? { opacity: 0 } : "hidden"}
-          transition={reduce ? { duration: 0.12 } : undefined}
+          initial="hidden"
+          animate="show"
+          exit="hidden"
           style={{
             left,
             top,

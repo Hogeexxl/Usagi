@@ -204,6 +204,17 @@ describe("FilterControls", () => {
     expect(trigger).toHaveClass("bg-primary");
   });
 
+  it.each([
+    { trigger: "模型筛选，全部", options: modelOptions },
+    { trigger: "项目筛选，全部", options: projectOptions },
+  ])("opens $trigger without entrance animation", async ({ trigger, options }) => {
+    renderControls({ options });
+    await openPopover(trigger);
+
+    const portal = document.querySelector("[data-morph-popover-portal]");
+    expect(portal).toHaveAttribute("data-morph-popover-animated", "false");
+  });
+
   it("opens the model popover and closes it on Escape and outside pointer", async () => {
     renderControls();
     const trigger = screen.getByRole("button", { name: "模型筛选，全部" });

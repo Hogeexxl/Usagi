@@ -38,7 +38,10 @@ describe("RangeSelector", () => {
     const onChange = vi.fn();
     render(<RangeSelector value={{ key: "today" }} onChange={onChange} />);
     fireEvent.click(screen.getByRole("tab", { name: "自定义" }));
-    expect(screen.getByRole("dialog", { name: "自定义日期范围" })).toBeInTheDocument();
+    const popover = screen.getByRole("dialog", { name: "自定义日期范围" });
+    expect(popover).toBeInTheDocument();
+    expect(popover).toHaveAttribute("data-popover-animated", "false");
+    expect(popover).not.toHaveClass("cn-popover-content-motion");
     expect(screen.queryByRole("button", { name: /应用|确定|取消/ })).not.toBeInTheDocument();
 
     const firstDate = new Date();
