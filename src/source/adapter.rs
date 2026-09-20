@@ -396,27 +396,20 @@ impl SourceStorage {
         &self.source
     }
 
-    /// Validate the legacy Codex source path against the Ledger binding before
-    /// any discovery or canonical write is attempted.
-    pub(crate) fn ensure_codex_home(&self, codex_home: &Path) -> Result<(), SourceStorageError> {
+    /// Create the fixed-Codex private ingestion facade allowed by Spec 01.
+    /// The facade never exposes the underlying Ledger and cannot select an
+    /// arbitrary canonical source.
+    pub(crate) fn legacy_codex_ingestion(
+        &self,
+    ) -> Result<LegacyCodexIngestionStorage<'_>, SourceStorageError> {
         if self.source != SourceId::CODEX {
             return Err(SourceStorageError::SourceMismatch);
         }
-        let Some(ledger) = self.ledger.as_ref() else {
-            return Err(SourceStorageError::NotImplemented);
-        };
-        // Binding readiness is deliberately checked only at this
-        // Codex-private compatibility boundary.  Lifecycle seams remain
-        // source-agnostic, while a persisted `source_changed` status is
-        // surfaced before comparing the caller's path with this connection's
-        // current home.
-        ledger
-            .ensure_source_ready()
-            .map_err(|error| SourceStorageError::Storage(error.kind()))?;
-        if Ledger::codex_home_fingerprint(codex_home) != ledger.expected_codex_home_fingerprint() {
-            return Err(SourceStorageError::Storage(StorageErrorKind::SourceChanged));
-        }
-        Ok(())
+        let ledger = self
+            .ledger
+            .as_deref()
+            .ok_or(SourceStorageError::NotImplemented)?;
+        Ok(LegacyCodexIngestionStorage { ledger })
     }
 
     pub fn load_usage_epoch(&self) -> Result<Option<SourceUsageEpochState>, SourceStorageError> {
@@ -476,20 +469,35 @@ impl SourceStorage {
     }
 }
 
-impl crate::scanner::MetadataWorker {
-    /// Execute the transitional Codex algorithms from the source-bound
-    /// storage capability. Reads still reuse the mature Ledger projections,
-    /// while every durable Codex mutation is now committed by SourceWriteTxn;
-    /// there is no second legacy BEGIN IMMEDIATE/COMMIT seam.
-    pub(crate) fn run_round_with_source_storage(
+
+/// Fixed-Codex private ingestion facade. This is intentionally crate-private:
+/// it may reuse the mature Codex read/private-state pipeline, but it never
+/// exposes the unrestricted Ledger to the Adapter and cannot choose a source.
+/// Every durable mutation reached through that pipeline is still committed by
+/// a source-fixed SourceWriteTxn.
+pub(crate) struct LegacyCodexIngestionStorage<'a> {
+    ledger: &'a Ledger,
+}
+
+impl LegacyCodexIngestionStorage<'_> {
+    pub(crate) fn ensure_codex_home(&self, codex_home: &Path) -> Result<(), SourceStorageError> {
+        self.ledger
+            .ensure_source_ready()
+            .map_err(|error| SourceStorageError::Storage(error.kind()))?;
+        if Ledger::codex_home_fingerprint(codex_home)
+            != self.ledger.expected_codex_home_fingerprint()
+        {
+            return Err(SourceStorageError::Storage(StorageErrorKind::SourceChanged));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn run_round(
         &self,
-        storage: &SourceStorage,
+        worker: &crate::scanner::MetadataWorker,
         cancellation: &AtomicBool,
     ) -> Result<(), &'static str> {
-        let Some(ledger) = storage.ledger.as_ref() else {
-            return Err("CODEX_LEDGER_UNAVAILABLE");
-        };
-        self.run_round_with_ledger(ledger, cancellation)
+        worker.run_round_with_legacy_codex_storage(self.ledger, cancellation)
     }
 }
 
