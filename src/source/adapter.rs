@@ -813,18 +813,6 @@ impl<'a> SourceWriteTxn<'a> {
         })
     }
 
-    /// Borrow the transitional Codex transaction. This accessor is crate-only
-    /// and cannot select a source; it exists solely so the current mature
-    /// Codex private-state algorithms can be migrated without reimplementing
-    /// their SQL/CAS rules.
-    pub(crate) fn legacy_transaction(&self) -> Option<&Transaction<'_>> {
-        match self.connection.as_ref()? {
-            SourceWriteConnection::Legacy(transaction) => Some(transaction),
-            SourceWriteConnection::Locked(_) => None,
-        }
-    }
-
-
     pub fn scan_id(&self) -> &str {
         &self.scan_id
     }
