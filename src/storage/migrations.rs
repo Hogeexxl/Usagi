@@ -274,6 +274,25 @@ mod tests {
         (TestDatabase(path), connection)
     }
 
+    fn file_v11_connection() -> (TestDatabase, Connection) {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "usagi_t_s01_m07_{}_{}.sqlite",
+            std::process::id(),
+            suffix
+        ));
+        let _ = fs::remove_file(&path);
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 11);
+        (TestDatabase(path), connection)
+    }
+
     fn v5_connection_with_rows() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection
@@ -328,6 +347,22 @@ mod tests {
             .unwrap();
         connection
             .pragma_update(None, "user_version", 10_i64)
+            .unwrap();
+        connection
+    }
+
+    fn v10_connection_with_thread_hierarchy() -> Connection {
+        let connection = v10_connection_with_rows();
+        connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id,parent_thread_id,root_session_id,agent_role,title,
+                    project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                 ) VALUES
+                    ('subagent-a','root','root','subagent','subagent A','project',0,'complete',2),
+                    ('subagent-b','subagent-a','root','subagent','subagent B','project',0,'partial',3)",
+                [],
+            )
             .unwrap();
         connection
     }
@@ -2106,33 +2141,67 @@ mod tests {
 
     #[test]
     fn m01_thread_identity_migration_preserves_codex_ids_and_checks_native_id() {
-        let mut connection = v10_connection_with_rows();
+        let mut connection = v10_connection_with_thread_hierarchy();
+        let before: Vec<(String, Option<String>, Option<String>, String)> = connection
+            .prepare(
+                "SELECT thread_id,parent_thread_id,root_session_id,agent_role
+                 FROM threads ORDER BY thread_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
         assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
-        let identity: (String, String, String, Option<String>, Option<String>) = connection
-            .query_row(
-                "SELECT thread_id,source,native_session_id,parent_thread_id,root_session_id
-                 FROM threads WHERE thread_id='root'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
+        type ThreadIdentityRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        );
+        let mut statement = connection
+            .prepare(
+                "SELECT thread_id,source,native_session_id,parent_thread_id,
+                        root_session_id,agent_role
+                 FROM threads ORDER BY thread_id",
             )
             .unwrap();
+        let after: Vec<ThreadIdentityRow> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(statement);
         assert_eq!(
-            identity,
-            (
-                "root".to_owned(),
-                "codex".to_owned(),
-                "root".to_owned(),
-                None,
-                Some("root".to_owned())
-            )
+            after,
+            before
+                .iter()
+                .map(
+                    |(thread_id, parent_thread_id, root_session_id, agent_role)| {
+                        (
+                            thread_id.clone(),
+                            "codex".to_owned(),
+                            thread_id.clone(),
+                            parent_thread_id.clone(),
+                            root_session_id.clone(),
+                            agent_role.clone(),
+                        )
+                    }
+                )
+                .collect::<Vec<_>>()
         );
         assert!(connection
             .execute(
@@ -2148,11 +2217,18 @@ mod tests {
     #[test]
     fn m02_usage_identity_migration_preserves_tokens_cost_and_quality() {
         let mut connection = v10_connection_with_rows();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
-        let event: (
-            String,
+        connection
+            .execute(
+                "UPDATE usage_events
+                 SET estimated_cost_nanos_usd=123456789, reasoning_effort='high'
+                 WHERE event_id='known'",
+                [],
+            )
+            .unwrap();
+        type LegacyUsageSnapshot = (
             i64,
             String,
+            Option<i64>,
             i64,
             i64,
             Option<i64>,
@@ -2160,42 +2236,115 @@ mod tests {
             i64,
             i64,
             String,
-        ) = connection
-            .query_row(
-                "SELECT source,source_epoch,event_id,input_tokens,cached_tokens,
-                    cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status
-                 FROM usage_events WHERE event_id='known'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                    ))
-                },
+            Option<String>,
+        );
+        let mut statement = connection
+            .prepare(
+                "SELECT ledger_epoch,event_id,estimated_cost_nanos_usd,input_tokens,
+                        cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
+                        total_tokens,quality_status,reasoning_effort
+                 FROM usage_events ORDER BY event_id",
             )
             .unwrap();
-        assert_eq!(
-            event,
-            (
-                "codex".to_owned(),
-                1,
-                "known".to_owned(),
-                100,
-                20,
-                Some(5),
-                10,
-                2,
-                110,
-                "complete".to_owned()
+        let before: Vec<LegacyUsageSnapshot> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(before.iter().any(|event| event.2.is_some()));
+        drop(statement);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        type UsageIdentityRow = (
+            String,
+            i64,
+            String,
+            Option<i64>,
+            i64,
+            i64,
+            Option<i64>,
+            i64,
+            i64,
+            i64,
+            String,
+            Option<String>,
+        );
+        let mut statement = connection
+            .prepare(
+                "SELECT source,source_epoch,event_id,estimated_cost_nanos_usd,input_tokens,
+                        cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
+                        total_tokens,quality_status,reasoning_effort
+                 FROM usage_events ORDER BY event_id",
             )
+            .unwrap();
+        let after: Vec<UsageIdentityRow> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            after,
+            before
+                .iter()
+                .map(
+                    |(
+                        ledger_epoch,
+                        event_id,
+                        estimated_cost_nanos_usd,
+                        input_tokens,
+                        cached_tokens,
+                        cache_write_tokens,
+                        output_tokens,
+                        reasoning_tokens,
+                        total_tokens,
+                        quality_status,
+                        reasoning_effort,
+                    )| {
+                        (
+                            "codex".to_owned(),
+                            *ledger_epoch,
+                            event_id.clone(),
+                            *estimated_cost_nanos_usd,
+                            *input_tokens,
+                            *cached_tokens,
+                            *cache_write_tokens,
+                            *output_tokens,
+                            *reasoning_tokens,
+                            *total_tokens,
+                            quality_status.clone(),
+                            reasoning_effort.clone(),
+                        )
+                    },
+                )
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2423,6 +2572,109 @@ mod tests {
         assert_eq!(counts_before, counts_after);
     }
 
+    fn damage_table_definition(
+        connection: &Connection,
+        table: &str,
+        needle: &str,
+        replacement: &str,
+    ) {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sql.matches(needle).count(),
+            1,
+            "migration fixture no longer contains {table} fragment {needle:?}"
+        );
+        let damaged_sql = sql.replacen(needle, replacement, 1);
+        let backup = format!("m07_{table}_backup");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE {backup} AS SELECT * FROM {table};
+                 DROP TABLE {table};"
+            ))
+            .unwrap();
+        connection.execute_batch(&damaged_sql).unwrap();
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO {table} SELECT * FROM {backup};
+                 DROP TABLE {backup};"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+    }
+
+    fn rebuild_table_without_column(connection: &Connection, table: &str, column: &str) {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info('{table}')"))
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.iter().any(|name| name == column));
+        let retained_columns = columns
+            .iter()
+            .filter(|name| name.as_str() != column)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let backup = format!("m07_{table}_backup");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE {backup} AS SELECT * FROM {table};
+                 DROP TABLE {table};
+                 CREATE TABLE {table} AS SELECT {retained_columns} FROM {backup};
+                 DROP TABLE {backup};"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+    }
+
+    fn assert_m07_rejected(label: &str, damage: impl FnOnce(&Connection)) {
+        let (database, connection) = file_v11_connection();
+        damage(&connection);
+        assert!(
+            crate::storage::validate_schema(&connection, database.0.as_path()).is_err(),
+            "validate_schema unexpectedly accepted {label}"
+        );
+        let db_path = database.0.clone();
+        let codex_home = db_path.parent().unwrap().join(format!("m07-codex-{label}"));
+        drop(connection);
+        assert!(
+            crate::storage::Ledger::open(crate::storage::LedgerOptions::new(db_path, codex_home,))
+                .is_err(),
+            "Ledger::open unexpectedly accepted {label}"
+        );
+    }
+
+    fn assert_m07_damage_rejected(label: &str, table: &str, needle: &str, replacement: &str) {
+        assert_m07_rejected(label, |connection| {
+            damage_table_definition(connection, table, needle, replacement);
+        });
+    }
+
+    fn assert_m07_missing_column_rejected(label: &str, table: &str, column: &str) {
+        assert_m07_rejected(label, |connection| {
+            rebuild_table_without_column(connection, table, column);
+        });
+    }
+
     #[test]
     fn m07_schema_bootstrap_validation_covers_v11_contract() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -2441,17 +2693,88 @@ mod tests {
         let normalized_sql = source_scan_runs_sql
             .to_ascii_lowercase()
             .replace([' ', '\n', '\t'], "");
+        assert!(
+            normalized_sql.contains("statein('queued','running','completed','skipped','failed')")
+        );
         assert!(normalized_sql.contains("started_at_msisnullorstarted_at_ms>=0"));
         assert!(normalized_sql.contains("finished_at_msisnullorfinished_at_ms>=0"));
 
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .unwrap();
-        connection
-            .execute("DROP TABLE source_scan_runs", [])
-            .unwrap();
-        assert!(
-            crate::storage::validate_schema(&connection, std::path::Path::new(":memory:")).is_err()
+        assert_m07_rejected("source_scan_runs missing table", |connection| {
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            connection
+                .execute("DROP TABLE source_scan_runs", [])
+                .unwrap();
+        });
+        assert_m07_missing_column_rejected(
+            "threads native_session_id missing column",
+            "threads",
+            "native_session_id",
         );
+        assert_m07_missing_column_rejected(
+            "usage_events source_epoch missing column",
+            "usage_events",
+            "source_epoch",
+        );
+
+        for (label, table, needle, replacement) in [
+            (
+                "threads native_session_id non-empty check",
+                "threads",
+                "native_session_id TEXT NOT NULL CHECK (length(native_session_id) > 0)",
+                "native_session_id TEXT NOT NULL",
+            ),
+            (
+                "usage_events source NOT NULL",
+                "usage_events",
+                "source TEXT NOT NULL CHECK (length(source) > 0)",
+                "source TEXT CHECK (length(source) > 0)",
+            ),
+            (
+                "usage_events source_epoch NOT NULL",
+                "usage_events",
+                "source_epoch INTEGER NOT NULL CHECK (source_epoch > 0)",
+                "source_epoch INTEGER CHECK (source_epoch > 0)",
+            ),
+            (
+                "usage_events source foreign key",
+                "usage_events",
+                "FOREIGN KEY (source) REFERENCES source_usage_epochs(source)",
+                "CHECK (source IS NOT NULL)",
+            ),
+            (
+                "usage_events primary key",
+                "usage_events",
+                "PRIMARY KEY (source, source_epoch, event_id)",
+                "PRIMARY KEY (source, source_epoch, event_id, occurred_at_ms)",
+            ),
+            (
+                "usage_event_occurrences codex source check",
+                "usage_event_occurrences",
+                "source TEXT NOT NULL CHECK (source = 'codex')",
+                "source TEXT NOT NULL",
+            ),
+            (
+                "source_scan_runs state check",
+                "source_scan_runs",
+                "state IN ('queued', 'running', 'completed', 'skipped', 'failed')",
+                "state IN ('queued')",
+            ),
+            (
+                "source_usage_epochs source non-empty check",
+                "source_usage_epochs",
+                "source TEXT PRIMARY KEY CHECK (length(source) > 0)",
+                "source TEXT PRIMARY KEY",
+            ),
+            (
+                "source_usage_epochs primary key",
+                "source_usage_epochs",
+                "source TEXT PRIMARY KEY CHECK (length(source) > 0)",
+                "source TEXT NOT NULL CHECK (length(source) > 0)",
+            ),
+        ] {
+            assert_m07_damage_rejected(label, table, needle, replacement);
+        }
     }
 }

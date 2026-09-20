@@ -548,11 +548,11 @@ impl<'connection> AggregateReader<'connection> {
             .query_row(
                 &format!(
                     "SELECT COUNT(DISTINCT ue.root_session_id)
-                     FROM usage_events ue
-                     JOIN source_usage_epochs sue
-                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                     FROM source_usage_epochs sue
+                     CROSS JOIN usage_events ue
                      LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-                     WHERE {}",
+                     WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                       AND {}",
                     summary_where_clause(query.filter())
                 ),
                 params_from_iter(values.iter()),
@@ -564,11 +564,11 @@ impl<'connection> AggregateReader<'connection> {
             .query_row(
                 &format!(
                     "SELECT COUNT(DISTINCT ue.root_session_id)
-                     FROM usage_events ue
-                     JOIN source_usage_epochs sue
-                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                     FROM source_usage_epochs sue
+                     CROSS JOIN usage_events ue
                      LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-                     WHERE {} AND ue.estimated_cost_nanos_usd IS NULL",
+                     WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                       AND {} AND ue.estimated_cost_nanos_usd IS NULL",
                     summary_where_clause(query.filter())
                 ),
                 params_from_iter(values.iter()),
@@ -631,9 +631,10 @@ impl<'connection> AggregateReader<'connection> {
             .prepare(
                 "WITH roots AS (
                SELECT ue.root_session_id, MAX(ue.occurred_at_ms) AS last_activity_at_ms
-               FROM usage_events ue
-               JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-               WHERE ue.occurred_at_ms>=?1 AND ue.occurred_at_ms<?2
+               FROM source_usage_epochs sue
+               CROSS JOIN usage_events ue
+               WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 AND ue.occurred_at_ms>=?1 AND ue.occurred_at_ms<?2
                GROUP BY ue.root_session_id
              )
              SELECT roots.root_session_id, roots.last_activity_at_ms,
@@ -685,13 +686,18 @@ impl<'connection> AggregateReader<'connection> {
             let inclusive_usage = self.aggregate_for_root(range, &root_session_id, None)?;
             let self_usage = self.aggregate_for_root(range, &root_session_id, Some(true))?;
             let subagent_usage = self.aggregate_for_root(range, &root_session_id, Some(false))?;
-            let subagent_count = self.connection.query_row(
-                "SELECT COUNT(DISTINCT ue.thread_id) FROM usage_events ue
-                 JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-                 WHERE ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
+            let subagent_count = self
+                .connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT ue.thread_id) FROM source_usage_epochs sue
+                 CROSS JOIN usage_events ue
+                 WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                   AND ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
                    AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3",
-                params![root_session_id, range.start_ms, range.end_ms], |row| row.get(0),
-            ).map_err(map_sql_error)?;
+                    params![root_session_id, range.start_ms, range.end_ms],
+                    |row| row.get(0),
+                )
+                .map_err(map_sql_error)?;
             let models_used = self.models_for_root(range, &root_session_id)?;
             let data_status = status_for_totals(&inclusive_usage);
             output.push(SessionUsageRow {
@@ -800,10 +806,11 @@ impl<'connection> AggregateReader<'connection> {
                     SUM(estimated_cost_nanos_usd),
                     COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events
-             JOIN source_usage_epochs sue
-               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
+             FROM source_usage_epochs sue
+             CROSS JOIN usage_events
+             WHERE sue.source=usage_events.source
+               AND sue.active_epoch=usage_events.source_epoch
+               AND occurred_at_ms>=?1 AND occurred_at_ms<?2
                AND root_session_id IN ({root_placeholders})
              GROUP BY root_session_id, thread_id"
         );
@@ -845,10 +852,11 @@ impl<'connection> AggregateReader<'connection> {
 
         let model_sql = format!(
             "SELECT root_session_id, model
-             FROM usage_events
-             JOIN source_usage_epochs sue
-               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
+             FROM source_usage_epochs sue
+             CROSS JOIN usage_events
+             WHERE sue.source=usage_events.source
+               AND sue.active_epoch=usage_events.source_epoch
+               AND occurred_at_ms>=?1 AND occurred_at_ms<?2
                AND root_session_id IN ({root_placeholders})
              GROUP BY root_session_id, model
              ORDER BY root_session_id ASC, MIN(occurred_at_ms) ASC,
@@ -979,25 +987,7 @@ impl<'connection> AggregateReader<'connection> {
 
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT thread_id, model, MAX(occurred_at_ms),
-                        COALESCE(SUM(input_tokens),0),
-                        COALESCE(SUM(cached_tokens),0), SUM(cache_write_tokens),
-                        COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0),
-                        COALESCE(SUM(total_tokens),0),
-                        COALESCE(SUM(CASE WHEN cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
-                        SUM(estimated_cost_nanos_usd),
-                        COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
-                        COUNT(*), reasoning_effort
-                 FROM usage_events
-                 JOIN source_usage_epochs sue
-                   ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-                 WHERE root_session_id=?1
-                   AND occurred_at_ms>=?2 AND occurred_at_ms<?3
-                 GROUP BY thread_id, model, reasoning_effort
-                 ORDER BY thread_id ASC, MIN(occurred_at_ms) ASC,
-                          MIN(event_id) ASC, model ASC, reasoning_effort ASC",
-            )
+            .prepare(SESSION_DETAIL_SQL)
             .map_err(map_sql_error)?;
         let mut groups = statement
             .query_map(
@@ -1180,11 +1170,11 @@ impl<'connection> AggregateReader<'connection> {
                     SUM(ue.estimated_cost_nanos_usd),
                     COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events ue
-             JOIN source_usage_epochs sue
-               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             FROM source_usage_epochs sue
+             CROSS JOIN usage_events ue
              LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-             WHERE {}
+             WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+               AND {}
              GROUP BY model ORDER BY model ASC",
             summary_where_clause(query.filter())
         )).map_err(map_sql_error)?;
@@ -1213,14 +1203,7 @@ impl<'connection> AggregateReader<'connection> {
     pub fn filter_options(&self) -> Result<FilterOptions, AggregateError> {
         let mut sources_statement = self
             .connection
-            .prepare(
-                "SELECT DISTINCT ue.source
-                 FROM usage_events ue
-                 JOIN source_usage_epochs sue
-                   ON sue.source = ue.source
-                  AND sue.active_epoch = ue.source_epoch
-                 ORDER BY ue.source ASC",
-            )
+            .prepare(FILTER_SOURCES_SQL)
             .map_err(map_sql_error)?;
         let sources = sources_statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -1239,13 +1222,7 @@ impl<'connection> AggregateReader<'connection> {
 
         let mut models_statement = self
             .connection
-            .prepare(
-                "SELECT DISTINCT model
-                 FROM usage_events
-                 JOIN source_usage_epochs sue
-                   ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-                 ORDER BY model ASC",
-            )
+            .prepare(FILTER_MODELS_SQL)
             .map_err(map_sql_error)?;
         let models = models_statement
             .query_map([], |row| row.get(0))
@@ -1264,25 +1241,7 @@ impl<'connection> AggregateReader<'connection> {
 
         let mut projects_statement = self
             .connection
-            .prepare(
-                "WITH usage_roots AS (
-                   SELECT DISTINCT root_session_id
-                   FROM usage_events
-                   JOIN source_usage_epochs sue
-                     ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-                 )
-                 SELECT root.project_kind, root.project_name, root.project_path
-                 FROM usage_roots
-                 LEFT JOIN threads root ON root.thread_id=usage_roots.root_session_id
-                 ORDER BY CASE root.project_kind
-                            WHEN 'project' THEN 0
-                            WHEN 'projectless' THEN 1
-                            WHEN 'unknown' THEN 2
-                            ELSE 3
-                          END,
-                          root.project_path ASC,
-                          root.project_name ASC",
-            )
+            .prepare(FILTER_PROJECTS_SQL)
             .map_err(map_sql_error)?;
         let project_rows = projects_statement
             .query_map([], |row| {
@@ -1393,75 +1352,7 @@ impl<'connection> AggregateReader<'connection> {
         range: TimeRange,
         filter: &UsageFilter,
     ) -> Result<Vec<String>, AggregateError> {
-        let mut clauses = vec![
-            "root.agent_role='main'".to_owned(),
-            "root.root_session_id=root.thread_id".to_owned(),
-            "root.parent_thread_id IS NULL".to_owned(),
-            "EXISTS (SELECT 1 FROM usage_events ue_any
-                     JOIN source_usage_epochs sue_any
-                       ON sue_any.source=ue_any.source AND sue_any.active_epoch=ue_any.source_epoch
-                     WHERE ue_any.root_session_id=root.thread_id
-                       AND ue_any.occurred_at_ms>=?1
-                       AND ue_any.occurred_at_ms<?2)"
-                .to_owned(),
-        ];
-        let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
-        let mut next = 3_usize;
-        if !filter.sources.is_empty() {
-            let placeholders = (next..next + filter.sources.len())
-                .map(|value| format!("?{value}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            clauses.push(format!("root.source IN ({placeholders})"));
-            values.extend(
-                filter
-                    .sources
-                    .iter()
-                    .map(|source| Value::Text(source.as_str().to_owned())),
-            );
-            next += filter.sources.len();
-        }
-        if !filter.models.is_empty() {
-            let placeholders = (next..next + filter.models.len())
-                .map(|value| format!("?{value}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            clauses.push(format!(
-                "EXISTS (SELECT 1 FROM usage_events ue_model
-                         JOIN source_usage_epochs sue_model
-                           ON sue_model.source=ue_model.source AND sue_model.active_epoch=ue_model.source_epoch
-                         WHERE ue_model.root_session_id=root.thread_id
-                           AND ue_model.occurred_at_ms>=?1
-                           AND ue_model.occurred_at_ms<?2
-                           AND ue_model.model IN ({placeholders}))"
-            ));
-            values.extend(filter.models.iter().cloned().map(Value::Text));
-            next += filter.models.len();
-        }
-        let mut project_clauses = Vec::new();
-        if !filter.project_paths.is_empty() {
-            let placeholders = (next..next + filter.project_paths.len())
-                .map(|value| format!("?{value}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            project_clauses.push(format!(
-                "(root.project_kind='project' AND root.project_path IN ({placeholders}))"
-            ));
-            values.extend(filter.project_paths.iter().cloned().map(Value::Text));
-        }
-        if filter.include_projectless {
-            project_clauses.push("root.project_kind='projectless'".to_owned());
-        }
-        if filter.include_unknown_project {
-            project_clauses.push("root.project_kind='unknown'".to_owned());
-        }
-        if !project_clauses.is_empty() {
-            clauses.push(format!("({})", project_clauses.join(" OR ")));
-        }
-        let sql = format!(
-            "SELECT root.thread_id FROM threads root WHERE {} ORDER BY root.thread_id ASC",
-            clauses.join(" AND ")
-        );
+        let (sql, values) = eligible_roots_query(range, filter);
         let mut statement = self.connection.prepare(&sql).map_err(map_sql_error)?;
         statement
             .query_map(params_from_iter(values.iter()), |row| row.get(0))
@@ -1482,11 +1373,11 @@ impl<'connection> AggregateReader<'connection> {
                         MAX(ue.occurred_at_ms),
                         COALESCE(root.source, 'codex'),
                         COALESCE(root.native_session_id, root.thread_id)
-                 FROM threads root
-                 JOIN usage_events ue ON ue.root_session_id=root.thread_id
-                 JOIN source_usage_epochs sue
-                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-                 WHERE root.thread_id=?1
+                 FROM source_usage_epochs sue
+                 CROSS JOIN usage_events ue
+                 JOIN threads root ON root.thread_id=ue.root_session_id
+                 WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                   AND root.thread_id=?1
                    AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3
                  GROUP BY root.thread_id, root.title, root.project_name, root.project_path, root.source, root.native_session_id",
                 params![root, range.start_ms, range.end_ms],
@@ -1508,10 +1399,10 @@ impl<'connection> AggregateReader<'connection> {
         let subagent_count = self
             .connection
             .query_row(
-                "SELECT COUNT(DISTINCT ue.thread_id) FROM usage_events ue
-                 JOIN source_usage_epochs sue
-                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-                 WHERE ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
+                "SELECT COUNT(DISTINCT ue.thread_id) FROM source_usage_epochs sue
+                 CROSS JOIN usage_events ue
+                 WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                   AND ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
                    AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3",
                 params![root, range.start_ms, range.end_ms],
                 |row| row.get(0),
@@ -1666,10 +1557,11 @@ impl<'connection> AggregateReader<'connection> {
                     SUM(estimated_cost_nanos_usd),
                     COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events
-             JOIN source_usage_epochs sue
-               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2 AND {predicate}"
+             FROM source_usage_epochs sue
+             CROSS JOIN usage_events
+             WHERE sue.source=usage_events.source
+               AND sue.active_epoch=usage_events.source_epoch
+               AND occurred_at_ms>=?1 AND occurred_at_ms<?2 AND {predicate}"
         );
         let mut values: Vec<&dyn rusqlite::ToSql> = vec![&range.start_ms, &range.end_ms];
         values.extend(extra.iter().map(|value| value as &dyn rusqlite::ToSql));
@@ -1691,11 +1583,11 @@ impl<'connection> AggregateReader<'connection> {
                  SELECT ue.root_session_id,
                         SUM(ue.estimated_cost_nanos_usd) AS session_cost_nanos_usd,
                         SUM(ue.total_tokens) AS session_tokens
-                 FROM usage_events ue
-                 JOIN source_usage_epochs sue
-                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 FROM source_usage_epochs sue
+                 CROSS JOIN usage_events ue
                  LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-                 WHERE {}
+                 WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                   AND {}
                  GROUP BY ue.root_session_id
                  HAVING SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END)=0
              ) priced_sessions",
@@ -1715,20 +1607,7 @@ impl<'connection> AggregateReader<'connection> {
         query: &SummaryQuery,
     ) -> Result<(TokenTotals, Vec<Value>), AggregateError> {
         let values = summary_values(query);
-        let sql = format!(
-            "SELECT COALESCE(SUM(ue.input_tokens),0), COALESCE(SUM(ue.cached_tokens),0), SUM(ue.cache_write_tokens),
-                    COALESCE(SUM(ue.output_tokens),0), COALESCE(SUM(ue.reasoning_tokens),0), COALESCE(SUM(ue.total_tokens),0),
-                    COALESCE(SUM(CASE WHEN ue.cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
-                    SUM(ue.estimated_cost_nanos_usd),
-                    COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
-                    COUNT(*)
-             FROM usage_events ue
-             JOIN source_usage_epochs sue
-               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-             LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-             WHERE {}",
-            summary_where_clause(query.filter())
-        );
+        let sql = summary_sql(query.filter());
         let row = self
             .connection
             .query_row(&sql, params_from_iter(values.iter()), aggregate_row)
@@ -1737,7 +1616,7 @@ impl<'connection> AggregateReader<'connection> {
     }
 
     fn models_for_root(&self, range: TimeRange, root: &str) -> Result<Vec<String>, AggregateError> {
-        let mut statement = self.connection.prepare("SELECT ue.model FROM usage_events ue JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch WHERE ue.root_session_id=?1 AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
+        let mut statement = self.connection.prepare("SELECT ue.model FROM source_usage_epochs sue CROSS JOIN usage_events ue WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch AND ue.root_session_id=?1 AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
         statement
             .query_map(params![root, range.start_ms, range.end_ms], |row| {
                 row.get(0)
@@ -1746,6 +1625,133 @@ impl<'connection> AggregateReader<'connection> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_sql_error)
     }
+}
+
+const SESSION_DETAIL_SQL: &str = "SELECT thread_id, model, MAX(occurred_at_ms),
+            COALESCE(SUM(input_tokens),0),
+            COALESCE(SUM(cached_tokens),0), SUM(cache_write_tokens),
+            COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0),
+            COALESCE(SUM(total_tokens),0),
+            COALESCE(SUM(CASE WHEN cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
+            SUM(estimated_cost_nanos_usd),
+            COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
+            COUNT(*), reasoning_effort
+     FROM source_usage_epochs sue
+     CROSS JOIN usage_events
+     WHERE sue.source=usage_events.source
+       AND sue.active_epoch=usage_events.source_epoch
+       AND root_session_id=?1
+       AND occurred_at_ms>=?2 AND occurred_at_ms<?3
+     GROUP BY thread_id, model, reasoning_effort
+     ORDER BY thread_id ASC, MIN(occurred_at_ms) ASC,
+              MIN(event_id) ASC, model ASC, reasoning_effort ASC";
+
+const FILTER_SOURCES_SQL: &str = "SELECT DISTINCT ue.source
+     FROM source_usage_epochs sue
+     CROSS JOIN usage_events ue
+     WHERE sue.source = ue.source
+       AND sue.active_epoch = ue.source_epoch
+     ORDER BY ue.source ASC";
+
+const FILTER_MODELS_SQL: &str = "SELECT DISTINCT ue.model
+     FROM source_usage_epochs sue
+     CROSS JOIN usage_events ue
+     WHERE sue.source=ue.source
+       AND sue.active_epoch=ue.source_epoch
+     ORDER BY ue.model ASC";
+
+const FILTER_PROJECTS_SQL: &str = "WITH usage_roots AS (
+       SELECT DISTINCT ue.root_session_id
+       FROM source_usage_epochs sue
+       CROSS JOIN usage_events ue
+       WHERE sue.source=ue.source
+         AND sue.active_epoch=ue.source_epoch
+     )
+     SELECT root.project_kind, root.project_name, root.project_path
+     FROM usage_roots
+     LEFT JOIN threads root ON root.thread_id=usage_roots.root_session_id
+     ORDER BY CASE root.project_kind
+                WHEN 'project' THEN 0
+                WHEN 'projectless' THEN 1
+                WHEN 'unknown' THEN 2
+                ELSE 3
+              END,
+              root.project_path ASC,
+              root.project_name ASC";
+
+fn eligible_roots_query(range: TimeRange, filter: &UsageFilter) -> (String, Vec<Value>) {
+    let mut clauses = vec![
+        "root.agent_role='main'".to_owned(),
+        "root.root_session_id=root.thread_id".to_owned(),
+        "root.parent_thread_id IS NULL".to_owned(),
+        "EXISTS (SELECT 1 FROM source_usage_epochs sue_any
+                 CROSS JOIN usage_events ue_any
+                 WHERE sue_any.source=ue_any.source
+                   AND sue_any.active_epoch=ue_any.source_epoch
+                   AND ue_any.root_session_id=root.thread_id
+                   AND ue_any.occurred_at_ms>=?1
+                   AND ue_any.occurred_at_ms<?2)"
+            .to_owned(),
+    ];
+    let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
+    let mut next = 3_usize;
+    if !filter.sources.is_empty() {
+        let placeholders = (next..next + filter.sources.len())
+            .map(|value| format!("?{value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("root.source IN ({placeholders})"));
+        values.extend(
+            filter
+                .sources
+                .iter()
+                .map(|source| Value::Text(source.as_str().to_owned())),
+        );
+        next += filter.sources.len();
+    }
+    if !filter.models.is_empty() {
+        let placeholders = (next..next + filter.models.len())
+            .map(|value| format!("?{value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM source_usage_epochs sue_model
+                     CROSS JOIN usage_events ue_model
+                     WHERE sue_model.source=ue_model.source
+                       AND sue_model.active_epoch=ue_model.source_epoch
+                       AND ue_model.root_session_id=root.thread_id
+                       AND ue_model.occurred_at_ms>=?1
+                       AND ue_model.occurred_at_ms<?2
+                       AND ue_model.model IN ({placeholders}))"
+        ));
+        values.extend(filter.models.iter().cloned().map(Value::Text));
+        next += filter.models.len();
+    }
+    let mut project_clauses = Vec::new();
+    if !filter.project_paths.is_empty() {
+        let placeholders = (next..next + filter.project_paths.len())
+            .map(|value| format!("?{value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        project_clauses.push(format!(
+            "(root.project_kind='project' AND root.project_path IN ({placeholders}))"
+        ));
+        values.extend(filter.project_paths.iter().cloned().map(Value::Text));
+    }
+    if filter.include_projectless {
+        project_clauses.push("root.project_kind='projectless'".to_owned());
+    }
+    if filter.include_unknown_project {
+        project_clauses.push("root.project_kind='unknown'".to_owned());
+    }
+    if !project_clauses.is_empty() {
+        clauses.push(format!("({})", project_clauses.join(" OR ")));
+    }
+    let sql = format!(
+        "SELECT root.thread_id FROM threads root WHERE {} ORDER BY root.thread_id ASC",
+        clauses.join(" AND ")
+    );
+    (sql, values)
 }
 
 fn summary_values(query: &SummaryQuery) -> Vec<Value> {
@@ -1815,6 +1821,23 @@ fn summary_where_clause(filter: &UsageFilter) -> String {
         clauses.push(format!("({})", project_clauses.join(" OR ")));
     }
     clauses.join(" AND ")
+}
+
+fn summary_sql(filter: &UsageFilter) -> String {
+    format!(
+        "SELECT COALESCE(SUM(ue.input_tokens),0), COALESCE(SUM(ue.cached_tokens),0), SUM(ue.cache_write_tokens),
+                COALESCE(SUM(ue.output_tokens),0), COALESCE(SUM(ue.reasoning_tokens),0), COALESCE(SUM(ue.total_tokens),0),
+                COALESCE(SUM(CASE WHEN ue.cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
+                SUM(ue.estimated_cost_nanos_usd),
+                COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
+                COUNT(*)
+         FROM source_usage_epochs sue
+         CROSS JOIN usage_events ue
+         LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+         WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+           AND {}",
+        summary_where_clause(filter)
+    )
 }
 
 fn validate_range(range: TimeRange) -> Result<(), AggregateError> {
@@ -4072,6 +4095,136 @@ mod tests {
                     .any(|detail| detail.contains("source_usage_epochs")),
                 "query plan omitted active source epoch join: {details:?}"
             );
+        }
+    }
+
+    fn phase8_explain_fixture() -> Connection {
+        let connection = fixture();
+        connection
+            .execute_batch(
+                "INSERT INTO source_usage_epochs(
+                     source,active_epoch,build_epoch,active_parser_version,build_parser_version
+                 ) VALUES
+                     ('active-source',11,NULL,1,NULL),
+                     ('inactive-source',21,22,1,1);
+                 INSERT INTO usage_events(
+                     ledger_epoch,event_id,occurred_at_ms,thread_id,root_session_id,model,
+                     input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
+                     total_tokens,source,source_epoch
+                 ) VALUES
+                     (12,'build-only',300,'root-a','root-a','build-model',1,0,0,1,0,2,
+                      'active-source',12),
+                     (22,'inactive-only',301,'root-a','root-a','inactive-model',1,0,0,1,0,2,
+                      'inactive-source',22);
+                 CREATE INDEX usage_events_time_idx
+                     ON usage_events(source,source_epoch,occurred_at_ms);
+                 CREATE INDEX usage_events_root_time_idx
+                     ON usage_events(source,source_epoch,root_session_id,occurred_at_ms);
+                 CREATE INDEX usage_events_model_time_idx
+                     ON usage_events(source,source_epoch,model,occurred_at_ms);",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn explain_details(connection: &Connection, sql: &str, values: &[Value]) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn assert_phase8_source_epoch_driver(connection: &Connection, sql: &str, values: &[Value]) {
+        let details = explain_details(connection, sql, values);
+        let source_position = details
+            .iter()
+            .position(|detail| detail.contains("SCAN sue"))
+            .unwrap_or_else(|| panic!("active epoch table is not scanned: {details:?}"));
+        let event_position = details
+            .iter()
+            .position(|detail| {
+                detail.contains("SEARCH ue") || detail.contains("SEARCH usage_events")
+            })
+            .unwrap_or_else(|| panic!("usage events are not probed: {details:?}"));
+        assert!(
+            source_position < event_position,
+            "usage events became the outer loop: {details:?}"
+        );
+        assert!(
+            details.iter().any(|detail| {
+                (detail.contains("SEARCH ue") || detail.contains("SEARCH usage_events"))
+                    && detail.contains("(source=? AND source_epoch=?")
+                    && detail.contains("USING ")
+                    && detail.contains("INDEX usage_events_")
+            }),
+            "usage events probe does not use a source/epoch index: {details:?}"
+        );
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail.contains("SCAN ue") || detail.contains("SCAN usage_events")),
+            "usage events scan would ignore active epochs: {details:?}"
+        );
+    }
+
+    #[test]
+    fn t_phase8_explain_summary_is_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        let query = SummaryQuery::new(TimeRange::new(0, 400).unwrap(), UsageFilter::default());
+        let values = summary_values(&query);
+        assert_phase8_source_epoch_driver(&connection, &summary_sql(query.filter()), &values);
+    }
+
+    #[test]
+    fn t_phase8_explain_session_snapshot_is_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        let (sql, values) =
+            eligible_roots_query(TimeRange::new(0, 400).unwrap(), &UsageFilter::default());
+        assert_phase8_source_epoch_driver(&connection, &sql, &values);
+    }
+
+    #[test]
+    fn t_phase8_explain_session_detail_is_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        let values = vec![
+            Value::Text("root-a".to_owned()),
+            Value::Integer(0),
+            Value::Integer(400),
+        ];
+        assert_phase8_source_epoch_driver(&connection, SESSION_DETAIL_SQL, &values);
+    }
+
+    #[test]
+    fn t_phase8_explain_model_distribution_is_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        let (sql, values) = crate::usage::analytics::model_distribution_query(
+            TimeRange::new(0, 400).unwrap(),
+            &UsageFilter::default(),
+        );
+        assert_phase8_source_epoch_driver(&connection, &sql, &values);
+    }
+
+    #[test]
+    fn t_phase8_explain_project_distribution_is_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        let (sql, values) = crate::usage::analytics::project_distribution_query(
+            TimeRange::new(0, 400).unwrap(),
+            &UsageFilter::default(),
+        );
+        assert_phase8_source_epoch_driver(&connection, &sql, &values);
+    }
+
+    #[test]
+    fn t_phase8_explain_filter_options_are_active_epoch_driven() {
+        let connection = phase8_explain_fixture();
+        for sql in [FILTER_SOURCES_SQL, FILTER_MODELS_SQL, FILTER_PROJECTS_SQL] {
+            assert_phase8_source_epoch_driver(&connection, sql, &[]);
         }
     }
 

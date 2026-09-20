@@ -1782,7 +1782,7 @@ async fn t_mu03_f01_real_structure_cost_effort_closes_db_aggregate_detail_chain(
         detail["root_session_id"],
         expected_detail["root_session_id"]
     );
-    assert_eq!(detail["main"]["title"], expected_detail["main"]["title"]);
+    assert_eq!(detail["main"]["title"], "Gate root");
     let blocks = detail["main"]["model_usage"].as_array().unwrap();
     let expected_blocks = expected_detail["main"]["model_usage"].as_array().unwrap();
     assert_eq!(blocks.len(), 3);

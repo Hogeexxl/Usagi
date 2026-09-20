@@ -336,13 +336,10 @@ fn phase2_c04_unavailable_source_is_skipped() {
 
 #[test]
 fn phase2_c07_global_failure_code_is_stable_aggregate() {
-    fn run_with_registration_order(
-        registration_order: &[&str],
-    ) -> (
-        Option<String>,
-        Vec<&'static str>,
-        Vec<(String, String, Option<String>, Option<String>)>,
-    ) {
+    type SourceReport = (String, String, Option<String>, Option<String>);
+    type AggregateRun = (Option<String>, Vec<&'static str>, Vec<SourceReport>);
+
+    fn run_with_registration_order(registration_order: &[&str]) -> AggregateRun {
         let (_root, _home, ledger) = ledger_fixture("aggregate");
         let errors = Arc::new(Mutex::new(Vec::new()));
         let mut registry = SourceRegistry::new();

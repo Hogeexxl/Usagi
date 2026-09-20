@@ -63,10 +63,9 @@ fn source_names(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
 
-fn child_rows(
-    db: &Path,
-    scan_id: &str,
-) -> Vec<(String, String, Option<i64>, Option<i64>, Option<String>)> {
+type ChildRow = (String, String, Option<i64>, Option<i64>, Option<String>);
+
+fn child_rows(db: &Path, scan_id: &str) -> Vec<ChildRow> {
     let connection = Connection::open(db).expect("open lifecycle database");
     let mut statement = connection
         .prepare(
@@ -133,12 +132,13 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
+type ProbeRun =
+    dyn Fn(&SourceRunContext, &std::sync::atomic::AtomicBool) -> SourceRunResult + Send + Sync;
+
 struct ProbeAdapter {
     descriptor: SourceDescriptor,
     availability: AdapterAvailability,
-    run: Arc<
-        dyn Fn(&SourceRunContext, &std::sync::atomic::AtomicBool) -> SourceRunResult + Send + Sync,
-    >,
+    run: Arc<ProbeRun>,
 }
 
 impl ProbeAdapter {

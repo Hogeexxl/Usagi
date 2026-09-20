@@ -657,7 +657,7 @@ impl TzifHeader {
             .get(types_start..types_end)
             .ok_or(ApiError::LocalTimeUnavailable)?;
         let mut offsets = Vec::with_capacity(self.typecnt);
-        for chunk in types.chunks_exact(6) {
+        for chunk in types.as_chunks::<6>().0 {
             offsets.push(i32::from_be_bytes(
                 chunk[..4]
                     .try_into()

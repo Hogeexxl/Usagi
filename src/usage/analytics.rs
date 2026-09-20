@@ -173,6 +173,51 @@ fn scoped_where(
     (clauses.join(" AND "), values)
 }
 
+pub(crate) fn model_distribution_query(
+    range: TimeRange,
+    filter: &UsageFilter,
+) -> (String, Vec<Value>) {
+    let (where_clause, values) = scoped_where("ue", "root", range, filter);
+    let sql = format!(
+        "SELECT ue.model,COALESCE(SUM(ue.total_tokens),0),SUM(ue.estimated_cost_nanos_usd),
+                SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),COUNT(*)
+         FROM source_usage_epochs sue
+         CROSS JOIN usage_events ue
+         LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+         WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+           AND {where_clause} GROUP BY ue.model ORDER BY ue.model"
+    );
+    (sql, values)
+}
+
+pub(crate) fn project_distribution_query(
+    range: TimeRange,
+    filter: &UsageFilter,
+) -> (String, Vec<Value>) {
+    let (where_clause, values) = scoped_where("ue", "root", range, filter);
+    let sql = format!(
+        "WITH scoped AS (
+           SELECT CASE
+                    WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN 'project'
+                    WHEN root.project_kind='projectless' THEN 'projectless'
+                    ELSE 'unknown'
+                  END AS kind,
+                  CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_name END AS project_name,
+                  CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_path END AS project_path,
+                  ue.total_tokens,ue.estimated_cost_nanos_usd
+           FROM source_usage_epochs sue
+           CROSS JOIN usage_events ue
+           LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+           WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             AND {where_clause}
+         )
+         SELECT kind,project_name,project_path,COALESCE(SUM(total_tokens),0),SUM(estimated_cost_nanos_usd),
+                SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),COUNT(*)
+         FROM scoped GROUP BY kind,project_name,project_path ORDER BY kind,project_path"
+    );
+    (sql, values)
+}
+
 fn distribution_usage(
     total_tokens: i64,
     cost: Option<i64>,
@@ -213,15 +258,7 @@ pub fn model_distribution_snapshot(
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(StorageError::sqlite)?;
     let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
-    let (where_clause, values) = scoped_where("ue", "root", range, filter);
-    let sql = format!(
-        "SELECT ue.model,COALESCE(SUM(ue.total_tokens),0),SUM(ue.estimated_cost_nanos_usd),
-                SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),COUNT(*)
-         FROM usage_events ue
-         JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-         LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-         WHERE {where_clause} GROUP BY ue.model ORDER BY ue.model"
-    );
+    let (sql, values) = model_distribution_query(range, filter);
     let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
@@ -263,26 +300,7 @@ pub fn project_distribution_snapshot(
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(StorageError::sqlite)?;
     let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
-    let (where_clause, values) = scoped_where("ue", "root", range, filter);
-    let sql = format!(
-        "WITH scoped AS (
-           SELECT CASE
-                    WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN 'project'
-                    WHEN root.project_kind='projectless' THEN 'projectless'
-                    ELSE 'unknown'
-                  END AS kind,
-                  CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_name END AS project_name,
-                  CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_path END AS project_path,
-                  ue.total_tokens,ue.estimated_cost_nanos_usd
-           FROM usage_events ue
-           JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-           LEFT JOIN threads root ON root.thread_id=ue.root_session_id
-           WHERE {where_clause}
-         )
-         SELECT kind,project_name,project_path,COALESCE(SUM(total_tokens),0),SUM(estimated_cost_nanos_usd),
-                SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),COUNT(*)
-         FROM scoped GROUP BY kind,project_name,project_path ORDER BY kind,project_path"
-    );
+    let (sql, values) = project_distribution_query(range, filter);
     let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
@@ -343,11 +361,11 @@ pub fn skills_usage_snapshot(
         let (where_clause, values) = scoped_where("se", "root", range, filter);
         let mut skills = if ready {
             let sql = format!(
-                "SELECT se.skill_name,COUNT(*) FROM skill_usage_events se
-                 JOIN source_usage_epochs sue
-                   ON sue.source='codex' AND sue.active_epoch=se.ledger_epoch
+                "SELECT se.skill_name,COUNT(*) FROM source_usage_epochs sue
+                 CROSS JOIN skill_usage_events se
                  LEFT JOIN threads root ON root.thread_id=se.root_session_id
-                 WHERE {where_clause} GROUP BY se.skill_name
+                 WHERE sue.source='codex' AND sue.active_epoch=se.ledger_epoch
+                   AND {where_clause} GROUP BY se.skill_name
                  ORDER BY COUNT(*) DESC,se.skill_name ASC"
             );
             let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
