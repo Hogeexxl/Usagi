@@ -120,248 +120,22 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        let outcome = source_tx.with_codex_private_state(|transaction| {
+            apply_codex_source_observations_private(
+                transaction,
+                self.expected_codex_home_fingerprint(),
+                &batch,
+                usage_carry_proofs,
+            )
         })?;
-        verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
-
-        let existing = load_existing_sources(&transaction)?;
-        let plans = plan_observations(&existing, &batch)?;
-
-        // Free paths that are going to be moved before assigning their final
-        // paths.  This also handles a two-file path swap in one observation
-        // batch without violating UNIQUE(current_path).
-        let mut temporary_paths = Vec::new();
-        for (index, plan) in plans.iter().enumerate() {
-            if plan.created {
-                continue;
-            }
-            let old = existing
-                .iter()
-                .find(|source| source.source_file_id == plan.source_file_id)
-                .ok_or_else(|| invalid_state("observation plan references an unknown source"))?;
-            let observation = &batch.observations[index];
-            if old.current_path != observation.current_path {
-                let temporary = temporary_path(plan.source_file_id, old.file_generation);
-                transaction.execute(
-                    "UPDATE source_files SET current_path = ?2 WHERE source_file_id = ?1",
-                    params![plan.source_file_id, temporary],
-                )?;
-                temporary_paths.push((plan.source_file_id, temporary));
-            }
-        }
-
-        let mut results = Vec::with_capacity(plans.len());
-        for (index, plan) in plans.iter().enumerate() {
-            let observation = &batch.observations[index];
-            let (thread_id, old_path, old_area) = if plan.created {
-                (None, None, None)
-            } else {
-                let old = existing
-                    .iter()
-                    .find(|source| source.source_file_id == plan.source_file_id)
-                    .ok_or_else(|| {
-                        invalid_state("observation plan references an unknown source")
-                    })?;
-                (
-                    old.thread_id.clone(),
-                    Some(old.current_path.clone()),
-                    Some(old.source_area),
-                )
-            };
-
-            if plan.created {
-                transaction.execute(
-                    "INSERT INTO source_files (
-                        thread_id, current_path, source_area, device_id, inode,
-                        file_generation, observed_size, observed_mtime_ns,
-                        file_status, last_seen_at_ms
-                    ) VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8)",
-                    params![
-                        observation.current_path,
-                        observation.source_area.as_str(),
-                        observation.device_id,
-                        observation.inode,
-                        plan.file_generation,
-                        observation.observed_size,
-                        observation.observed_mtime_ns,
-                        observation.last_seen_at_ms,
-                    ],
-                )?;
-                let source_file_id = transaction.last_insert_rowid();
-                transaction.execute(
-                    "INSERT INTO source_checkpoints (
-                        source_file_id, consumer_kind, parser_version,
-                        committed_offset, guard_hash, processing_status,
-                        last_successful_scan_at_ms, last_error_code
-                    ) VALUES (?1, 'metadata', 0, 0, NULL, 'pending', NULL, NULL)",
-                    [source_file_id],
-                )?;
-                results.push(SourceObservationResult {
-                    source_file_id,
-                    file_generation: plan.file_generation,
-                    created: true,
-                    moved: false,
-                    replaced: false,
-                    rebuild_consumers: Vec::new(),
-                    build_disposition: crate::domain::BuildDisposition::Unchanged,
-                });
-                continue;
-            }
-
-            let moved = old_path.as_deref() != Some(observation.current_path.as_str())
-                || old_area != Some(observation.source_area);
-            let replaced = plan.replaced;
-
-            transaction.execute(
-                "UPDATE source_files SET
-                    thread_id = ?2,
-                    current_path = ?3,
-                    source_area = ?4,
-                    device_id = ?5,
-                    inode = ?6,
-                    file_generation = ?7,
-                    observed_size = ?8,
-                    observed_mtime_ns = ?9,
-                    file_status = 'present',
-                    last_seen_at_ms = ?10
-                 WHERE source_file_id = ?1",
-                params![
-                    plan.source_file_id,
-                    if replaced {
-                        None::<String>
-                    } else {
-                        thread_id.clone()
-                    },
-                    observation.current_path,
-                    observation.source_area.as_str(),
-                    observation.device_id,
-                    observation.inode,
-                    plan.file_generation,
-                    observation.observed_size,
-                    observation.observed_mtime_ns,
-                    observation.last_seen_at_ms,
-                ],
-            )?;
-
-            let mut rebuild_consumers = Vec::new();
-            if replaced {
-                transaction.execute(
-                    "DELETE FROM rollout_metadata_facts WHERE source_file_id = ?1",
-                    [plan.source_file_id],
-                )?;
-                let mut checkpoint_rows = transaction.prepare(
-                    "SELECT consumer_kind FROM source_checkpoints
-                     WHERE source_file_id = ?1 ORDER BY consumer_kind",
-                )?;
-                let consumers = checkpoint_rows
-                    .query_map([plan.source_file_id], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                drop(checkpoint_rows);
-                for consumer in consumers {
-                    let consumer =
-                        ConsumerKind::try_from(consumer.as_str()).map_err(domain_sql_error)?;
-                    rebuild_consumers.push(consumer);
-                }
-                transaction.execute(
-                    "UPDATE source_checkpoints SET
-                        committed_offset = 0,
-                        guard_hash = NULL,
-                        processing_status = 'rebuild_required',
-                        last_successful_scan_at_ms = NULL,
-                        last_error_code = NULL
-                     WHERE source_file_id = ?1",
-                    [plan.source_file_id],
-                )?;
-            }
-
-            // Every rollout must have a metadata checkpoint.  A source that
-            // predates this module (or was manually repaired) gets the same
-            // offset-zero pending checkpoint as a newly discovered source.
-            transaction.execute(
-                "INSERT OR IGNORE INTO source_checkpoints (
-                    source_file_id, consumer_kind, parser_version,
-                    committed_offset, guard_hash, processing_status,
-                    last_successful_scan_at_ms, last_error_code
-                ) VALUES (?1, 'metadata', 0, 0, NULL, 'pending', NULL, NULL)",
-                [plan.source_file_id],
-            )?;
-
-            results.push(SourceObservationResult {
-                source_file_id: plan.source_file_id,
-                file_generation: plan.file_generation,
-                created: false,
-                moved,
-                replaced,
-                rebuild_consumers,
-                build_disposition: crate::domain::BuildDisposition::Unchanged,
-            });
-        }
-
-        // Mark only sources in completely observed regions that were absent
-        // from this batch.  An unavailable region provides no evidence about
-        // files that were not returned by the scanner.
-        let observed_source_ids = results
-            .iter()
-            .map(|result| result.source_file_id)
-            .collect::<HashSet<_>>();
-        for (area, status) in [
-            (SourceArea::Sessions, &batch.sessions),
-            (SourceArea::ArchivedSessions, &batch.archived_sessions),
-        ] {
-            if !status.is_complete() {
-                continue;
-            }
-            for source in existing
-                .iter()
-                .filter(|source| source.source_area == area)
-                .filter(|source| source.file_status == FileStatus::Present)
-                .filter(|source| !observed_source_ids.contains(&source.source_file_id))
-            {
-                transaction.execute(
-                    "UPDATE source_files SET file_status = 'missing'
-                     WHERE source_file_id = ?1 AND file_status = 'present'",
-                    [source.source_file_id],
-                )?;
-            }
-        }
-
-        let observed_ids = results
-            .iter()
-            .map(|result| result.source_file_id)
-            .collect::<Vec<_>>();
-        let usage_carry_proofs = usage_carry_proofs
-            .iter()
-            .map(|proof| ((proof.device_id, proof.inode), proof))
-            .collect::<HashMap<_, _>>();
-        crate::usage::rebuild::apply_source_observations_to_build_tx(
-            &transaction,
-            &observed_ids,
-            &mut results,
-            &usage_carry_proofs,
-            batch
-                .observations
-                .iter()
-                .map(|observation| observation.last_seen_at_ms)
-                .max()
-                .unwrap_or(0),
-        )
-        .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-
-        // `temporary_paths` exists only to make the operation's intent clear
-        // in diagnostics and to keep the compiler from treating the first
-        // phase as an accidental no-op.  All paths have been restored by the
-        // second phase; no temporary value is ever committed.
-        let _ = temporary_paths;
         source_tx
             .commit()
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-
-        SourceOutcome::new(results).map_err(|error| StorageError::invalid_state(error.to_string()))
+        Ok(outcome)
     }
 
     /// Read source rows, metadata checkpoints and safe facts from one SQLite
@@ -421,54 +195,286 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
+        let outcome = source_tx.with_codex_private_state(|transaction| {
+            apply_codex_checkpoint_rebuild_private(
+                transaction,
+                self.expected_codex_home_fingerprint(),
+                &command,
+            )
         })?;
-        verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
+        source_tx
+            .commit()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+        Ok(outcome)
+    }
+}
 
-        for source_file_id in &command.source_file_ids {
-            let exists: Option<i64> = transaction
-                .query_row(
-                    "SELECT source_file_id FROM source_files WHERE source_file_id = ?1",
-                    [source_file_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if exists.is_none() {
-                return Err(invalid_state(format!(
-                    "source file {source_file_id} does not exist"
-                )));
+fn apply_codex_source_observations_private(
+    transaction: &Connection,
+    expected_fingerprint: &str,
+    batch: &SourceObservationBatch,
+    usage_carry_proofs: &[UsageCarryObservationProof],
+) -> Result<SourceOutcome> {
+    verify_source_binding(transaction, expected_fingerprint)?;
+
+    let existing = load_existing_sources(transaction)?;
+    let plans = plan_observations(&existing, batch)?;
+
+    let mut temporary_paths = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.created {
+            continue;
+        }
+        let old = existing
+            .iter()
+            .find(|source| source.source_file_id == plan.source_file_id)
+            .ok_or_else(|| invalid_state("observation plan references an unknown source"))?;
+        let observation = &batch.observations[index];
+        if old.current_path != observation.current_path {
+            let temporary = temporary_path(plan.source_file_id, old.file_generation);
+            transaction.execute(
+                "UPDATE source_files SET current_path = ?2 WHERE source_file_id = ?1",
+                params![plan.source_file_id, temporary],
+            )?;
+            temporary_paths.push((plan.source_file_id, temporary));
+        }
+    }
+
+    let mut results = Vec::with_capacity(plans.len());
+    for (index, plan) in plans.iter().enumerate() {
+        let observation = &batch.observations[index];
+        let (thread_id, old_path, old_area) = if plan.created {
+            (None, None, None)
+        } else {
+            let old = existing
+                .iter()
+                .find(|source| source.source_file_id == plan.source_file_id)
+                .ok_or_else(|| invalid_state("observation plan references an unknown source"))?;
+            (
+                old.thread_id.clone(),
+                Some(old.current_path.clone()),
+                Some(old.source_area),
+            )
+        };
+
+        if plan.created {
+            transaction.execute(
+                "INSERT INTO source_files (
+                    thread_id, current_path, source_area, device_id, inode,
+                    file_generation, observed_size, observed_mtime_ns,
+                    file_status, last_seen_at_ms
+                ) VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8)",
+                params![
+                    observation.current_path,
+                    observation.source_area.as_str(),
+                    observation.device_id,
+                    observation.inode,
+                    plan.file_generation,
+                    observation.observed_size,
+                    observation.observed_mtime_ns,
+                    observation.last_seen_at_ms,
+                ],
+            )?;
+            let source_file_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO source_checkpoints (
+                    source_file_id, consumer_kind, parser_version,
+                    committed_offset, guard_hash, processing_status,
+                    last_successful_scan_at_ms, last_error_code
+                ) VALUES (?1, 'metadata', 0, 0, NULL, 'pending', NULL, NULL)",
+                [source_file_id],
+            )?;
+            results.push(SourceObservationResult {
+                source_file_id,
+                file_generation: plan.file_generation,
+                created: true,
+                moved: false,
+                replaced: false,
+                rebuild_consumers: Vec::new(),
+                build_disposition: crate::domain::BuildDisposition::Unchanged,
+            });
+            continue;
+        }
+
+        let moved = old_path.as_deref() != Some(observation.current_path.as_str())
+            || old_area != Some(observation.source_area);
+        let replaced = plan.replaced;
+
+        transaction.execute(
+            "UPDATE source_files SET
+                thread_id = ?2,
+                current_path = ?3,
+                source_area = ?4,
+                device_id = ?5,
+                inode = ?6,
+                file_generation = ?7,
+                observed_size = ?8,
+                observed_mtime_ns = ?9,
+                file_status = 'present',
+                last_seen_at_ms = ?10
+             WHERE source_file_id = ?1",
+            params![
+                plan.source_file_id,
+                if replaced { None::<String> } else { thread_id.clone() },
+                observation.current_path,
+                observation.source_area.as_str(),
+                observation.device_id,
+                observation.inode,
+                plan.file_generation,
+                observation.observed_size,
+                observation.observed_mtime_ns,
+                observation.last_seen_at_ms,
+            ],
+        )?;
+
+        let mut rebuild_consumers = Vec::new();
+        if replaced {
+            transaction.execute(
+                "DELETE FROM rollout_metadata_facts WHERE source_file_id = ?1",
+                [plan.source_file_id],
+            )?;
+            let mut checkpoint_rows = transaction.prepare(
+                "SELECT consumer_kind FROM source_checkpoints
+                 WHERE source_file_id = ?1 ORDER BY consumer_kind",
+            )?;
+            let consumers = checkpoint_rows
+                .query_map([plan.source_file_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(checkpoint_rows);
+            for consumer in consumers {
+                rebuild_consumers.push(
+                    ConsumerKind::try_from(consumer.as_str()).map_err(domain_sql_error)?,
+                );
             }
-            let updated = transaction.execute(
+            transaction.execute(
                 "UPDATE source_checkpoints SET
                     committed_offset = 0,
                     guard_hash = NULL,
                     processing_status = 'rebuild_required',
                     last_successful_scan_at_ms = NULL,
                     last_error_code = NULL
-                 WHERE source_file_id = ?1 AND consumer_kind = ?2",
-                params![source_file_id, command.consumer_kind.as_str()],
+                 WHERE source_file_id = ?1",
+                [plan.source_file_id],
             )?;
-            if updated != 1 {
-                return Err(invalid_state(format!(
-                    "{} checkpoint for source file {source_file_id} does not exist",
-                    command.consumer_kind.as_str()
-                )));
-            }
         }
-        source_tx
-            .commit()
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
 
-        Ok(CheckpointOutcome {
-            consumer_kind: command.consumer_kind,
-            source_file_ids: command.source_file_ids,
-        })
+        transaction.execute(
+            "INSERT OR IGNORE INTO source_checkpoints (
+                source_file_id, consumer_kind, parser_version,
+                committed_offset, guard_hash, processing_status,
+                last_successful_scan_at_ms, last_error_code
+            ) VALUES (?1, 'metadata', 0, 0, NULL, 'pending', NULL, NULL)",
+            [plan.source_file_id],
+        )?;
+
+        results.push(SourceObservationResult {
+            source_file_id: plan.source_file_id,
+            file_generation: plan.file_generation,
+            created: false,
+            moved,
+            replaced,
+            rebuild_consumers,
+            build_disposition: crate::domain::BuildDisposition::Unchanged,
+        });
     }
+
+    let observed_source_ids = results
+        .iter()
+        .map(|result| result.source_file_id)
+        .collect::<HashSet<_>>();
+    for (area, status) in [
+        (SourceArea::Sessions, &batch.sessions),
+        (SourceArea::ArchivedSessions, &batch.archived_sessions),
+    ] {
+        if !status.is_complete() {
+            continue;
+        }
+        for source in existing
+            .iter()
+            .filter(|source| source.source_area == area)
+            .filter(|source| source.file_status == FileStatus::Present)
+            .filter(|source| !observed_source_ids.contains(&source.source_file_id))
+        {
+            transaction.execute(
+                "UPDATE source_files SET file_status = 'missing'
+                 WHERE source_file_id = ?1 AND file_status = 'present'",
+                [source.source_file_id],
+            )?;
+        }
+    }
+
+    let observed_ids = results
+        .iter()
+        .map(|result| result.source_file_id)
+        .collect::<Vec<_>>();
+    let usage_carry_proofs = usage_carry_proofs
+        .iter()
+        .map(|proof| ((proof.device_id, proof.inode), proof))
+        .collect::<HashMap<_, _>>();
+    crate::usage::rebuild::apply_source_observations_to_build_tx(
+        transaction,
+        &observed_ids,
+        &mut results,
+        &usage_carry_proofs,
+        batch
+            .observations
+            .iter()
+            .map(|observation| observation.last_seen_at_ms)
+            .max()
+            .unwrap_or(0),
+    )
+    .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+
+    let _ = temporary_paths;
+    SourceOutcome::new(results).map_err(|error| StorageError::invalid_state(error.to_string()))
+}
+
+fn apply_codex_checkpoint_rebuild_private(
+    transaction: &Connection,
+    expected_fingerprint: &str,
+    command: &CheckpointRebuildCommand,
+) -> Result<CheckpointOutcome> {
+    verify_source_binding(transaction, expected_fingerprint)?;
+
+    for source_file_id in &command.source_file_ids {
+        let exists: Option<i64> = transaction
+            .query_row(
+                "SELECT source_file_id FROM source_files WHERE source_file_id = ?1",
+                [source_file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(invalid_state(format!(
+                "source file {source_file_id} does not exist"
+            )));
+        }
+        let updated = transaction.execute(
+            "UPDATE source_checkpoints SET
+                committed_offset = 0,
+                guard_hash = NULL,
+                processing_status = 'rebuild_required',
+                last_successful_scan_at_ms = NULL,
+                last_error_code = NULL
+             WHERE source_file_id = ?1 AND consumer_kind = ?2",
+            params![source_file_id, command.consumer_kind.as_str()],
+        )?;
+        if updated != 1 {
+            return Err(invalid_state(format!(
+                "{} checkpoint for source file {source_file_id} does not exist",
+                command.consumer_kind.as_str()
+            )));
+        }
+    }
+
+    Ok(CheckpointOutcome {
+        consumer_kind: command.consumer_kind,
+        source_file_ids: command.source_file_ids.clone(),
+    })
 }
 
 fn plan_observations(
