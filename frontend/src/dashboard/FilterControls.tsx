@@ -172,7 +172,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
       ) : null}
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="模型" count={filters.models.length} icon={<Cpu className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" maxHeight={752} className="w-72">
+        <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-72">
           <div className="p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={groups.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
@@ -194,7 +194,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="项目" count={filters.projects.length} icon={<Folder className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" maxHeight={752} className="w-80">
+        <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
           <div className="p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={projects.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && projects.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无项目</div> : null}

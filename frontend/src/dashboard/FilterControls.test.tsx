@@ -210,12 +210,12 @@ describe("FilterControls", () => {
   it.each([
     { trigger: "模型筛选，全部", options: modelOptions },
     { trigger: "项目筛选，全部", options: projectOptions },
-  ])("caps $trigger content at 752px and enables vertical scrolling", async ({ trigger, options }) => {
+  ])("caps $trigger content at 624px and enables vertical scrolling", async ({ trigger, options }) => {
     renderControls({ options });
     const dialog = await openPopover(trigger);
     const scrollArea = dialog.querySelector<HTMLElement>("[data-multi-select-scroll-area]");
     if (!scrollArea) throw new Error("Scroll area not found");
-    expect(scrollArea).toHaveStyle({ maxHeight: "752px", overflowY: "auto" });
+    expect(scrollArea).toHaveStyle({ maxHeight: "624px", overflowY: "auto" });
   });
 
   it("shows the selected project count and primary trigger semantics", () => {
