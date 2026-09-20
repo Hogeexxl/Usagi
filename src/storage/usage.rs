@@ -570,18 +570,27 @@ impl Ledger {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let epoch = read_epoch(&transaction)?;
         if epoch != expected_epoch {
+            #[cfg(test)]
+            eprintln!(
+                "usage exact-plan epoch mismatch: expected={expected_epoch:?} actual={epoch:?}"
+            );
             return Err(StorageError::invalid_state(
                 "usage epoch changed while loading exact plans",
             ));
         }
         let mut plans = Vec::with_capacity(source_file_ids.len());
         for &source_file_id in source_file_ids {
-            plans.push(load_source_plan(
+            let plan = load_source_plan(
                 &transaction,
                 source_file_id,
                 parser_version,
                 epoch.clone(),
-            )?);
+            );
+            #[cfg(test)]
+            if let Err(error) = &plan {
+                eprintln!("usage exact-plan source {source_file_id} failed: {error:?}");
+            }
+            plans.push(plan?);
         }
         plans.sort_by_key(|plan| plan.source_file_id);
         transaction.commit()?;
