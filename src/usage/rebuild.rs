@@ -386,9 +386,7 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
                 now_ms,
             )?;
         }
-        (Some(epoch), Some(parser))
-            if epoch == build_epoch && parser == target_parser_version =>
-        {
+        (Some(epoch), Some(parser)) if epoch == build_epoch && parser == target_parser_version => {
             add_new_present_members(
                 transaction,
                 active_epoch,
@@ -573,7 +571,6 @@ pub(crate) fn apply_codex_rebuild_record_progress(
     })
 }
 
-
 pub(crate) fn apply_codex_rebuild_quarantine_session(
     transaction: &Connection,
     root_session_id: &str,
@@ -712,7 +709,6 @@ pub(crate) fn apply_codex_replace_build_sources(
     )
 }
 
-
 pub(crate) fn apply_codex_rebuild_block_source(
     transaction: &Connection,
     source_file_id: i64,
@@ -823,7 +819,6 @@ pub(crate) fn apply_codex_rebuild_activate(
         data_revision,
     })
 }
-
 
 #[derive(Debug)]
 pub enum RebuildError {
@@ -2119,11 +2114,7 @@ fn normalized_ids(ids: &[i64]) -> Result<BTreeSet<i64>, RebuildError> {
     Ok(set)
 }
 
-fn query_ids(
-    transaction: &Connection,
-    sql: &str,
-    value: i64,
-) -> Result<Vec<i64>, RebuildError> {
+fn query_ids(transaction: &Connection, sql: &str, value: i64) -> Result<Vec<i64>, RebuildError> {
     let mut statement = transaction.prepare(sql)?;
     let rows = statement.query_map([value], |row| row.get(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
