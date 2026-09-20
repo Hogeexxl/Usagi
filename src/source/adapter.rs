@@ -622,7 +622,7 @@ impl<'a> SourceWriteTxn<'a> {
         let result = self.apply_codex_storage(|connection| {
             crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
         })?;
-        if result.publish_revisions.is_some() {
+        if result.visible_changed {
             self.data_changed = true;
         }
         Ok(result)
