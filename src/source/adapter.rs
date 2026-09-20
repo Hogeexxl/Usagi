@@ -531,13 +531,6 @@ enum SourceWriteConnection<'a> {
 }
 
 impl SourceWriteConnection<'_> {
-    fn connection(&self) -> &Connection {
-        match self {
-            Self::Locked(connection) => connection,
-            Self::Legacy(transaction) => transaction,
-        }
-    }
-
     fn connection_mut(&mut self) -> &Connection {
         match self {
             Self::Locked(connection) => connection,
@@ -2047,8 +2040,9 @@ mod tests {
         drop(first);
         let changed = Arc::new(Ledger::open(LedgerOptions::new(&db, &home_b)).unwrap());
         let storage = SourceStorage::with_ledger("scan-1", SourceId::CODEX, changed);
+        let legacy = storage.legacy_codex_ingestion().unwrap();
         assert!(matches!(
-            storage.ensure_codex_home(&home_b),
+            legacy.ensure_codex_home(&home_b),
             Err(SourceStorageError::Storage(StorageErrorKind::SourceChanged))
         ));
         assert!(storage.load_usage_epoch().unwrap().is_some());
