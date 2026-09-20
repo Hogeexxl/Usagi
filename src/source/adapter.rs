@@ -609,26 +609,6 @@ impl<'a> SourceWriteTxn<'a> {
         }
     }
 
-    /// Commit a transitional Codex batch. Revision publication remains owned
-    /// by the existing caller until that caller is moved fully onto the
-    /// source-bound facade, but the SQLite COMMIT itself is owned here.
-    pub(crate) fn commit_legacy(mut self) -> rusqlite::Result<()> {
-        if self.committed || self.connection.is_none() {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let connection = self
-            .connection
-            .take()
-            .ok_or(rusqlite::Error::InvalidQuery)?;
-        match connection {
-            SourceWriteConnection::Legacy(transaction) => transaction.commit()?,
-            SourceWriteConnection::Locked(connection) => {
-                connection.execute_batch("COMMIT")?;
-            }
-        }
-        self.committed = true;
-        Ok(())
-    }
 
     pub fn scan_id(&self) -> &str {
         &self.scan_id
