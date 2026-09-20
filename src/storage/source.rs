@@ -120,7 +120,13 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            "legacy-codex-source-state",
+            &mut connection,
+        )?;
+        let transaction = source_tx
+            .legacy_transaction()
+            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
         verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
 
         let existing = load_existing_sources(&transaction)?;
@@ -351,7 +357,7 @@ impl Ledger {
         // phase as an accidental no-op.  All paths have been restored by the
         // second phase; no temporary value is ever committed.
         let _ = temporary_paths;
-        transaction.commit()?;
+        source_tx.commit_legacy()?;
 
         SourceOutcome::new(results).map_err(|error| StorageError::invalid_state(error.to_string()))
     }
@@ -393,7 +399,7 @@ impl Ledger {
                 safe_fact,
             });
         }
-        transaction.commit()?;
+        source_tx.commit_legacy()?;
         MetadataScanState::new(entries)
             .map_err(|error| StorageError::invalid_state(error.to_string()))
     }
@@ -413,7 +419,13 @@ impl Ledger {
         self.ensure_source_ready()?;
 
         let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            "legacy-codex-source-state",
+            &mut connection,
+        )?;
+        let transaction = source_tx
+            .legacy_transaction()
+            .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
         verify_source_binding(&transaction, self.expected_codex_home_fingerprint())?;
 
         for source_file_id in &command.source_file_ids {
@@ -446,7 +458,7 @@ impl Ledger {
                 )));
             }
         }
-        transaction.commit()?;
+        source_tx.commit_legacy()?;
 
         Ok(CheckpointOutcome {
             consumer_kind: command.consumer_kind,
