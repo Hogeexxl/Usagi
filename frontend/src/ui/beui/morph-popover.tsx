@@ -1,10 +1,11 @@
 "use client";
 
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motion, type Transition, useReducedMotion } from "motion/react";
 import {
   cloneElement,
   createContext,
   isValidElement,
+  type CSSProperties,
   type ReactElement,
   type ReactNode,
   type Ref,
@@ -12,17 +13,17 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import { usePopoverPortalPosition } from "./popover-position";
-import { EASE_OUT, SPRING_PANEL } from "../lib/ease";
 import { cn } from "../lib/cn";
 
 type Side = "top" | "bottom";
-type Align = "start" | "end";
+type Align = "start" | "center" | "end";
 
 type MorphContextValue = {
   open: boolean;
@@ -193,162 +194,156 @@ export function MorphPopoverTrigger({ children }: MorphPopoverTriggerProps) {
   });
 }
 
-const originFor = (side: Side, align: Align) =>
-  `${side === "bottom" ? "top" : "bottom"} ${align === "end" ? "right" : "left"}`;
-
-// A clip that hides everything but the corner nearest the trigger, so the
-// panel appears to grow out of it. inset(top right bottom left).
-function clipHidden(side: Side, align: Align, radius: number) {
-  const top = side === "bottom" ? "0%" : "92%";
-  const bottom = side === "bottom" ? "92%" : "0%";
-  const right = align === "end" ? "0%" : "92%";
-  const left = align === "end" ? "92%" : "0%";
-  return `inset(${top} ${right} ${bottom} ${left} round ${radius}px)`;
-}
-const clipShown = (radius: number) => `inset(0% 0% 0% 0% round ${radius}px)`;
-
-// Preserve the original spring character on the wrapper, but tween the complex
-// clip-path so it cannot snap when the spring resolves its final distance.
-const MORPH_CLIP_TRANSITION = { duration: 0.32, ease: EASE_OUT } as const;
+// Panel/motion architecture copied from beUI Motion Multi Select content.tsx.
+// Keep this motion contract in sync with https://beui.dev/components/motion/multi-select.
+const MULTI_SELECT_MORPH: Transition = {
+  type: "spring",
+  duration: 0.5,
+  bounce: 0.22,
+};
+const VIEWPORT_PADDING = 8;
 
 export interface MorphPopoverContentProps {
   children: ReactNode;
   side?: Side;
   align?: Align;
-  /** Gap between trigger and panel, in px. Default 8. */
   sideOffset?: number;
-  /** Panel corner radius, in px. Default 16. */
+  avoidCollisions?: boolean;
+  /** Panel corner radius in px. */
   radius?: number;
-  /** Disable entrance/exit motion while preserving the same panel structure and positioning. */
-  animated?: boolean;
   className?: string;
 }
 
 export function MorphPopoverContent({
   children,
   side = "bottom",
-  align = "end",
-  sideOffset = 8,
+  align = "start",
+  sideOffset = 6,
+  avoidCollisions = true,
   radius = 16,
-  animated = true,
   className,
 }: MorphPopoverContentProps) {
   const ctx = useMorphContext("MorphPopoverContent");
   const reduce = useReducedMotion() ?? false;
+  const measureRef = useRef<HTMLDivElement>(null);
   const [portalReady, setPortalReady] = useState(false);
+  const [actualSide, setActualSide] = useState<Side>(side);
+  const [morphReady, setMorphReady] = useState(false);
   const layout = usePopoverPortalPosition(
     ctx.triggerRef,
-    ctx.contentRef,
-    portalReady && ctx.open,
+    measureRef,
+    portalReady,
   );
 
   useEffect(() => setPortalReady(true), []);
-  const left = layout
-    ? align === "end"
-      ? layout.trigger.left + layout.trigger.width - layout.content.width
-      : layout.trigger.left
-    : 0;
-  const top = layout
-    ? side === "bottom"
-      ? layout.trigger.top + layout.trigger.height + sideOffset
-      : layout.trigger.top - layout.content.height - sideOffset
-    : 0;
+  useLayoutEffect(() => {
+    if (!portalReady) return;
+    const readyFrame = requestAnimationFrame(() => setMorphReady(true));
+    return () => cancelAnimationFrame(readyFrame);
+  }, [portalReady]);
 
-  const shouldAnimate = animated && !reduce;
+  useLayoutEffect(() => {
+    if (!ctx.open || !layout) return;
+    if (!avoidCollisions) {
+      setActualSide(side);
+      return;
+    }
+    const below =
+      window.innerHeight - (layout.trigger.top + layout.trigger.height);
+    const above = layout.trigger.top;
+    if (
+      side === "bottom" &&
+      below < layout.content.height + sideOffset &&
+      above > below
+    ) {
+      setActualSide("top");
+    } else if (
+      side === "top" &&
+      above < layout.content.height + sideOffset &&
+      below > above
+    ) {
+      setActualSide("bottom");
+    } else {
+      setActualSide(side);
+    }
+  }, [avoidCollisions, ctx.open, layout, side, sideOffset]);
 
-  // Both directions travel between the exact same hidden/show states. Exit
-  // targets "hidden" directly instead of introducing separate choreography.
-  const wrap = {
-    hidden: { opacity: 0, scale: 0.96, transition: SPRING_PANEL },
-    show: { opacity: 1, scale: 1, transition: SPRING_PANEL },
-  };
-  const clip = {
-    hidden: {
-      clipPath: clipHidden(side, align, radius),
-      transition: MORPH_CLIP_TRANSITION,
-    },
-    show: {
-      clipPath: clipShown(radius),
-      transition: MORPH_CLIP_TRANSITION,
-    },
-  };
-
-  // Keep the server and first client render identical, then mount the portal.
   if (!portalReady) return null;
 
-  // Filter-style menus can opt out of motion entirely. This is deliberately a
-  // plain DOM path rather than a zero-duration Motion animation: no opacity,
-  // scale, clip-path, or animation frame can become visible after measurement.
-  if (!shouldAnimate) {
-    return createPortal(
-      ctx.open ? (
-        <div
-          data-morph-popover-portal=""
-          data-morph-popover-animated="false"
-          style={{
-            left,
-            top,
-            visibility: layout ? "visible" : "hidden",
-            transformOrigin: originFor(side, align),
-          }}
-          className="fixed z-[9999] [filter:drop-shadow(0_10px_18px_rgba(0,0,0,0.14))]"
-        >
-          <div
-            ref={ctx.contentRef}
-            id={ctx.contentId}
-            role="dialog"
-            aria-labelledby={ctx.triggerId}
-            style={{ borderRadius: radius }}
-            className={cn(
-              "overflow-hidden border border-border bg-background",
-              className,
-            )}
-          >
-            {children}
-          </div>
-        </div>
-      ) : null,
-      document.body,
-    );
-  }
+  const triggerLeft = layout?.trigger.left ?? 0;
+  const triggerWidth = layout?.trigger.width ?? 0;
+  const contentWidth = layout?.content.width ?? triggerWidth;
+  const desiredLeft =
+    align === "end"
+      ? triggerLeft + triggerWidth - contentWidth
+      : align === "center"
+        ? triggerLeft + (triggerWidth - contentWidth) / 2
+        : triggerLeft;
+  const maxLeft = Math.max(
+    VIEWPORT_PADDING,
+    window.innerWidth - contentWidth - VIEWPORT_PADDING,
+  );
+  const left = Math.min(Math.max(desiredLeft, VIEWPORT_PADDING), maxLeft);
+  const surfaceHeight = layout?.content.height ?? 0;
 
   return createPortal(
-    <AnimatePresence>
-      {ctx.open ? (
-        <motion.div
-          data-morph-popover-portal=""
-          data-morph-popover-animated="true"
-          // Wrapper carries the shadow as a drop-shadow filter, which hugs the
-          // clipped shape below (box-shadow would just get clipped away).
-          variants={wrap}
-          initial="hidden"
-          animate="show"
-          exit="hidden"
-          style={{
-            left,
-            top,
-            visibility: layout ? "visible" : "hidden",
-            transformOrigin: originFor(side, align),
-          }}
-          className="fixed z-[9999] [filter:drop-shadow(0_10px_18px_rgba(0,0,0,0.14))]"
-        >
-          <motion.div
-            ref={ctx.contentRef}
-            id={ctx.contentId}
-            role="dialog"
-            aria-labelledby={ctx.triggerId}
-            variants={clip}
-            style={{ borderRadius: radius }}
-            className={cn(
-              "overflow-hidden border border-border bg-background",
-              className,
-            )}
-          >
-            {children}
-          </motion.div>
-        </motion.div>
-      ) : null}
-    </AnimatePresence>,
+    <motion.div
+      ref={ctx.contentRef}
+      id={ctx.contentId}
+      role="dialog"
+      aria-labelledby={ctx.triggerId}
+      data-multi-select-content=""
+      data-side={actualSide}
+      aria-hidden={!ctx.open}
+      inert={!ctx.open}
+      initial={false}
+      animate={{
+        height: ctx.open ? surfaceHeight : 0,
+        opacity: ctx.open ? 1 : 0,
+        y: ctx.open
+          ? actualSide === "bottom"
+            ? sideOffset
+            : -sideOffset
+          : 0,
+      }}
+      transition={
+        reduce || !morphReady ? { duration: 0 } : MULTI_SELECT_MORPH
+      }
+      style={
+        {
+          left,
+          top:
+            actualSide === "bottom" && layout
+              ? layout.trigger.top + layout.trigger.height
+              : undefined,
+          bottom:
+            actualSide === "top" && layout
+              ? window.innerHeight - layout.trigger.top
+              : undefined,
+          minWidth: triggerWidth,
+          pointerEvents: ctx.open ? "auto" : "none",
+          transformOrigin: actualSide === "bottom" ? "top" : "bottom",
+          visibility: layout ? "visible" : "hidden",
+          borderRadius: radius,
+          "--multi-select-trigger-width": `${triggerWidth}px`,
+        } as CSSProperties
+      }
+      className={cn(
+        "fixed z-[9999] w-(--multi-select-trigger-width) overflow-hidden border border-border bg-background text-popover-foreground outline-none will-change-[height,transform] [filter:drop-shadow(0_10px_18px_rgba(0,0,0,0.14))]",
+        className,
+      )}
+    >
+      <motion.div
+        ref={measureRef}
+        initial={false}
+        animate={{ opacity: ctx.open ? 1 : 0 }}
+        transition={
+          reduce || !morphReady ? { duration: 0 } : MULTI_SELECT_MORPH
+        }
+      >
+        {children}
+      </motion.div>
+    </motion.div>,
     document.body,
   );
 }

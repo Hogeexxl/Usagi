@@ -204,15 +204,26 @@ describe("FilterControls", () => {
     expect(trigger).toHaveClass("bg-primary");
   });
 
-  it.each([
-    { trigger: "模型筛选，全部", options: modelOptions },
-    { trigger: "项目筛选，全部", options: projectOptions },
-  ])("opens $trigger without entrance animation", async ({ trigger, options }) => {
-    renderControls({ options });
-    await openPopover(trigger);
+  it("keeps the filter surface mounted across open/close like beUI Multi Select", async () => {
+    renderControls();
+    const panels = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-multi-select-content]"),
+    );
+    expect(panels).toHaveLength(2);
 
-    const portal = document.querySelector("[data-morph-popover-portal]");
-    expect(portal).toHaveAttribute("data-morph-popover-animated", "false");
+    const modelPanel = panels.find((panel) => panel.textContent?.includes("OpenAI"));
+    if (!modelPanel) throw new Error("Model panel was not mounted");
+    expect(modelPanel).toHaveAttribute("aria-hidden", "true");
+    expect(modelPanel).toHaveAttribute("inert");
+
+    await openPopover("模型筛选，全部");
+    expect(modelPanel).toHaveAttribute("aria-hidden", "false");
+    expect(modelPanel).not.toHaveAttribute("inert");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(modelPanel).toHaveAttribute("aria-hidden", "true");
+    expect(document.body.contains(modelPanel)).toBe(true);
   });
 
   it("opens the model popover and closes it on Escape and outside pointer", async () => {

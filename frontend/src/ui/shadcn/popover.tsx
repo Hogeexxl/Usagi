@@ -13,24 +13,18 @@ function PopoverTrigger({ ...props }: PopoverPrimitive.Trigger.Props) {
   return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />;
 }
 
-type PopoverContentProps = PopoverPrimitive.Popup.Props &
-  Pick<
-    PopoverPrimitive.Positioner.Props,
-    "align" | "alignOffset" | "side" | "sideOffset"
-  > & {
-    /** Disable CSS entrance/exit animation while preserving Base UI behavior. */
-    animated?: boolean;
-  };
-
 function PopoverContent({
   className,
-  animated = true,
   align = "center",
   alignOffset = 0,
   side = "bottom",
   sideOffset = 4,
   ...props
-}: PopoverContentProps) {
+}: PopoverPrimitive.Popup.Props &
+  Pick<
+    PopoverPrimitive.Positioner.Props,
+    "align" | "alignOffset" | "side" | "sideOffset"
+  >) {
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Positioner
@@ -42,10 +36,8 @@ function PopoverContent({
       >
         <PopoverPrimitive.Popup
           data-slot="popover-content"
-          data-popover-animated={animated ? "true" : "false"}
           className={cn(
-            "cn-popover-content z-50 w-72 origin-(--transform-origin) outline-hidden",
-            animated && "cn-popover-content-motion cn-popover-content-logical",
+            "cn-popover-content cn-popover-content-logical z-50 w-72 origin-(--transform-origin) outline-hidden",
             className,
           )}
           {...props}
