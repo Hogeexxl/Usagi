@@ -1,6 +1,6 @@
 import { ChevronRight, Cpu, Folder, Layers } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
-import { forwardRef, useMemo, useState } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   DashboardFilters,
@@ -96,14 +96,23 @@ const FilterTrigger = forwardRef<HTMLButtonElement, FilterTriggerProps>(function
 
 export function FilterControls({ filters, options, optionsLoading, optionsStale, optionsErrorCode, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<ModelFilterProvider, boolean>>({
-    openai: true,
-    "route-models": true,
+    openai: false,
+    "route-models": false,
   });
+  const modelGroupsInitialized = useRef(false);
   const reduce = useReducedMotion();
   const showSourceFilter = (options?.sources?.length ?? 0) > 1;
   const sources = useMemo(() => sourceSelections(options, filters.sources), [options, filters.sources]);
   const groups = useMemo(() => modelGroups(options, filters.models), [options, filters.models]);
   const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
+
+  useEffect(() => {
+    if (modelGroupsInitialized.current || !options || groups.length === 0) return;
+    modelGroupsInitialized.current = true;
+    const firstProvider = groups[0].provider;
+    setExpandedGroups((current) => ({ ...current, [firstProvider]: true }));
+  }, [groups, options]);
+
   const selectedSources = new Set(filters.sources);
   const selectedModels = new Set(filters.models);
   const selectedProjects = new Set(filters.projects.map(projectKey));
@@ -163,7 +172,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
       ) : null}
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="模型" count={filters.models.length} icon={<Cpu className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" className="w-72">
+        <MorphPopoverContent side="bottom" align="start" maxHeight={752} className="w-72">
           <div className="p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={groups.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
@@ -185,7 +194,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="项目" count={filters.projects.length} icon={<Folder className="h-4 w-4" />} /></MorphPopoverTrigger>
-        <MorphPopoverContent side="bottom" align="start" className="w-80">
+        <MorphPopoverContent side="bottom" align="start" maxHeight={752} className="w-80">
           <div className="p-2">
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={projects.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && projects.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无项目</div> : null}

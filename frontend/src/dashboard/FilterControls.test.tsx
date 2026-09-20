@@ -67,6 +67,11 @@ async function openPopover(name: string) {
   return screen.findByRole("dialog");
 }
 
+function ensureModelGroupExpanded(dialog: HTMLElement, name: string) {
+  const toggle = within(dialog).getByRole("button", { name });
+  if (toggle.getAttribute("aria-expanded") !== "true") fireEvent.click(toggle);
+}
+
 describe("FilterControls", () => {
   it("uses the secondary all-model trigger when no model is selected", () => {
     renderControls();
@@ -86,6 +91,7 @@ describe("FilterControls", () => {
     const onChange = vi.fn();
     renderControls({ onChange });
     const dialog = await openPopover("模型筛选，全部");
+    ensureModelGroupExpanded(dialog, "Route-models");
     const checkbox = within(dialog).getByRole("checkbox", { name: "claude-3" });
 
     fireEvent.click(checkbox);
@@ -97,6 +103,7 @@ describe("FilterControls", () => {
     const onChange = vi.fn();
     renderControls({ onChange });
     const dialog = await openPopover("模型筛选，全部");
+    ensureModelGroupExpanded(dialog, "Route-models");
 
     fireEvent.click(within(dialog).getByText("claude-3"));
 
@@ -120,28 +127,35 @@ describe("FilterControls", () => {
     );
   });
 
-  it("renders OpenAI and Route-models as independent collapsible groups", async () => {
+  it("expands only the first model group initially and preserves later group state", async () => {
     renderControls();
     const dialog = await openPopover("模型筛选，全部");
     const openAiToggle = within(dialog).getByRole("button", { name: "OpenAI" });
     const routeModelsToggle = within(dialog).getByRole("button", { name: "Route-models" });
 
+    expect(openAiToggle).toHaveAttribute("aria-expanded", "true");
+    expect(routeModelsToggle).toHaveAttribute("aria-expanded", "false");
     expect(within(dialog).getByRole("checkbox", { name: "gpt-4o" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("checkbox", { name: "claude-3" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("checkbox", { name: "claude-3" })).not.toBeInTheDocument();
+
     fireEvent.click(openAiToggle);
+    fireEvent.click(routeModelsToggle);
+    expect(openAiToggle).toHaveAttribute("aria-expanded", "false");
+    expect(routeModelsToggle).toHaveAttribute("aria-expanded", "true");
     expect(within(dialog).queryByRole("checkbox", { name: "gpt-4o" })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("checkbox", { name: "claude-3" })).toBeInTheDocument();
-    fireEvent.click(routeModelsToggle);
-    expect(within(dialog).queryByRole("checkbox", { name: "claude-3" })).not.toBeInTheDocument();
-    fireEvent.click(openAiToggle);
-    fireEvent.click(routeModelsToggle);
-    expect(within(dialog).getByRole("checkbox", { name: "gpt-4o" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("checkbox", { name: "claude-3" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const reopened = await openPopover("模型筛选，全部");
+    expect(within(reopened).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(reopened).getByRole("button", { name: "Route-models" })).toHaveAttribute("aria-expanded", "true");
   });
 
   it("uses backend provider metadata instead of guessing from model names", async () => {
     renderControls();
     const dialog = await openPopover("模型筛选，全部");
+    ensureModelGroupExpanded(dialog, "Route-models");
 
     expect(within(dialog).getByRole("button", { name: "OpenAI" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Route-models" })).toBeInTheDocument();
@@ -157,6 +171,7 @@ describe("FilterControls", () => {
       onChange,
     });
     const dialog = await openPopover("模型筛选，已选1项");
+    ensureModelGroupExpanded(dialog, "Route-models");
     const orphan = within(dialog).getByRole("checkbox", { name: "orphan-rollout" });
 
     expect(within(dialog).getByRole("button", { name: "Route-models" })).toBeInTheDocument();
@@ -190,6 +205,17 @@ describe("FilterControls", () => {
       models: [],
       projects: [{ kind: "unknown" }],
     });
+  });
+
+  it.each([
+    { trigger: "模型筛选，全部", options: modelOptions },
+    { trigger: "项目筛选，全部", options: projectOptions },
+  ])("caps $trigger content at 752px and enables vertical scrolling", async ({ trigger, options }) => {
+    renderControls({ options });
+    const dialog = await openPopover(trigger);
+    const scrollArea = dialog.querySelector<HTMLElement>("[data-multi-select-scroll-area]");
+    if (!scrollArea) throw new Error("Scroll area not found");
+    expect(scrollArea).toHaveStyle({ maxHeight: "752px", overflowY: "auto" });
   });
 
   it("shows the selected project count and primary trigger semantics", () => {

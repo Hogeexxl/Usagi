@@ -209,6 +209,8 @@ export interface MorphPopoverContentProps {
   align?: Align;
   sideOffset?: number;
   avoidCollisions?: boolean;
+  /** Maximum visible content height. Taller content scrolls inside the panel. */
+  maxHeight?: number;
   /** Panel corner radius in px. */
   radius?: number;
   className?: string;
@@ -220,6 +222,7 @@ export function MorphPopoverContent({
   align = "start",
   sideOffset = 6,
   avoidCollisions = true,
+  maxHeight,
   radius = 16,
   className,
 }: MorphPopoverContentProps) {
@@ -335,11 +338,16 @@ export function MorphPopoverContent({
     >
       <motion.div
         ref={measureRef}
+        data-multi-select-scroll-area=""
         initial={false}
         animate={{ opacity: ctx.open ? 1 : 0 }}
         transition={
           reduce || !morphReady ? { duration: 0 } : MULTI_SELECT_MORPH
         }
+        style={{
+          maxHeight,
+          overflowY: maxHeight === undefined ? "visible" : "auto",
+        }}
       >
         {children}
       </motion.div>
