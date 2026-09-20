@@ -726,7 +726,14 @@ fn t_s03_019_state_unavailable_never_infers_main_without_explicit_evidence() {
             .scan
             .last_scan_error_code
             .as_deref(),
-        Some("STATE_SOURCE_UNAVAILABLE")
+        Some("SOURCE_RUN_FAILED")
+    );
+    assert!(
+        handle
+            .source_reports()
+            .iter()
+            .any(|report| report.error_code.as_deref() == Some("STATE_SOURCE_UNAVAILABLE")),
+        "the source report retains the concrete state-source error"
     );
 
     let connection = Connection::open(&fixture.db_path).unwrap();

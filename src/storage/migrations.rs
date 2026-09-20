@@ -6,59 +6,106 @@
 
 use rusqlite::{Connection, Result, TransactionBehavior};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 10;
+pub const LATEST_SCHEMA_VERSION: u32 = 11;
 
 struct Migration {
     version: u32,
     sql: &'static str,
+    requires_foreign_keys_off: bool,
 }
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         sql: include_str!("schema/0001_initial.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 2,
         sql: include_str!("schema/0002_usage_ledger.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 3,
         sql: include_str!("schema/0003_normalized_token_usage.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 4,
         sql: include_str!("schema/0004_metadata_parent_v2_cleanup.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 5,
         sql: include_str!("schema/0005_project_kind.sql"),
+        requires_foreign_keys_off: true,
     },
     Migration {
         version: 6,
         sql: include_str!("schema/0006_subagent_agent_path.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 7,
         sql: include_str!("schema/0007_usage_context_and_estimated_cost.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 8,
         sql: include_str!("schema/0008_session_resilience.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 9,
         sql: include_str!("schema/0009_skill_usage_events.sql"),
+        requires_foreign_keys_off: false,
     },
     Migration {
         version: 10,
         sql: include_str!("schema/0010_metadata_fact_ordering.sql"),
+        requires_foreign_keys_off: false,
+    },
+    Migration {
+        version: 11,
+        sql: include_str!("schema/0011_multi_source_core.sql"),
+        requires_foreign_keys_off: true,
     },
 ];
 
 /// Return the schema version supported by this binary.
 pub const fn latest_schema_version() -> u32 {
     LATEST_SCHEMA_VERSION
+}
+
+fn app_meta_has_column(connection: &Connection, column: &str) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('app_meta') WHERE name = ?1
+         )",
+            [column],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|found| found != 0)
+}
+
+fn ensure_app_meta_v11_metadata_columns(connection: &Connection) -> Result<()> {
+    if !app_meta_has_column(connection, "metadata_parser_version")? {
+        connection.execute_batch(
+            "ALTER TABLE app_meta ADD COLUMN metadata_parser_version
+                 INTEGER NOT NULL DEFAULT 0 CHECK (metadata_parser_version >= 0);",
+        )?;
+    }
+    if !app_meta_has_column(connection, "last_full_import_completed_at_ms")? {
+        connection.execute_batch(
+            "ALTER TABLE app_meta ADD COLUMN last_full_import_completed_at_ms
+                 INTEGER CHECK (
+                     last_full_import_completed_at_ms IS NULL
+                     OR last_full_import_completed_at_ms >= 0
+                 );",
+        )?;
+    }
+    Ok(())
 }
 
 /// Apply all migrations after `current_version` atomically.
@@ -72,12 +119,14 @@ pub fn migrate(conn: &mut Connection, current_version: u32) -> Result<u32> {
         return Ok(current_version);
     }
 
-    let crosses_v5 = current_version < 5;
     let foreign_keys_enabled: bool = conn.pragma_query_value(None, "foreign_keys", |row| {
         let value: i64 = row.get(0)?;
         Ok(value != 0)
     })?;
-    let foreign_keys_were_disabled = crosses_v5 && foreign_keys_enabled;
+    let requires_foreign_keys_off = MIGRATIONS.iter().any(|migration| {
+        migration.version > current_version && migration.requires_foreign_keys_off
+    });
+    let foreign_keys_were_disabled = requires_foreign_keys_off && foreign_keys_enabled;
     if foreign_keys_were_disabled {
         conn.pragma_update(None, "foreign_keys", false)?;
     }
@@ -89,11 +138,14 @@ pub fn migrate(conn: &mut Connection, current_version: u32) -> Result<u32> {
             .iter()
             .filter(|migration| migration.version > current_version)
         {
+            if migration.version == 11 {
+                ensure_app_meta_v11_metadata_columns(&transaction)?;
+            }
             transaction.execute_batch(migration.sql)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {};", migration.version))?;
             version = migration.version;
         }
-        if crosses_v5 {
+        if requires_foreign_keys_off {
             let mut statement = transaction.prepare("PRAGMA foreign_key_check")?;
             let mut rows = statement.query([])?;
             if rows.next()?.is_some() {
@@ -251,6 +303,31 @@ mod tests {
             .unwrap();
         connection
             .pragma_update(None, "user_version", 5_i64)
+            .unwrap();
+        connection
+    }
+
+    fn v10_connection_with_rows() -> Connection {
+        let connection = v5_connection_with_rows();
+        connection
+            .execute_batch(include_str!("schema/0006_subagent_agent_path.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "schema/0007_usage_context_and_estimated_cost.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("schema/0008_session_resilience.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("schema/0009_skill_usage_events.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("schema/0010_metadata_fact_ordering.sql"))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 10_i64)
             .unwrap();
         connection
     }
@@ -812,10 +889,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO threads (
-                    thread_id,parent_thread_id,root_session_id,agent_role,
+                    thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,
                     title,project_name,project_path,project_kind,metadata_model,
                     archived,metadata_quality_status,metadata_resolved_at_ms
-                 ) VALUES ('thread',NULL,'thread','main',NULL,NULL,NULL,'unknown',NULL,
+                 ) VALUES ('thread','codex','thread',NULL,'thread','main',NULL,NULL,NULL,'unknown',NULL,
                     0,'complete',0)",
                 [],
             )
@@ -844,15 +921,17 @@ mod tests {
             .unwrap();
         insert_v1_thread_and_source(&connection);
 
-        assert_eq!(migrate(&mut connection, 1).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 1).unwrap(), 11);
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let metadata: (i64, i64, i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
-                "SELECT data_revision,status_revision,usage_active_epoch,usage_build_epoch,
-                    usage_parser_version,usage_build_parser_version FROM app_meta WHERE id=1",
+                "SELECT data_revision,status_revision,active_epoch,build_epoch,
+                    active_parser_version,build_parser_version
+                 FROM app_meta JOIN source_usage_epochs ON source_usage_epochs.source='codex'
+                 WHERE app_meta.id=1",
                 [],
                 |row| {
                     Ok((
@@ -867,19 +946,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(metadata, (8, 9, 0, None, 0, None));
-        for dead_column in [
-            "metadata_parser_version",
-            "last_full_import_completed_at_ms",
-        ] {
-            let found: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM pragma_table_info('app_meta') WHERE name=?1",
-                    [dead_column],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(found, 0, "dead app_meta column remains: {dead_column}");
-        }
+        let app_meta_metadata: (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT metadata_parser_version,last_full_import_completed_at_ms
+                 FROM app_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(app_meta_metadata, (7, Some(10)));
 
         for table in [
             "usage_events",
@@ -918,7 +993,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(occurrence_foreign_keys, 3);
+        assert_eq!(occurrence_foreign_keys, 4);
     }
 
     #[test]
@@ -939,7 +1014,7 @@ mod tests {
             .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 11);
         let kinds: Vec<(String, String, String)> = connection
             .prepare(
                 "SELECT project_kind,project_path,project_name FROM threads
@@ -985,7 +1060,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 11).unwrap(), 11);
     }
 
     #[test]
@@ -1030,18 +1105,18 @@ mod tests {
         insert_thread_and_source(&connection);
 
         for sql in [
-            "UPDATE app_meta SET usage_active_epoch=-1 WHERE id=1",
-            "UPDATE app_meta SET usage_parser_version=-1 WHERE id=1",
-            "UPDATE app_meta SET usage_build_epoch=1 WHERE id=1",
-            "UPDATE app_meta SET usage_build_parser_version=1 WHERE id=1",
-            "UPDATE app_meta SET usage_build_epoch=2,usage_build_parser_version=1 WHERE id=1",
+            "UPDATE source_usage_epochs SET active_epoch=-1 WHERE source='codex'",
+            "UPDATE source_usage_epochs SET active_parser_version=-1 WHERE source='codex'",
+            "UPDATE source_usage_epochs SET build_epoch=1 WHERE source='codex'",
+            "UPDATE source_usage_epochs SET build_parser_version=1 WHERE source='codex'",
+            "UPDATE source_usage_epochs SET build_epoch=2,build_parser_version=1 WHERE source='codex'",
         ] {
             assert!(connection.execute(sql, []).is_err(), "accepted {sql}");
         }
         connection
             .execute(
-                "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=1,
-                    usage_build_epoch=2,usage_build_parser_version=2 WHERE id=1",
+                "UPDATE source_usage_epochs SET active_epoch=1,active_parser_version=1,
+                    build_epoch=2,build_parser_version=2 WHERE source='codex'",
                 [],
             )
             .unwrap();
@@ -1076,29 +1151,28 @@ mod tests {
 
         connection
             .execute(
-                "UPDATE app_meta SET usage_build_epoch=NULL,usage_build_parser_version=NULL WHERE id=1",
+                "UPDATE source_usage_epochs SET build_epoch=NULL,build_parser_version=NULL WHERE source='codex'",
                 [],
             )
             .unwrap();
-        for (epoch, event_id, start_offset) in [(1, "active", 0), (2, "inactive", 1)] {
+        for (epoch, event_id, _start_offset) in [(1, "active", 0), (2, "inactive", 1)] {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,output_tokens,
-                        reasoning_tokens,total_tokens,quality_status,source_file_id,file_generation,
-                        source_start_offset,source_end_offset,created_at_ms
-                     ) VALUES (?1,?2,'normal',1,'thread','thread','model',NULL,NULL,10,2,3,4,1,14,
-                        'complete',1,1,?3,?3+1,1)",
-                    params![epoch, event_id, start_offset],
+                        reasoning_tokens,total_tokens,quality_status,created_at_ms
+                     ) VALUES ('codex',?1,?2,'normal',1,'thread','thread','model',NULL,NULL,10,2,3,4,1,14,
+                        'complete',1)",
+                    params![epoch, event_id],
                 )
                 .unwrap();
         }
         let active_count: i64 = connection
             .query_row(
                 "SELECT count(*) FROM usage_events
-                 WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)",
+                 WHERE source='codex' AND source_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')",
                 [],
                 |row| row.get(0),
             )
@@ -1122,11 +1196,11 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 11);
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         for (table, required, forbidden) in [
             (
                 "usage_events",
@@ -1197,19 +1271,15 @@ mod tests {
                 .iter()
                 .any(|name| name == "relationship_conflict")
         );
-        for dead_column in [
-            "metadata_parser_version",
-            "last_full_import_completed_at_ms",
-        ] {
-            let found: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM pragma_table_info('app_meta') WHERE name=?1",
-                    [dead_column],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(found, 0, "dead app_meta column remains: {dead_column}");
-        }
+        let app_meta_metadata: (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT metadata_parser_version,last_full_import_completed_at_ms
+                 FROM app_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(app_meta_metadata, (0, None));
 
         insert_thread_and_source(&connection);
         connection
@@ -1318,12 +1388,12 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 11);
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
 
         let revisions: (i64, i64) = connection
@@ -1410,15 +1480,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(binding, ("old-fingerprint".to_owned(), "ready".to_owned()));
-        let usage_epochs: (i64, i64, i64, i64) = connection
+        let usage_epochs: (i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
-                "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version,
-                    usage_build_parser_version FROM app_meta WHERE id=1",
+                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
+                 FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(usage_epochs, (1, 2, 3, 3));
+        assert_eq!(usage_epochs, (1, Some(2), 3, Some(3)));
 
         let fact: (i64, i64, String, String, i64) = connection
             .query_row(
@@ -1494,21 +1564,15 @@ mod tests {
             (2, 1, 3, "none".to_owned(), "rebuilt".to_owned(), 100)
         );
 
-        for dead_column in [
-            "metadata_parser_version",
-            "last_full_import_completed_at_ms",
-        ] {
-            assert_eq!(
-                connection
-                    .query_row(
-                        "SELECT count(*) FROM pragma_table_info('app_meta') WHERE name=?1",
-                        [dead_column],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap(),
-                0
-            );
-        }
+        let app_meta_metadata: (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT metadata_parser_version,last_full_import_completed_at_ms
+                 FROM app_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(app_meta_metadata, (7, Some(10)));
         connection
             .execute(
                 "UPDATE rollout_metadata_facts SET parent_hint_provenance='session_meta_parent'
@@ -1633,9 +1697,9 @@ mod tests {
             &codex_home,
         ))
         .unwrap();
-        assert_eq!(ledger.schema_version().unwrap(), 10);
+        assert_eq!(ledger.schema_version().unwrap(), 11);
         let app_state = ledger.app_state().unwrap();
-        assert_eq!(app_state.data_revision, 9);
+        assert_eq!(app_state.data_revision, 8);
         assert_eq!(app_state.scan.status_revision, 10);
         assert_eq!(
             app_state.scan.last_finished_scan_id.as_deref(),
@@ -1659,7 +1723,7 @@ mod tests {
     fn t_dc_027_v2_rows_migrate_without_losing_canonical_values_or_occurrences() {
         let mut connection = v2_connection();
         add_v2_rows(&connection);
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 10);
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 11);
         let known: (i64, i64, Option<i64>, i64, i64, i64) = connection
             .query_row(
                 "SELECT input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_events WHERE event_id='known'",
@@ -1702,7 +1766,8 @@ mod tests {
             connection
                 .query_row(
                     "SELECT count(*) FROM usage_event_occurrences o
-                     LEFT JOIN usage_events e ON e.ledger_epoch=o.ledger_epoch AND e.event_id=o.event_id
+                     LEFT JOIN usage_events e ON e.source=o.source
+                        AND e.source_epoch=o.ledger_epoch AND e.event_id=o.event_id
                      WHERE e.event_id IS NULL",
                     [],
                     |row| row.get::<_, i64>(0)
@@ -1763,8 +1828,8 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 10);
-        let versions: (i64, i64) = connection.query_row("SELECT app_meta.usage_parser_version,usage_source_states.canonical_algorithm_version FROM app_meta JOIN usage_source_states ON usage_source_states.ledger_epoch=app_meta.usage_active_epoch", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 11);
+        let versions: (i64, i64) = connection.query_row("SELECT source_usage_epochs.active_parser_version,usage_source_states.canonical_algorithm_version FROM source_usage_epochs JOIN usage_source_states ON usage_source_states.ledger_epoch=source_usage_epochs.active_epoch WHERE source_usage_epochs.source='codex'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(versions, (2, 2));
         assert_eq!(crate::usage::normalized::canonical_algorithm_for(2), None);
     }
@@ -1773,12 +1838,12 @@ mod tests {
     fn t_mu03_s01_v7_features_survive_v8_upgrade_idempotence_and_rollback() {
         let mut fresh = Connection::open_in_memory().unwrap();
         fresh.pragma_update(None, "foreign_keys", true).unwrap();
-        assert_eq!(migrate(&mut fresh, 0).unwrap(), 10);
+        assert_eq!(migrate(&mut fresh, 0).unwrap(), 11);
         assert_eq!(
             fresh
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
 
         for (table, required) in [
@@ -1891,7 +1956,7 @@ mod tests {
             .unwrap();
         assert!(usage_sql.contains("estimated_cost_nanos_usd"));
         assert!(usage_sql.contains("estimated_cost_nanos_usd IS NULL"));
-        assert_eq!(migrate(&mut fresh, 10).unwrap(), 10);
+        assert_eq!(migrate(&mut fresh, 11).unwrap(), 11);
 
         let mut upgraded = v5_connection_with_rows();
         let before: (i64, i64, i64, i64, i64) = upgraded
@@ -1914,12 +1979,12 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 10);
+        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 11);
         assert_eq!(
             upgraded
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
         let after: (i64, i64, i64, i64, i64) = upgraded
             .query_row(
@@ -1942,7 +2007,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(before, after);
-        assert_eq!(migrate(&mut upgraded, 10).unwrap(), 10);
+        assert_eq!(migrate(&mut upgraded, 11).unwrap(), 11);
         let mut foreign_key_statement = upgraded.prepare("PRAGMA foreign_key_check").unwrap();
         let mut foreign_key_rows = foreign_key_statement.query([]).unwrap();
         let foreign_key_check = foreign_key_rows.next().unwrap();
@@ -1984,6 +2049,409 @@ mod tests {
                 })
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn m00_provenance_preflight_backfills_and_rejects_ambiguous_rows() {
+        let mut backfill = v10_connection_with_rows();
+        backfill
+            .execute("DELETE FROM usage_event_occurrences", [])
+            .unwrap();
+        assert_eq!(migrate(&mut backfill, 10).unwrap(), 11);
+        let counts: (i64, i64) = backfill
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events),
+                    (SELECT count(*) FROM usage_event_occurrences)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (2, 2));
+
+        let mut ambiguous = v10_connection_with_rows();
+        ambiguous
+            .execute(
+                "UPDATE usage_event_occurrences
+                 SET source_end_offset=99 WHERE event_id='known'",
+                [],
+            )
+            .unwrap();
+        assert!(migrate(&mut ambiguous, 10).is_err());
+        assert_eq!(
+            ambiguous
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            ambiguous
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('usage_events')
+                     WHERE name='source_file_id'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ambiguous
+                .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn m01_thread_identity_migration_preserves_codex_ids_and_checks_native_id() {
+        let mut connection = v10_connection_with_rows();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let identity: (String, String, String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT thread_id,source,native_session_id,parent_thread_id,root_session_id
+                 FROM threads WHERE thread_id='root'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            (
+                "root".to_owned(),
+                "codex".to_owned(),
+                "root".to_owned(),
+                None,
+                Some("root".to_owned())
+            )
+        );
+        assert!(connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id,source,native_session_id,root_session_id,agent_role,
+                    project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                 ) VALUES ('empty-native','codex','', 'empty-native','main','unknown',0,'complete',0)",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn m02_usage_identity_migration_preserves_tokens_cost_and_quality() {
+        let mut connection = v10_connection_with_rows();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let event: (
+            String,
+            i64,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            i64,
+            i64,
+            i64,
+            String,
+        ) = connection
+            .query_row(
+                "SELECT source,source_epoch,event_id,input_tokens,cached_tokens,
+                    cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status
+                 FROM usage_events WHERE event_id='known'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            event,
+            (
+                "codex".to_owned(),
+                1,
+                "known".to_owned(),
+                100,
+                20,
+                Some(5),
+                10,
+                2,
+                110,
+                "complete".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn m03_provenance_lossless_after_canonical_rebuild() {
+        let mut connection = v10_connection_with_rows();
+        let before: Vec<(i64, i64, i64, i64, i64, String)> = connection
+            .prepare(
+                "SELECT ledger_epoch,source_file_id,file_generation,source_start_offset,
+                    source_end_offset,event_id FROM usage_event_occurrences
+                 ORDER BY source_start_offset",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let after: Vec<(String, i64, i64, i64, i64, i64, String)> = connection
+            .prepare(
+                "SELECT source,ledger_epoch,source_file_id,file_generation,
+                    source_start_offset,source_end_offset,event_id
+                 FROM usage_event_occurrences ORDER BY source_start_offset",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            after,
+            before
+                .into_iter()
+                .map(|(epoch, file, generation, start, end, event)| {
+                    (
+                        "codex".to_owned(),
+                        epoch,
+                        file,
+                        generation,
+                        start,
+                        end,
+                        event,
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn m04_active_build_epoch_is_copied_without_reset() {
+        let mut connection = v10_connection_with_rows();
+        connection
+            .execute(
+                "UPDATE app_meta SET usage_active_epoch=5,usage_build_epoch=6,
+                    usage_parser_version=7,usage_build_parser_version=7 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let epoch: (i64, Option<i64>, i64, Option<i64>) = connection
+            .query_row(
+                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
+                 FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(epoch, (5, Some(6), 7, Some(7)));
+    }
+
+    #[test]
+    fn m05_revisions_are_unchanged_by_schema_migration() {
+        let mut connection = v10_connection_with_rows();
+        connection
+            .execute(
+                "UPDATE app_meta SET data_revision=123,status_revision=456 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let revisions: (i64, i64) = connection
+            .query_row(
+                "SELECT data_revision,status_revision FROM app_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revisions, (123, 456));
+    }
+
+    #[test]
+    fn app_meta_preservation_migration_copies_all_non_usage_fields() {
+        let mut connection = v10_connection_with_rows();
+        connection
+            .execute(
+                "UPDATE app_meta SET
+                    metadata_parser_version=17,
+                    data_revision=123,
+                    status_revision=456,
+                    scan_state='failed',
+                    active_scan_id=NULL,
+                    last_finished_scan_id='finished-scan',
+                    last_finished_scan_result='failed',
+                    last_scan_started_at_ms=11,
+                    last_scan_completed_at_ms=12,
+                    last_scan_failed_at_ms=13,
+                    last_scan_error_code='SCAN_ERROR',
+                    followup_scan_id='followup-scan',
+                    followup_state='start_failed',
+                    followup_trigger='Manual',
+                    followup_requested_at_ms=14,
+                    followup_enqueued_status_revision=15,
+                    followup_error_code='FOLLOWUP_ERROR',
+                    last_full_import_completed_at_ms=16,
+                    codex_home_fingerprint='fingerprint',
+                    source_binding_status='ready',
+                    cost_algorithm_version=7,
+                    pricing_catalog_version=8
+                 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        let snapshot = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT metadata_parser_version,data_revision,status_revision,scan_state,
+                        active_scan_id,last_finished_scan_id,last_finished_scan_result,
+                        last_scan_started_at_ms,last_scan_completed_at_ms,last_scan_failed_at_ms,
+                        last_scan_error_code,followup_scan_id,followup_state,followup_trigger,
+                        followup_requested_at_ms,followup_enqueued_status_revision,followup_error_code,
+                        last_full_import_completed_at_ms,codex_home_fingerprint,source_binding_status,
+                        cost_algorithm_version,pricing_catalog_version
+                     FROM app_meta WHERE id=1",
+                    [],
+                    |row| {
+                        let mut values = Vec::with_capacity(22);
+                        for index in 0..22 {
+                            values.push(row.get::<_, rusqlite::types::Value>(index)?);
+                        }
+                        Ok(values)
+                    },
+                )
+                .unwrap()
+        };
+        let before = snapshot(&connection);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let after = snapshot(&connection);
+        assert_eq!(after, before);
+        for removed_column in [
+            "usage_active_epoch",
+            "usage_build_epoch",
+            "usage_parser_version",
+            "usage_build_parser_version",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM pragma_table_info('app_meta') WHERE name=?1",
+                        [removed_column],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "removed app_meta column remains: {removed_column}"
+            );
+        }
+    }
+
+    #[test]
+    fn m06_migration_does_not_rebuild_or_reset_parser_state() {
+        let mut connection = v10_connection_with_rows();
+        let before: (i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_parser_version,canonical_algorithm_version,
+                    resolved_through_offset,observed_raw_size FROM usage_source_states",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let counts_before: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM usage_events),
+                    (SELECT count(*) FROM turns),(SELECT count(*) FROM usage_build_sources)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 11);
+        let after: (i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT usage_parser_version,canonical_algorithm_version,
+                    resolved_through_offset,observed_raw_size FROM usage_source_states",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let counts_after: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM usage_events),
+                    (SELECT count(*) FROM turns),(SELECT count(*) FROM usage_build_sources)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(counts_before, counts_after);
+    }
+
+    #[test]
+    fn m07_schema_bootstrap_validation_covers_v11_contract() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 11);
+        crate::storage::validate_schema(&connection, std::path::Path::new(":memory:")).unwrap();
+        let source_scan_runs_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_scan_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized_sql = source_scan_runs_sql
+            .to_ascii_lowercase()
+            .replace([' ', '\n', '\t'], "");
+        assert!(normalized_sql.contains("started_at_msisnullorstarted_at_ms>=0"));
+        assert!(normalized_sql.contains("finished_at_msisnullorfinished_at_ms>=0"));
+
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
+            .execute("DROP TABLE source_scan_runs", [])
+            .unwrap();
+        assert!(
+            crate::storage::validate_schema(&connection, std::path::Path::new(":memory:")).is_err()
         );
     }
 }

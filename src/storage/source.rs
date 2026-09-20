@@ -84,7 +84,7 @@ impl Ledger {
     ) -> Result<Vec<UsageCarryObservationRequirement>> {
         let connection = self.connection()?;
         let build_epoch: Option<i64> = connection.query_row(
-            "SELECT usage_build_epoch FROM app_meta WHERE id=1",
+            "SELECT build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )?;
@@ -1729,9 +1729,9 @@ mod tests {
             let connection = Connection::open(ledger.database_path()).unwrap();
             connection
                 .execute(
-                    "INSERT INTO threads(thread_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
+                    "INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
                         metadata_quality_status,metadata_resolved_at_ms)
-                     VALUES ('root',NULL,'root','main','unknown',0,'complete',1)",
+                     VALUES ('root','codex','root',NULL,'root','main','unknown',0,'complete',1)",
                     [],
                 )
                 .unwrap();
@@ -2030,9 +2030,9 @@ mod tests {
                 let connection = Connection::open(ledger.database_path()).unwrap();
                 connection
                     .execute_batch(
-                        "INSERT INTO threads(thread_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
+                        "INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
                         metadata_quality_status,metadata_resolved_at_ms)
-                     VALUES ('root',NULL,'root','main','unknown',0,'complete',1);",
+                     VALUES ('root','codex','root',NULL,'root','main','unknown',0,'complete',1);",
                     )
                     .unwrap();
                 connection
@@ -2067,8 +2067,10 @@ mod tests {
                     .unwrap();
                 connection
                     .execute(
-                        "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=?1,
-                            usage_build_epoch=NULL,usage_build_parser_version=NULL WHERE id=1",
+                        "UPDATE source_usage_epochs
+                         SET active_epoch=1,active_parser_version=?1,
+                             build_epoch=NULL,build_parser_version=NULL
+                         WHERE source='codex'",
                         [crate::usage::USAGE_PARSER_VERSION],
                     )
                     .unwrap();
@@ -2199,9 +2201,9 @@ mod tests {
             let connection = Connection::open(ledger.database_path()).unwrap();
             connection
                 .execute(
-                    "INSERT INTO threads(thread_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
+                    "INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
                         metadata_quality_status,metadata_resolved_at_ms)
-                     VALUES ('root',NULL,'root','main','unknown',0,'complete',1)",
+                     VALUES ('root','codex','root',NULL,'root','main','unknown',0,'complete',1)",
                     [],
                 )
                 .unwrap();

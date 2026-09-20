@@ -43,7 +43,6 @@ pub struct ExistingThread {
     pub created_at_ms: Option<i64>,
     pub updated_at_ms: Option<i64>,
     pub archived: bool,
-    pub current_rollout_path: Option<String>,
     pub metadata_quality_status: MetadataQualityStatus,
 }
 
@@ -62,7 +61,6 @@ impl From<ExistingThreadProjection> for ExistingThread {
             created_at_ms: projection.created_at_ms,
             updated_at_ms: projection.updated_at_ms,
             archived: projection.archived,
-            current_rollout_path: projection.current_rollout_path,
             metadata_quality_status: projection.metadata_quality_status,
         }
     }
@@ -736,15 +734,6 @@ impl Resolver {
         } else {
             None
         };
-        let current_rollout_path = if self.input.state_snapshot.status.is_complete() {
-            state
-                .as_ref()
-                .and_then(|fact| fact.rollout_path.clone())
-                .or_else(|| physical.map(|(_, path)| path))
-        } else {
-            None
-        };
-
         if title.is_none()
             || project_path.is_none()
             || created_at_ms.is_none()
@@ -857,14 +846,6 @@ impl Resolver {
         {
             patch.archived = Patch::Set(archived);
         }
-        set_optional(
-            &mut patch.current_rollout_path,
-            existing
-                .as_ref()
-                .and_then(|row| row.current_rollout_path.as_ref()),
-            current_rollout_path,
-        );
-
         let quality_changed = existing
             .as_ref()
             .is_none_or(|row| row.metadata_quality_status != quality);
@@ -1227,7 +1208,6 @@ fn patch_has_field_change(patch: &ResolvedThreadPatch) -> bool {
         || !patch.created_at_ms.is_keep()
         || !patch.updated_at_ms.is_keep()
         || !patch.archived.is_keep()
-        || !patch.current_rollout_path.is_keep()
 }
 
 #[cfg(test)]
@@ -1367,7 +1347,6 @@ mod tests {
             created_at_ms: None,
             updated_at_ms: None,
             archived: false,
-            current_rollout_path: None,
             metadata_quality_status: MetadataQualityStatus::Partial,
         }
     }

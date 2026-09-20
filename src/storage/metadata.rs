@@ -30,19 +30,18 @@ impl Ledger {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let mut statement = transaction.prepare(
             "SELECT
-                thread_id, parent_thread_id, root_session_id, agent_role,
+                thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role,
                 title, project_name, project_path, project_kind, metadata_model,
-                created_at_ms, updated_at_ms, archived, current_rollout_path,
-                metadata_quality_status
+                created_at_ms, updated_at_ms, archived, metadata_quality_status
              FROM threads ORDER BY thread_id",
         )?;
         let mut rows = statement.query([])?;
         let mut projections = Vec::new();
         while let Some(row) = rows.next()? {
-            let agent_role: String = row.get(3)?;
+            let agent_role: String = row.get(5)?;
             let agent_role =
                 AgentRole::try_from(agent_role.as_str()).map_err(super::to_domain_sql_error)?;
-            let archived: i64 = row.get(11)?;
+            let archived: i64 = row.get(13)?;
             let archived = match archived {
                 0 => false,
                 1 => true,
@@ -52,26 +51,29 @@ impl Ledger {
                     )));
                 }
             };
-            let quality: String = row.get(13)?;
+            let quality: String = row.get(14)?;
             let metadata_quality_status = MetadataQualityStatus::try_from(quality.as_str())
                 .map_err(super::to_domain_sql_error)?;
-            let project_kind: String = row.get(7)?;
+            let project_kind: String = row.get(9)?;
             let project_kind =
                 ProjectKind::try_from(project_kind.as_str()).map_err(super::to_domain_sql_error)?;
             projections.push(ExistingThreadProjection {
                 thread_id: row.get(0)?,
-                parent_thread_id: row.get(1)?,
-                root_session_id: row.get(2)?,
+                source: row.get::<_, String>(1)?.parse().map_err(|error| {
+                    rusqlite::Error::InvalidParameterName(format!("invalid source: {error}"))
+                })?,
+                native_session_id: row.get(2)?,
+                parent_thread_id: row.get(3)?,
+                root_session_id: row.get(4)?,
                 agent_role,
-                title: row.get(4)?,
-                project_name: row.get(5)?,
-                project_path: row.get(6)?,
+                title: row.get(6)?,
+                project_name: row.get(7)?,
+                project_path: row.get(8)?,
                 project_kind,
-                metadata_model: row.get(8)?,
-                created_at_ms: row.get(9)?,
-                updated_at_ms: row.get(10)?,
+                metadata_model: row.get(10)?,
+                created_at_ms: row.get(11)?,
+                updated_at_ms: row.get(12)?,
                 archived,
-                current_rollout_path: row.get(12)?,
                 metadata_quality_status,
             });
         }
@@ -142,6 +144,9 @@ fn commit_group(
             None => apply_new_patch(patch),
         })
         .transpose()?;
+    if let Some(next_thread) = next_thread.as_ref() {
+        validate_thread_relationships(transaction, next_thread)?;
+    }
 
     // Read and validate every source precondition first.  A later source
     // failure must not leave an earlier source in this group bound or advanced.
@@ -284,6 +289,8 @@ fn read_data_revision(transaction: &Transaction<'_>) -> StorageResult<i64> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ThreadRow {
     thread_id: String,
+    source: crate::source::SourceId,
+    native_session_id: String,
     parent_thread_id: Option<String>,
     root_session_id: Option<String>,
     agent_role: AgentRole,
@@ -295,7 +302,6 @@ struct ThreadRow {
     created_at_ms: Option<i64>,
     updated_at_ms: Option<i64>,
     archived: bool,
-    current_rollout_path: Option<String>,
     metadata_quality_status: MetadataQualityStatus,
     metadata_resolved_at_ms: i64,
 }
@@ -304,17 +310,17 @@ fn read_thread(transaction: &Transaction<'_>, thread_id: &str) -> StorageResult<
     transaction
         .query_row(
             "SELECT
-                thread_id, parent_thread_id, root_session_id, agent_role,
+                thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role,
                 title, project_name, project_path, project_kind, metadata_model,
-                created_at_ms, updated_at_ms, archived, current_rollout_path,
-                metadata_quality_status, metadata_resolved_at_ms
+                created_at_ms, updated_at_ms, archived, metadata_quality_status,
+                metadata_resolved_at_ms
              FROM threads WHERE thread_id = ?1",
             [thread_id],
             |row| {
-                let agent_role: String = row.get(3)?;
+                let agent_role: String = row.get(5)?;
                 let agent_role =
                     AgentRole::try_from(agent_role.as_str()).map_err(super::to_domain_sql_error)?;
-                let archived: i64 = row.get(11)?;
+                let archived: i64 = row.get(13)?;
                 let archived = match archived {
                     0 => false,
                     1 => true,
@@ -324,28 +330,31 @@ fn read_thread(transaction: &Transaction<'_>, thread_id: &str) -> StorageResult<
                         )));
                     }
                 };
-                let quality: String = row.get(13)?;
+                let quality: String = row.get(14)?;
                 let quality = MetadataQualityStatus::try_from(quality.as_str())
                     .map_err(super::to_domain_sql_error)?;
-                let project_kind: String = row.get(7)?;
+                let project_kind: String = row.get(9)?;
                 let project_kind = ProjectKind::try_from(project_kind.as_str())
                     .map_err(super::to_domain_sql_error)?;
                 Ok(ThreadRow {
                     thread_id: row.get(0)?,
-                    parent_thread_id: row.get(1)?,
-                    root_session_id: row.get(2)?,
+                    source: row.get::<_, String>(1)?.parse().map_err(|error| {
+                        rusqlite::Error::InvalidParameterName(format!("invalid source: {error}"))
+                    })?,
+                    native_session_id: row.get(2)?,
+                    parent_thread_id: row.get(3)?,
+                    root_session_id: row.get(4)?,
                     agent_role,
-                    title: row.get(4)?,
-                    project_name: row.get(5)?,
-                    project_path: row.get(6)?,
+                    title: row.get(6)?,
+                    project_name: row.get(7)?,
+                    project_path: row.get(8)?,
                     project_kind,
-                    metadata_model: row.get(8)?,
-                    created_at_ms: row.get(9)?,
-                    updated_at_ms: row.get(10)?,
+                    metadata_model: row.get(10)?,
+                    created_at_ms: row.get(11)?,
+                    updated_at_ms: row.get(12)?,
                     archived,
-                    current_rollout_path: row.get(12)?,
                     metadata_quality_status: quality,
-                    metadata_resolved_at_ms: row.get(14)?,
+                    metadata_resolved_at_ms: row.get(15)?,
                 })
             },
         )
@@ -794,6 +803,12 @@ fn apply_existing_patch(
     current: &ThreadRow,
     patch: &ResolvedThreadPatch,
 ) -> StorageResult<ThreadRow> {
+    if patch.source != current.source || patch.native_session_id != current.native_session_id {
+        return Err(StorageError::invalid_state(format!(
+            "Thread {} canonical identity is immutable",
+            patch.thread_id
+        )));
+    }
     if patch.resolved_at_ms < current.metadata_resolved_at_ms {
         return Err(StorageError::invalid_state(format!(
             "patch for Thread {} is older than metadata_resolved_at_ms",
@@ -802,6 +817,8 @@ fn apply_existing_patch(
     }
     let next = ThreadRow {
         thread_id: current.thread_id.clone(),
+        source: current.source.clone(),
+        native_session_id: current.native_session_id.clone(),
         parent_thread_id: apply_optional(&current.parent_thread_id, &patch.parent_thread_id),
         root_session_id: apply_optional(&current.root_session_id, &patch.root_session_id),
         agent_role: apply_required(current.agent_role, &patch.agent_role),
@@ -813,10 +830,6 @@ fn apply_existing_patch(
         created_at_ms: apply_optional(&current.created_at_ms, &patch.created_at_ms),
         updated_at_ms: apply_optional(&current.updated_at_ms, &patch.updated_at_ms),
         archived: apply_required(current.archived, &patch.archived),
-        current_rollout_path: apply_optional(
-            &current.current_rollout_path,
-            &patch.current_rollout_path,
-        ),
         metadata_quality_status: patch.metadata_quality_status,
         metadata_resolved_at_ms: patch.resolved_at_ms,
     };
@@ -827,6 +840,8 @@ fn apply_existing_patch(
 fn apply_new_patch(patch: &ResolvedThreadPatch) -> StorageResult<ThreadRow> {
     let mut next = ThreadRow {
         thread_id: patch.thread_id.clone(),
+        source: patch.source.clone(),
+        native_session_id: patch.native_session_id.clone(),
         parent_thread_id: apply_optional(&None, &patch.parent_thread_id),
         root_session_id: apply_optional(&None, &patch.root_session_id),
         agent_role: apply_required(AgentRole::Unknown, &patch.agent_role),
@@ -838,7 +853,6 @@ fn apply_new_patch(patch: &ResolvedThreadPatch) -> StorageResult<ThreadRow> {
         created_at_ms: apply_optional(&None, &patch.created_at_ms),
         updated_at_ms: apply_optional(&None, &patch.updated_at_ms),
         archived: apply_required(false, &patch.archived),
-        current_rollout_path: apply_optional(&None, &patch.current_rollout_path),
         metadata_quality_status: patch.metadata_quality_status,
         metadata_resolved_at_ms: patch.resolved_at_ms,
     };
@@ -871,6 +885,15 @@ fn apply_required<T: Copy>(current: T, patch: &Patch<T>) -> T {
 }
 
 fn validate_thread_row(thread: &ThreadRow) -> StorageResult<()> {
+    thread
+        .source
+        .validate()
+        .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+    if thread.native_session_id.trim().is_empty() {
+        return Err(StorageError::invalid_state(
+            "thread native_session_id must not be empty",
+        ));
+    }
     match thread.agent_role {
         AgentRole::Main => {
             if thread.parent_thread_id.is_some()
@@ -907,6 +930,36 @@ fn validate_thread_row(thread: &ThreadRow) -> StorageResult<()> {
     Ok(())
 }
 
+fn validate_thread_relationships(
+    transaction: &Transaction<'_>,
+    thread: &ThreadRow,
+) -> StorageResult<()> {
+    for related_id in [
+        thread.parent_thread_id.as_deref(),
+        thread.root_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let related_source: Option<String> = transaction
+            .query_row(
+                "SELECT source FROM threads WHERE thread_id=?1",
+                [related_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(related_source) = related_source
+            && related_source != thread.source.as_str()
+        {
+            return Err(StorageError::invalid_state(format!(
+                "Thread {} parent/root source mismatch",
+                thread.thread_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn write_thread(
     transaction: &Transaction<'_>,
     thread: &ThreadRow,
@@ -926,9 +979,8 @@ fn write_thread(
                 created_at_ms = ?10,
                 updated_at_ms = ?11,
                 archived = ?12,
-                current_rollout_path = ?13,
-                metadata_quality_status = ?14,
-                metadata_resolved_at_ms = ?15
+                metadata_quality_status = ?13,
+                metadata_resolved_at_ms = ?14
              WHERE thread_id = ?1",
             params![
                 thread.thread_id,
@@ -943,7 +995,6 @@ fn write_thread(
                 thread.created_at_ms,
                 thread.updated_at_ms,
                 if thread.archived { 1_i64 } else { 0_i64 },
-                thread.current_rollout_path,
                 thread.metadata_quality_status.as_str(),
                 thread.metadata_resolved_at_ms,
             ],
@@ -957,13 +1008,14 @@ fn write_thread(
     } else {
         transaction.execute(
             "INSERT INTO threads (
-                thread_id, parent_thread_id, root_session_id, agent_role,
+                thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role,
                 title, project_name, project_path, project_kind, metadata_model,
-                created_at_ms, updated_at_ms, archived, current_rollout_path,
-                metadata_quality_status, metadata_resolved_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                created_at_ms, updated_at_ms, archived, metadata_quality_status, metadata_resolved_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 thread.thread_id,
+                thread.source.as_str(),
+                thread.native_session_id,
                 thread.parent_thread_id,
                 thread.root_session_id,
                 thread.agent_role.as_str(),
@@ -975,7 +1027,6 @@ fn write_thread(
                 thread.created_at_ms,
                 thread.updated_at_ms,
                 if thread.archived { 1_i64 } else { 0_i64 },
-                thread.current_rollout_path,
                 thread.metadata_quality_status.as_str(),
                 thread.metadata_resolved_at_ms,
             ],
@@ -1174,15 +1225,16 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO threads (
-                        thread_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
-                        metadata_quality_status,metadata_resolved_at_ms
-                     ) VALUES ('thread',NULL,'thread','main','unknown',0,'complete',1)",
+                        thread_id,source,native_session_id,parent_thread_id,root_session_id,
+                        agent_role,project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                     ) VALUES ('thread','codex','thread',NULL,'thread','main','unknown',0,'complete',1)",
                     [],
                 )
                 .unwrap();
             connection
                 .execute(
-                    "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=?1 WHERE id=1",
+                    "UPDATE source_usage_epochs
+                     SET active_epoch=1,active_parser_version=?1 WHERE source='codex'",
                     [crate::usage::USAGE_PARSER_VERSION],
                 )
                 .unwrap();
@@ -1321,7 +1373,7 @@ mod tests {
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
         assert_eq!(outcome.committed_group_count, 1);
-        assert_eq!(outcome.data_revision, 2);
+        assert_eq!(outcome.data_revision, 1);
         assert!(outcome.data_changed);
 
         let connection = ledger.connection().unwrap();
@@ -1408,7 +1460,7 @@ mod tests {
         let first_outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![first]).unwrap())
             .unwrap();
-        assert_eq!(first_outcome.data_revision, 1);
+        assert_eq!(first_outcome.data_revision, 0);
 
         let second = MetadataThreadCommit::new(
             "thread",
@@ -1419,7 +1471,7 @@ mod tests {
         let second_outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![second]).unwrap())
             .unwrap();
-        assert_eq!(second_outcome.data_revision, 1);
+        assert_eq!(second_outcome.data_revision, 0);
         assert!(!second_outcome.data_changed);
     }
 
@@ -1482,7 +1534,7 @@ mod tests {
         let outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(outcome.data_revision, 2);
+        assert_eq!(outcome.data_revision, 1);
 
         let mut no_change = ResolvedThreadPatch::new("thread", 10).unwrap();
         no_change.agent_role = Patch::Keep;
@@ -1490,8 +1542,80 @@ mod tests {
         let outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(outcome.data_revision, 2);
+        assert_eq!(outcome.data_revision, 1);
         assert!(!outcome.data_changed);
+    }
+
+    #[test]
+    fn relationship_resolution_allows_missing_parent_and_root_rows() {
+        let (db, home) = temp_paths("relationship-missing");
+        let ledger = Ledger::open(LedgerOptions::new(&db, &home)).unwrap();
+        let mut patch = ResolvedThreadPatch::new("child", 10).unwrap();
+        patch.agent_role = Patch::Set(AgentRole::Subagent);
+        patch.parent_thread_id = Patch::Set("parent-not-yet-seen".to_owned());
+        patch.root_session_id = Patch::Set("root-not-yet-seen".to_owned());
+        let group = MetadataThreadCommit::new("child", Some(patch), Vec::new()).unwrap();
+
+        ledger
+            .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
+            .unwrap();
+
+        let relationships: (Option<String>, Option<String>) = ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT parent_thread_id, root_session_id
+                 FROM threads WHERE thread_id = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            relationships,
+            (
+                Some("parent-not-yet-seen".to_owned()),
+                Some("root-not-yet-seen".to_owned()),
+            )
+        );
+    }
+
+    #[test]
+    fn relationship_resolution_rejects_existing_cross_source_parent() {
+        let (db, home) = temp_paths("relationship-cross-source");
+        let ledger = Ledger::open(LedgerOptions::new(&db, &home)).unwrap();
+        ledger
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO threads (
+                    thread_id, source, native_session_id, parent_thread_id, root_session_id,
+                    agent_role, project_kind, archived, metadata_quality_status,
+                    metadata_resolved_at_ms
+                 ) VALUES ('other-parent', 'other', 'other-parent', NULL, 'other-parent',
+                           'main', 'unknown', 0, 'complete', 1)",
+                [],
+            )
+            .unwrap();
+
+        let mut patch = ResolvedThreadPatch::new("child", 10).unwrap();
+        patch.agent_role = Patch::Set(AgentRole::Subagent);
+        patch.parent_thread_id = Patch::Set("other-parent".to_owned());
+        let group = MetadataThreadCommit::new("child", Some(patch), Vec::new()).unwrap();
+        assert!(
+            ledger
+                .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
+                .is_err()
+        );
+        let child_count: i64 = ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM threads WHERE thread_id = 'child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(child_count, 0);
     }
 
     #[test]
@@ -1508,7 +1632,7 @@ mod tests {
         let first = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(first.data_revision, 2);
+        assert_eq!(first.data_revision, 1);
 
         let mut projectless = ResolvedThreadPatch::new("thread", 11).unwrap();
         projectless.project_kind = Patch::Set(ProjectKind::Projectless);
@@ -1516,7 +1640,7 @@ mod tests {
         let second = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(second.data_revision, 3);
+        assert_eq!(second.data_revision, 2);
 
         let mut unchanged = ResolvedThreadPatch::new("thread", 11).unwrap();
         unchanged.project_kind = Patch::Set(ProjectKind::Projectless);
@@ -1524,7 +1648,7 @@ mod tests {
         let third = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(third.data_revision, 3);
+        assert_eq!(third.data_revision, 2);
         assert!(!third.data_changed);
 
         let row: (String, String, String) = ledger
@@ -1725,7 +1849,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(revision, 1);
+        assert_eq!(revision, 0);
     }
 
     #[test]
@@ -1844,11 +1968,11 @@ mod tests {
         let outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(outcome.data_revision, 2);
+        assert_eq!(outcome.data_revision, 1);
 
         assert!(receiver.has_changed().unwrap());
         let latest = *receiver.borrow_and_update();
-        assert_eq!(latest.data_revision, 2);
+        assert_eq!(latest.data_revision, 1);
         assert_eq!(latest.status_revision, 1);
         assert!(!receiver.has_changed().unwrap());
 
@@ -1910,7 +2034,7 @@ mod tests {
         let outcome = ledger
             .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
             .unwrap();
-        assert_eq!(outcome.data_revision, 2);
+        assert_eq!(outcome.data_revision, 1);
         let binding_count: i64 = ledger
             .connection()
             .unwrap()
@@ -1982,7 +2106,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(revision, 1);
+        assert_eq!(revision, 0);
         let fact_count: i64 = ledger
             .connection()
             .unwrap()

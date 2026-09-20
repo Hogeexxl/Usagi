@@ -58,9 +58,9 @@ fn add_bulk_active_carry_facts(
         transaction
             .execute(
                 "INSERT INTO usage_event_occurrences(
-                    ledger_epoch,source_file_id,file_generation,source_start_offset,
+                    source,ledger_epoch,source_file_id,file_generation,source_start_offset,
                     source_end_offset,event_id,created_at_ms
-                 ) VALUES (1,?1,1,?2,?3,?4,10)",
+                 ) VALUES ('codex',1,?1,1,?2,?3,?4,10)",
                 params![source_id, start, start + 1, event_id],
             )
             .unwrap();
@@ -437,7 +437,10 @@ fn t_s04_048_parser_six_rebuilds_parser_five_epoch() {
         .ledger
         .connection()
         .unwrap()
-        .execute("UPDATE app_meta SET usage_parser_version=5 WHERE id=1", [])
+        .execute(
+            "UPDATE source_usage_epochs SET active_parser_version=5 WHERE source='codex'",
+            [],
+        )
         .unwrap();
 
     let plan = fixture
@@ -770,7 +773,7 @@ fn t_s04_050_carry_four_phase_mismatch_replaces_only_affected_member() {
                         (SELECT count(*) FROM usage_event_occurrences
                          WHERE ledger_epoch=2 AND source_file_id=1),
                         (SELECT count(*) FROM usage_events
-                         WHERE ledger_epoch=2 AND event_id=?1)
+                         WHERE source='codex' AND source_epoch=2 AND event_id=?1)
                  FROM usage_build_sources b
                  JOIN source_checkpoints c ON c.source_file_id=b.source_file_id
                     AND c.consumer_kind='usage'

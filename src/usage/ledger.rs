@@ -10,7 +10,7 @@ use rusqlite::TransactionBehavior;
 
 use crate::{
     cost::{BundledPricingRepository, CostEstimator},
-    domain::{CheckpointProcessingStatus, UsageEpochState},
+    domain::{CheckpointProcessingStatus, SourceUsageEpochState},
     storage::{self, Ledger},
 };
 
@@ -87,14 +87,12 @@ impl UsageLedgerError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageSnapshot<T> {
     pub data_revision: i64,
-    pub active_epoch: i64,
     pub value: T,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
     pub data_revision: i64,
-    pub active_epoch: i64,
     pub sort_index: Vec<crate::usage::aggregate::SessionSortIndexItem>,
     pub rows: Vec<SessionUsageRow>,
 }
@@ -102,14 +100,12 @@ pub struct SessionSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionRowsSnapshot {
     pub data_revision: i64,
-    pub active_epoch: i64,
     pub rows: Vec<SessionUsageRow>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionDetailSnapshot {
     pub data_revision: i64,
-    pub active_epoch: i64,
     pub value: AggregateSessionDetail,
 }
 
@@ -141,13 +137,13 @@ pub struct UsageBuildScanProof {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageScanState {
-    pub epoch: UsageEpochState,
+    pub epoch: SourceUsageEpochState,
     pub plans: Vec<UsageSourceScanPlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsageWorkList {
-    pub(crate) epoch: UsageEpochState,
+    pub(crate) epoch: SourceUsageEpochState,
     pub(crate) threads: Vec<UsageWorkThread>,
 }
 
@@ -215,7 +211,7 @@ impl<'a> UsageLedger<'a> {
         &self,
         source_file_ids: &[i64],
         parser_version: i64,
-        expected_epoch: UsageEpochState,
+        expected_epoch: SourceUsageEpochState,
     ) -> Result<UsageScanState, UsageLedgerError> {
         let raw = self.ledger.load_usage_scan_state_exact(
             source_file_ids,
@@ -314,7 +310,7 @@ impl<'a> UsageLedger<'a> {
             .map_err(storage::StorageError::sqlite)?;
         let (active, build): (i64, Option<i64>) = tx
             .query_row(
-                "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+                "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -395,7 +391,7 @@ impl<'a> UsageLedger<'a> {
         let mut connection = self.ledger.connection()?;
         let current: Option<i64> = connection
             .query_row(
-                "SELECT usage_build_epoch FROM app_meta WHERE id=1",
+                "SELECT build_epoch FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| row.get(0),
             )
@@ -439,7 +435,7 @@ impl<'a> UsageLedger<'a> {
         Ok(AggregateReader::new(&connection).models(range)?)
     }
 
-    /// Freeze data_revision and active usage epoch in the same SQLite read
+    /// Freeze data_revision in the same SQLite read
     /// transaction as the Spec 04 aggregate query.
     pub fn summary_snapshot(
         &self,
@@ -449,19 +445,18 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         let value = AggregateReader::new(&transaction).summary(query)?;
         transaction
             .commit()
             .map_err(storage::StorageError::sqlite)?;
         Ok(UsageSnapshot {
             data_revision,
-            active_epoch,
             value,
         })
     }
 
-    /// Freeze revision/epoch and compute the complete Session snapshot in one
+    /// Freeze revision and compute the complete Session snapshot in one
     /// Deferred read transaction.  `seed_*` only selects the initial <=60
     /// complete rows; the lightweight index always covers the full scope.
     pub fn sessions_snapshot(
@@ -475,7 +470,7 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         let value = AggregateReader::new(&transaction).session_snapshot(
             range,
             &filter,
@@ -487,7 +482,6 @@ impl<'a> UsageLedger<'a> {
             .map_err(storage::StorageError::sqlite)?;
         Ok(SessionSnapshot {
             data_revision,
-            active_epoch,
             sort_index: value.sort_index,
             rows: value.rows,
         })
@@ -504,7 +498,7 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         if expected_data_revision.is_some_and(|expected| expected != data_revision) {
             return Err(UsageLedgerError::StaleDataRevision);
         }
@@ -515,7 +509,6 @@ impl<'a> UsageLedger<'a> {
             .map_err(storage::StorageError::sqlite)?;
         Ok(SessionRowsSnapshot {
             data_revision,
-            active_epoch,
             rows,
         })
     }
@@ -531,7 +524,7 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         if expected_data_revision.is_some_and(|expected| expected != data_revision) {
             return Err(UsageLedgerError::StaleDataRevision);
         }
@@ -542,7 +535,6 @@ impl<'a> UsageLedger<'a> {
             .map_err(storage::StorageError::sqlite)?;
         Ok(SessionDetailSnapshot {
             data_revision,
-            active_epoch,
             value,
         })
     }
@@ -555,14 +547,13 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         let value = AggregateReader::new(&transaction).models(range)?;
         transaction
             .commit()
             .map_err(storage::StorageError::sqlite)?;
         Ok(UsageSnapshot {
             data_revision,
-            active_epoch,
             value,
         })
     }
@@ -574,28 +565,27 @@ impl<'a> UsageLedger<'a> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
-        let (data_revision, active_epoch) = snapshot_meta(&transaction)?;
+        let data_revision = snapshot_meta(&transaction)?;
         let value = AggregateReader::new(&transaction).filter_options()?;
         transaction
             .commit()
             .map_err(storage::StorageError::sqlite)?;
         Ok(UsageSnapshot {
             data_revision,
-            active_epoch,
             value,
         })
     }
 }
 
-fn snapshot_meta(connection: &rusqlite::Connection) -> Result<(i64, i64), UsageLedgerError> {
+fn snapshot_meta(connection: &rusqlite::Connection) -> Result<i64, UsageLedgerError> {
     let value = connection
         .query_row(
-            "SELECT data_revision, usage_active_epoch FROM app_meta WHERE id = 1",
+            "SELECT data_revision FROM app_meta WHERE id = 1",
             [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| row.get::<_, i64>(0),
         )
         .map_err(storage::StorageError::sqlite)?;
-    if value.0 < 0 || value.1 < 0 {
+    if value < 0 {
         return Err(UsageLedgerError::Invalid("invalid usage snapshot metadata"));
     }
     Ok(value)
@@ -1416,9 +1406,16 @@ mod tests {
 
     #[test]
     fn t_perf_003_facade_groups_rows_by_thread_and_deduplicates_sources() {
-        let epoch = UsageEpochState::new(7, None, USAGE_PARSER_VERSION, None).unwrap();
+        let epoch = SourceUsageEpochState::new(
+            crate::source::SourceId::codex(),
+            7,
+            None,
+            USAGE_PARSER_VERSION,
+            None,
+        )
+        .unwrap();
         let raw = storage::usage::UsageWorkListState {
-            epoch,
+            epoch: epoch.clone(),
             rows: vec![
                 storage::usage::UsageWorkListRow {
                     source_file_id: 20,

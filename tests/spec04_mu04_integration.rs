@@ -394,7 +394,7 @@ fn request_and_wait(scanner: &ScanHandle, ledger: &Ledger) {
 fn active_epoch(connection: &Connection) -> i64 {
     connection
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )
@@ -408,8 +408,9 @@ fn active_event_rows(
     let mut statement = connection
         .prepare(
             "SELECT model,reasoning_effort,total_tokens,estimated_cost_nanos_usd
-             FROM usage_events WHERE ledger_epoch=?1
-             ORDER BY source_file_id,source_start_offset",
+             FROM usage_events
+             WHERE source='codex' AND source_epoch=?1
+             ORDER BY occurred_at_ms,event_id",
         )
         .expect("prepare active event query");
     statement
@@ -483,7 +484,8 @@ async fn t_mu04_f01_single_fixture_closes_scanner_db_aggregate_api_contract() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=?1",
+                "SELECT count(*) FROM usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1",
                 [epoch],
                 |row| row.get::<_, i64>(0),
             )
@@ -607,14 +609,15 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     let old_epoch = active_epoch(&connection);
     let old_event_count: i64 = connection
         .query_row(
-            "SELECT count(*) FROM usage_events WHERE ledger_epoch=?1",
+            "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [old_epoch],
             |row| row.get(0),
         )
         .expect("count old active events");
     let old_token_total: i64 = connection
         .query_row(
-            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events WHERE ledger_epoch=?1",
+            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events
+             WHERE source='codex' AND source_epoch=?1",
             [old_epoch],
             |row| row.get(0),
         )
@@ -627,11 +630,16 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     // independence scenario.
     connection
         .execute(
-            "UPDATE app_meta SET usage_parser_version=4,
-             cost_algorithm_version=1,pricing_catalog_version=1 WHERE id=1",
+            "UPDATE app_meta SET cost_algorithm_version=1,pricing_catalog_version=1 WHERE id=1",
             [],
         )
         .expect("mark old app versions");
+    connection
+        .execute(
+            "UPDATE source_usage_epochs SET active_parser_version=4 WHERE source='codex'",
+            [],
+        )
+        .expect("mark old usage parser version");
     connection
         .execute(
             "UPDATE source_checkpoints SET parser_version=4
@@ -650,14 +658,14 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     connection
         .execute(
             "UPDATE usage_events SET model='unknown',reasoning_effort=NULL
-             WHERE ledger_epoch=?1 AND model='gpt-5.6-sol'",
+             WHERE source='codex' AND source_epoch=?1 AND model='gpt-5.6-sol'",
             [old_epoch],
         )
         .expect("erase one historical context");
     let alias_event_id: String = connection
         .query_row(
             "SELECT event_id FROM usage_events
-             WHERE ledger_epoch=?1 AND model='codex-auto-review'",
+             WHERE source='codex' AND source_epoch=?1 AND model='codex-auto-review'",
             [old_epoch],
             |row| row.get(0),
         )
@@ -665,7 +673,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     connection
         .execute(
             "UPDATE usage_events SET estimated_cost_nanos_usd=NULL
-             WHERE ledger_epoch=?1 AND event_id=?2",
+             WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
             params![old_epoch, alias_event_id],
         )
         .expect("clear legacy alias cost");
@@ -677,9 +685,10 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     let connection = Connection::open(&fixture.db).expect("reopen F02 database");
     let versions: (i64, i64, i64, i64, Option<i64>) = connection
         .query_row(
-            "SELECT usage_parser_version,cost_algorithm_version,
-                    pricing_catalog_version,usage_active_epoch,usage_build_epoch
-             FROM app_meta WHERE id=1",
+            "SELECT sue.active_parser_version,am.cost_algorithm_version,
+                    am.pricing_catalog_version,sue.active_epoch,sue.build_epoch
+             FROM app_meta am JOIN source_usage_epochs sue ON sue.source='codex'
+             WHERE am.id=1",
             [],
             |row| {
                 Ok((
@@ -699,7 +708,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     let alias_cost: Option<i64> = connection
         .query_row(
             "SELECT estimated_cost_nanos_usd FROM usage_events
-             WHERE ledger_epoch=?1 AND event_id=?2",
+             WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
             params![old_epoch, alias_event_id],
             |row| row.get(0),
         )
@@ -707,7 +716,8 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(alias_cost, Some(8_000_000));
     let alias_model: String = connection
         .query_row(
-            "SELECT model FROM usage_events WHERE ledger_epoch=?1 AND event_id=?2",
+            "SELECT model FROM usage_events
+             WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
             params![old_epoch, alias_event_id],
             |row| row.get(0),
         )
@@ -739,9 +749,10 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_ne!(new_epoch, old_epoch);
     let final_versions: (i64, Option<i64>, i64, i64) = connection
         .query_row(
-            "SELECT usage_parser_version,usage_build_epoch,
-                    cost_algorithm_version,pricing_catalog_version
-             FROM app_meta WHERE id=1",
+            "SELECT sue.active_parser_version,sue.build_epoch,
+                    am.cost_algorithm_version,am.pricing_catalog_version
+             FROM app_meta am JOIN source_usage_epochs sue ON sue.source='codex'
+             WHERE am.id=1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -775,7 +786,8 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=?1",
+                "SELECT count(*) FROM usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1",
                 [new_epoch],
                 |row| row.get::<_, i64>(0),
             )
@@ -786,7 +798,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
         connection
             .query_row(
                 "SELECT count(DISTINCT event_id) FROM usage_event_occurrences
-                 WHERE ledger_epoch=?1",
+                 WHERE source='codex' AND ledger_epoch=?1",
                 [new_epoch],
                 |row| row.get::<_, i64>(0),
             )
@@ -822,7 +834,7 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
         .query_row(
             "SELECT model,input_tokens,cached_tokens,cache_write_tokens,
                     output_tokens,estimated_cost_nanos_usd
-             FROM usage_events WHERE ledger_epoch=?1",
+             FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [old_epoch],
             |row| {
                 Ok((
@@ -860,7 +872,7 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
     connection
         .execute(
             "UPDATE usage_events SET estimated_cost_nanos_usd=NULL
-             WHERE ledger_epoch=?1 AND model='gpt-reserve'",
+             WHERE source='codex' AND source_epoch=?1 AND model='gpt-reserve'",
             [old_epoch],
         )
         .expect("clear old Reserve event cost");
@@ -871,8 +883,9 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
     let versions: (i64, i64, i64, i64, Option<i64>) = connection
         .query_row(
             "SELECT cost_algorithm_version,pricing_catalog_version,
-                    usage_active_epoch,usage_parser_version,usage_build_epoch
-             FROM app_meta WHERE id=1",
+                    sue.active_epoch,sue.active_parser_version,sue.build_epoch
+             FROM app_meta am JOIN source_usage_epochs sue ON sue.source='codex'
+             WHERE am.id=1",
             [],
             |row| {
                 Ok((
@@ -900,7 +913,7 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
         .query_row(
             "SELECT model,input_tokens,cached_tokens,cache_write_tokens,
                     output_tokens,estimated_cost_nanos_usd
-             FROM usage_events WHERE ledger_epoch=?1",
+             FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [old_epoch],
             |row| {
                 Ok((

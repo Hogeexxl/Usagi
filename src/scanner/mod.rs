@@ -259,6 +259,7 @@ fn codex_storage_error_code(error: &crate::source::SourceStorageError) -> &'stat
         crate::source::SourceStorageError::NotImplemented
         | crate::source::SourceStorageError::UnsupportedOperation(_)
         | crate::source::SourceStorageError::TransactionClosed
+        | crate::source::SourceStorageError::TransactionPoisoned
         | crate::source::SourceStorageError::SourceMismatch
         | crate::source::SourceStorageError::InvalidRequest(_) => "CODEX_SOURCE_BINDING_FAILED",
         crate::source::SourceStorageError::CompatibilityOperationFailed(_) => {
@@ -1407,8 +1408,8 @@ mod tests {
         let connection = Connection::open(ledger.database_path()).expect("open ledger query");
         connection
             .query_row(
-                "SELECT usage_active_epoch, usage_build_epoch, usage_parser_version
-                 FROM app_meta WHERE id = 1",
+                "SELECT active_epoch, build_epoch, active_parser_version
+                 FROM source_usage_epochs WHERE source = 'codex'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1431,7 +1432,8 @@ mod tests {
             .expect("open ledger query")
             .query_row(
                 "SELECT COUNT(*) FROM usage_events
-                 WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)",
+                 WHERE source='codex' AND source_epoch=(
+                    SELECT active_epoch FROM source_usage_epochs WHERE source='codex')",
                 [],
                 |row| row.get(0),
             )
@@ -1443,7 +1445,8 @@ mod tests {
             .expect("open ledger query")
             .query_row(
                 "SELECT COUNT(*) FROM usage_session_quarantine
-                 WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)",
+                 WHERE ledger_epoch=(
+                    SELECT active_epoch FROM source_usage_epochs WHERE source='codex')",
                 [],
                 |row| row.get(0),
             )
@@ -1731,7 +1734,7 @@ not-json
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read guardian fixture schema version");
-        assert_eq!(user_version, 10);
+        assert_eq!(user_version, 11);
         let child_source_id = source_checkpoint(&fixture.ledger, &fixture.child_path).0;
         let file_before = fs::File::open(&fixture.child_path).expect("open guardian rollout");
         let metadata_before = file_before.metadata().expect("stat guardian rollout");
@@ -1856,7 +1859,7 @@ not-json
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read guardian fixture schema version");
-        assert_eq!(user_version, 10);
+        assert_eq!(user_version, 11);
         let child_source_id = source_checkpoint(&fixture.ledger, &fixture.child_path).0;
         let usage_checkpoint_before =
             checkpoint_state(&fixture.ledger, &fixture.child_path, "usage");
@@ -2425,7 +2428,11 @@ not-json
 
         Connection::open(fixture.ledger.database_path())
             .unwrap()
-            .execute("UPDATE app_meta SET usage_parser_version=1 WHERE id=1", [])
+            .execute(
+                "UPDATE source_usage_epochs
+                 SET active_parser_version=1 WHERE source='codex'",
+                [],
+            )
             .unwrap();
         let (parser_result, parser_transition) = fixture.run_observed();
         parser_result.expect("parser mismatch rebuild and activation");
@@ -2443,7 +2450,11 @@ not-json
 
         let connection = Connection::open(fixture.ledger.database_path()).unwrap();
         connection
-            .execute("UPDATE app_meta SET usage_parser_version=1 WHERE id=1", [])
+            .execute(
+                "UPDATE source_usage_epochs
+                 SET active_parser_version=1 WHERE source='codex'",
+                [],
+            )
             .unwrap();
         connection
             .execute(
@@ -2485,7 +2496,8 @@ not-json
             .execute(
                 "UPDATE usage_source_states SET previous_total_fingerprint=X'00'
                  WHERE source_file_id=?1
-                   AND ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)",
+                   AND ledger_epoch=(
+                       SELECT active_epoch FROM source_usage_epochs WHERE source='codex')",
                 [failed_source_id],
             )
             .unwrap();

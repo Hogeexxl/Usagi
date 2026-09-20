@@ -444,8 +444,8 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
 
     let epochs: (i64, Option<i64>, i64) = connection
         .query_row(
-            "SELECT usage_active_epoch, usage_build_epoch, usage_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch, build_epoch, active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -559,7 +559,8 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
     let usage_root_before: String = before
         .query_row(
             "SELECT root_session_id FROM usage_events
-             WHERE thread_id=?1 ORDER BY occurred_at_ms,source_start_offset LIMIT 1",
+             WHERE source='codex' AND thread_id=?1
+             ORDER BY occurred_at_ms LIMIT 1",
             [child.as_str()],
             |row| row.get(0),
         )
@@ -661,7 +662,8 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
     let usage_root_after: String = after
         .query_row(
             "SELECT root_session_id FROM usage_events
-             WHERE thread_id=?1 ORDER BY occurred_at_ms,source_start_offset LIMIT 1",
+             WHERE source='codex' AND thread_id=?1
+             ORDER BY occurred_at_ms LIMIT 1",
             [child.as_str()],
             |row| row.get(0),
         )

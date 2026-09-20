@@ -504,14 +504,16 @@ impl<'connection> AggregateReader<'connection> {
     pub fn summary(&self, query: SummaryQuery) -> Result<UsageSummary, AggregateError> {
         let range = query.range();
         validate_range(range)?;
-        let epoch = self.active_epoch()?;
-        let (totals, values) = self.aggregate_for_summary(epoch, &query)?;
+        let codex_epoch = self.codex_epoch()?;
+        let (totals, values) = self.aggregate_for_summary(&query)?;
         let session_count: i64 = self
             .connection
             .query_row(
                 &format!(
                     "SELECT COUNT(DISTINCT ue.root_session_id)
                      FROM usage_events ue
+                     JOIN source_usage_epochs sue
+                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
                      LEFT JOIN threads root ON root.thread_id=ue.root_session_id
                      WHERE {}",
                     summary_where_clause(query.filter())
@@ -526,6 +528,8 @@ impl<'connection> AggregateReader<'connection> {
                 &format!(
                     "SELECT COUNT(DISTINCT ue.root_session_id)
                      FROM usage_events ue
+                     JOIN source_usage_epochs sue
+                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
                      LEFT JOIN threads root ON root.thread_id=ue.root_session_id
                      WHERE {} AND ue.estimated_cost_nanos_usd IS NULL",
                     summary_where_clause(query.filter())
@@ -536,9 +540,11 @@ impl<'connection> AggregateReader<'connection> {
             .map_err(map_sql_error)?;
         let complete_session_cost_per_million_tokens =
             self.complete_session_cost_per_million_tokens(&query, &values)?;
-        let error_sessions =
-            i64::try_from(self.quarantined_roots(epoch, range, query.filter())?.len())
-                .map_err(|_| AggregateError::ArithmeticOverflow)?;
+        let error_sessions = i64::try_from(
+            self.quarantined_roots(codex_epoch, range, query.filter())?
+                .len(),
+        )
+        .map_err(|_| AggregateError::ArithmeticOverflow)?;
         let complete_sessions = session_count
             .checked_sub(incomplete_sessions)
             .ok_or(AggregateError::InvariantViolation)?;
@@ -572,7 +578,6 @@ impl<'connection> AggregateReader<'connection> {
     ) -> Result<SessionUsagePage, AggregateError> {
         validate_range(range)?;
         page.validate()?;
-        let epoch = self.active_epoch()?;
         let limit = i64::try_from(page.limit).map_err(|_| AggregateError::InvalidPage)?;
         let (after_time, after_id) = page
             .after
@@ -588,22 +593,23 @@ impl<'connection> AggregateReader<'connection> {
             .connection
             .prepare(
                 "WITH roots AS (
-               SELECT root_session_id, MAX(occurred_at_ms) AS last_activity_at_ms
-               FROM usage_events WHERE ledger_epoch=?1 AND occurred_at_ms>=?2 AND occurred_at_ms<?3
-               GROUP BY root_session_id
+               SELECT ue.root_session_id, MAX(ue.occurred_at_ms) AS last_activity_at_ms
+               FROM usage_events ue
+               JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+               WHERE ue.occurred_at_ms>=?1 AND ue.occurred_at_ms<?2
+               GROUP BY ue.root_session_id
              )
              SELECT roots.root_session_id, roots.last_activity_at_ms,
                     threads.title, threads.project_name, threads.project_path
              FROM roots LEFT JOIN threads ON threads.thread_id=roots.root_session_id
-             WHERE (?4 IS NULL OR roots.last_activity_at_ms<?4
-                    OR (roots.last_activity_at_ms=?4 AND roots.root_session_id>?5))
-             ORDER BY roots.last_activity_at_ms DESC, roots.root_session_id ASC LIMIT ?6",
+             WHERE (?3 IS NULL OR roots.last_activity_at_ms<?3
+                    OR (roots.last_activity_at_ms=?3 AND roots.root_session_id>?4))
+             ORDER BY roots.last_activity_at_ms DESC, roots.root_session_id ASC LIMIT ?5",
             )
             .map_err(map_sql_error)?;
         let rows = statement
             .query_map(
                 params![
-                    epoch,
                     range.start_ms,
                     range.end_ms,
                     after_time,
@@ -628,15 +634,17 @@ impl<'connection> AggregateReader<'connection> {
         for (root_session_id, last_activity_at_ms, title, project_name, project_path) in
             rows.into_iter().take(page.limit)
         {
-            let inclusive_usage = self.aggregate_for_root(epoch, range, &root_session_id, None)?;
-            let self_usage = self.aggregate_for_root(epoch, range, &root_session_id, Some(true))?;
-            let subagent_usage =
-                self.aggregate_for_root(epoch, range, &root_session_id, Some(false))?;
+            let inclusive_usage = self.aggregate_for_root(range, &root_session_id, None)?;
+            let self_usage = self.aggregate_for_root(range, &root_session_id, Some(true))?;
+            let subagent_usage = self.aggregate_for_root(range, &root_session_id, Some(false))?;
             let subagent_count = self.connection.query_row(
-                "SELECT COUNT(DISTINCT thread_id) FROM usage_events WHERE ledger_epoch=?1 AND root_session_id=?2 AND thread_id<>root_session_id AND occurred_at_ms>=?3 AND occurred_at_ms<?4",
-                params![epoch, root_session_id, range.start_ms, range.end_ms], |row| row.get(0),
+                "SELECT COUNT(DISTINCT ue.thread_id) FROM usage_events ue
+                 JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
+                   AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3",
+                params![root_session_id, range.start_ms, range.end_ms], |row| row.get(0),
             ).map_err(map_sql_error)?;
-            let models_used = self.models_for_root(epoch, range, &root_session_id)?;
+            let models_used = self.models_for_root(range, &root_session_id)?;
             let data_status = status_for_totals(&inclusive_usage);
             output.push(SessionUsageRow {
                 root_session_id,
@@ -665,7 +673,6 @@ impl<'connection> AggregateReader<'connection> {
 
     fn session_sort_aggregates(
         &self,
-        epoch: i64,
         range: TimeRange,
         roots: &[String],
     ) -> Result<Vec<SessionSortAggregate>, AggregateError> {
@@ -694,15 +701,11 @@ impl<'connection> AggregateReader<'connection> {
             .map(|value| format!("?{value}"))
             .collect::<Vec<_>>()
             .join(",");
-        let root_placeholders = (4..4 + roots.len())
+        let root_placeholders = (3..3 + roots.len())
             .map(|value| format!("?{value}"))
             .collect::<Vec<_>>()
             .join(",");
-        let mut values = vec![
-            Value::Integer(epoch),
-            Value::Integer(range.start_ms),
-            Value::Integer(range.end_ms),
-        ];
+        let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
         values.extend(roots.iter().cloned().map(Value::Text));
 
         let metadata_sql = format!(
@@ -714,7 +717,7 @@ impl<'connection> AggregateReader<'connection> {
             .prepare(&metadata_sql)
             .map_err(map_sql_error)?;
         let metadata = metadata_statement
-            .query_map(params_from_iter(values[3..].iter()), |row| {
+            .query_map(params_from_iter(values[2..].iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -741,7 +744,9 @@ impl<'connection> AggregateReader<'connection> {
                     COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
              FROM usage_events
-             WHERE ledger_epoch=?1 AND occurred_at_ms>=?2 AND occurred_at_ms<?3
+             JOIN source_usage_epochs sue
+               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
+             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
                AND root_session_id IN ({root_placeholders})
              GROUP BY root_session_id, thread_id"
         );
@@ -784,7 +789,9 @@ impl<'connection> AggregateReader<'connection> {
         let model_sql = format!(
             "SELECT root_session_id, model
              FROM usage_events
-             WHERE ledger_epoch=?1 AND occurred_at_ms>=?2 AND occurred_at_ms<?3
+             JOIN source_usage_epochs sue
+               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
+             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
                AND root_session_id IN ({root_placeholders})
              GROUP BY root_session_id, model
              ORDER BY root_session_id ASC, MIN(occurred_at_ms) ASC,
@@ -820,14 +827,14 @@ impl<'connection> AggregateReader<'connection> {
         seed_sort_order: SessionSortOrder,
     ) -> Result<SessionSnapshot, AggregateError> {
         validate_range(range)?;
-        let epoch = self.active_epoch()?;
-        let roots = self.eligible_roots(epoch, range, filter)?;
-        let aggregates = self.session_sort_aggregates(epoch, range, &roots)?;
+        let codex_epoch = self.codex_epoch()?;
+        let roots = self.eligible_roots(range, filter)?;
+        let aggregates = self.session_sort_aggregates(range, &roots)?;
         let mut sort_index = aggregates
             .iter()
             .map(|aggregate| aggregate.sort_index_item())
             .collect::<Vec<_>>();
-        let quarantined = self.quarantined_roots(epoch, range, filter)?;
+        let quarantined = self.quarantined_roots(codex_epoch, range, filter)?;
         sort_index.extend(quarantined.iter().map(QuarantinedRoot::sort_index_item));
         let mut seed_index = sort_index.clone();
         seed_index.sort_by(|left, right| {
@@ -842,7 +849,7 @@ impl<'connection> AggregateReader<'connection> {
             .iter()
             .map(|item| match error_roots.get(&item.root_session_id) {
                 Some(root) => Ok(root.session_row()),
-                None => self.session_row_for_root(epoch, range, &item.root_session_id),
+                None => self.session_row_for_root(range, &item.root_session_id),
             })
             .collect::<Result<Vec<_>, _>>()?;
         sort_index.sort_by(|left, right| left.root_session_id.cmp(&right.root_session_id));
@@ -870,13 +877,13 @@ impl<'connection> AggregateReader<'connection> {
         {
             return Err(AggregateError::InvalidSessionIds);
         }
-        let epoch = self.active_epoch()?;
+        let codex_epoch = self.codex_epoch()?;
         let mut eligible = self
-            .eligible_roots(epoch, range, filter)?
+            .eligible_roots(range, filter)?
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
         let error_roots = self
-            .quarantined_roots(epoch, range, filter)?
+            .quarantined_roots(codex_epoch, range, filter)?
             .into_iter()
             .map(|root| {
                 eligible.insert(root.root_session_id.clone());
@@ -890,7 +897,7 @@ impl<'connection> AggregateReader<'connection> {
             .iter()
             .map(|root| match error_roots.get(root) {
                 Some(error) => Ok(error.session_row()),
-                None => self.session_row_for_root(epoch, range, root),
+                None => self.session_row_for_root(range, root),
             })
             .collect()
     }
@@ -908,8 +915,7 @@ impl<'connection> AggregateReader<'connection> {
         if root_session_id.is_empty() || root_session_id.chars().any(char::is_control) {
             return Err(AggregateError::InvalidSessionIds);
         }
-        let epoch = self.active_epoch()?;
-        let eligible = self.eligible_roots(epoch, range, filter)?;
+        let eligible = self.eligible_roots(range, filter)?;
         if !eligible.iter().any(|id| id == root_session_id) {
             return Err(AggregateError::InvalidSessionIds);
         }
@@ -925,11 +931,12 @@ impl<'connection> AggregateReader<'connection> {
                         COALESCE(SUM(CASE WHEN cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
                         SUM(estimated_cost_nanos_usd),
                         COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
-                        COUNT(*), reasoning_effort,
-                        MAX(file_generation), MAX(source_file_id), MAX(source_end_offset)
+                        COUNT(*), reasoning_effort
                  FROM usage_events
-                 WHERE ledger_epoch=?1 AND root_session_id=?2
-                   AND occurred_at_ms>=?3 AND occurred_at_ms<?4
+                 JOIN source_usage_epochs sue
+                   ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
+                 WHERE root_session_id=?1
+                   AND occurred_at_ms>=?2 AND occurred_at_ms<?3
                  GROUP BY thread_id, model, reasoning_effort
                  ORDER BY thread_id ASC, MIN(occurred_at_ms) ASC,
                           MIN(event_id) ASC, model ASC, reasoning_effort ASC",
@@ -937,7 +944,7 @@ impl<'connection> AggregateReader<'connection> {
             .map_err(map_sql_error)?;
         let mut groups = statement
             .query_map(
-                params![epoch, root_session_id, range.start_ms, range.end_ms],
+                params![root_session_id, range.start_ms, range.end_ms],
                 detail_row,
             )
             .map_err(map_sql_error)?
@@ -1001,9 +1008,6 @@ impl<'connection> AggregateReader<'connection> {
                 right
                     .last_activity_at_ms
                     .cmp(&left.last_activity_at_ms)
-                    .then_with(|| right.file_generation.cmp(&left.file_generation))
-                    .then_with(|| right.source_file_id.cmp(&left.source_file_id))
-                    .then_with(|| right.source_end_offset.cmp(&left.source_end_offset))
                     .then_with(|| left.model.cmp(&right.model))
                     .then_with(|| match (&left.reasoning_effort, &right.reasoning_effort) {
                         (None, None) => std::cmp::Ordering::Equal,
@@ -1085,7 +1089,6 @@ impl<'connection> AggregateReader<'connection> {
 
     pub fn models(&self, range: TimeRange) -> Result<ModelUsageRows, AggregateError> {
         validate_range(range)?;
-        let epoch = self.active_epoch()?;
         let mut statement = self.connection.prepare(
             "SELECT model, MIN(occurred_at_ms), MAX(occurred_at_ms), COUNT(DISTINCT root_session_id),
                     COALESCE(SUM(input_tokens),0), COALESCE(SUM(cached_tokens),0),
@@ -1095,11 +1098,14 @@ impl<'connection> AggregateReader<'connection> {
                     SUM(estimated_cost_nanos_usd),
                     COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events WHERE ledger_epoch=?1 AND occurred_at_ms>=?2 AND occurred_at_ms<?3
+             FROM usage_events
+             JOIN source_usage_epochs sue
+               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
+             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
              GROUP BY model ORDER BY model ASC",
         ).map_err(map_sql_error)?;
         statement
-            .query_map(params![epoch, range.start_ms, range.end_ms], model_row)
+            .query_map(params![range.start_ms, range.end_ms], model_row)
             .map_err(map_sql_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_sql_error)?
@@ -1121,18 +1127,18 @@ impl<'connection> AggregateReader<'connection> {
     }
 
     pub fn filter_options(&self) -> Result<FilterOptions, AggregateError> {
-        let epoch = self.active_epoch()?;
         let mut models_statement = self
             .connection
             .prepare(
                 "SELECT DISTINCT model
                  FROM usage_events
-                 WHERE ledger_epoch=?1
+                 JOIN source_usage_epochs sue
+                   ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
                  ORDER BY model ASC",
             )
             .map_err(map_sql_error)?;
         let models = models_statement
-            .query_map(params![epoch], |row| row.get(0))
+            .query_map([], |row| row.get(0))
             .map_err(map_sql_error)?
             .collect::<rusqlite::Result<Vec<String>>>()
             .map_err(map_sql_error)?
@@ -1152,7 +1158,8 @@ impl<'connection> AggregateReader<'connection> {
                 "WITH usage_roots AS (
                    SELECT DISTINCT root_session_id
                    FROM usage_events
-                   WHERE ledger_epoch=?1
+                   JOIN source_usage_epochs sue
+                     ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
                  )
                  SELECT root.project_kind, root.project_name, root.project_path
                  FROM usage_roots
@@ -1168,7 +1175,7 @@ impl<'connection> AggregateReader<'connection> {
             )
             .map_err(map_sql_error)?;
         let project_rows = projects_statement
-            .query_map(params![epoch], |row| {
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -1257,10 +1264,13 @@ impl<'connection> AggregateReader<'connection> {
         Ok(())
     }
 
-    fn active_epoch(&self) -> Result<i64, AggregateError> {
+    /// Read the Codex epoch only for Codex-private quarantine state. Canonical
+    /// usage queries never use this value; they join every source's active
+    /// epoch through `source_usage_epochs`.
+    fn codex_epoch(&self) -> Result<i64, AggregateError> {
         self.connection
             .query_row(
-                "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+                "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| row.get(0),
             )
@@ -1269,7 +1279,6 @@ impl<'connection> AggregateReader<'connection> {
 
     fn eligible_roots(
         &self,
-        epoch: i64,
         range: TimeRange,
         filter: &UsageFilter,
     ) -> Result<Vec<String>, AggregateError> {
@@ -1278,18 +1287,15 @@ impl<'connection> AggregateReader<'connection> {
             "root.root_session_id=root.thread_id".to_owned(),
             "root.parent_thread_id IS NULL".to_owned(),
             "EXISTS (SELECT 1 FROM usage_events ue_any
-                     WHERE ue_any.ledger_epoch=?1
-                       AND ue_any.root_session_id=root.thread_id
-                       AND ue_any.occurred_at_ms>=?2
-                       AND ue_any.occurred_at_ms<?3)"
+                     JOIN source_usage_epochs sue_any
+                       ON sue_any.source=ue_any.source AND sue_any.active_epoch=ue_any.source_epoch
+                     WHERE ue_any.root_session_id=root.thread_id
+                       AND ue_any.occurred_at_ms>=?1
+                       AND ue_any.occurred_at_ms<?2)"
                 .to_owned(),
         ];
-        let mut values = vec![
-            Value::Integer(epoch),
-            Value::Integer(range.start_ms),
-            Value::Integer(range.end_ms),
-        ];
-        let mut next = 4_usize;
+        let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
+        let mut next = 3_usize;
         if !filter.models.is_empty() {
             let placeholders = (next..next + filter.models.len())
                 .map(|value| format!("?{value}"))
@@ -1297,10 +1303,11 @@ impl<'connection> AggregateReader<'connection> {
                 .join(",");
             clauses.push(format!(
                 "EXISTS (SELECT 1 FROM usage_events ue_model
-                         WHERE ue_model.ledger_epoch=?1
-                           AND ue_model.root_session_id=root.thread_id
-                           AND ue_model.occurred_at_ms>=?2
-                           AND ue_model.occurred_at_ms<?3
+                         JOIN source_usage_epochs sue_model
+                           ON sue_model.source=ue_model.source AND sue_model.active_epoch=ue_model.source_epoch
+                         WHERE ue_model.root_session_id=root.thread_id
+                           AND ue_model.occurred_at_ms>=?1
+                           AND ue_model.occurred_at_ms<?2
                            AND ue_model.model IN ({placeholders}))"
             ));
             values.extend(filter.models.iter().cloned().map(Value::Text));
@@ -1340,7 +1347,6 @@ impl<'connection> AggregateReader<'connection> {
 
     fn session_row_for_root(
         &self,
-        epoch: i64,
         range: TimeRange,
         root: &str,
     ) -> Result<SessionUsageRow, AggregateError> {
@@ -1351,10 +1357,12 @@ impl<'connection> AggregateReader<'connection> {
                         MAX(ue.occurred_at_ms)
                  FROM threads root
                  JOIN usage_events ue ON ue.root_session_id=root.thread_id
-                 WHERE root.thread_id=?1 AND ue.ledger_epoch=?2
-                   AND ue.occurred_at_ms>=?3 AND ue.occurred_at_ms<?4
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE root.thread_id=?1
+                   AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3
                  GROUP BY root.thread_id, root.title, root.project_name, root.project_path",
-                params![root, epoch, range.start_ms, range.end_ms],
+                params![root, range.start_ms, range.end_ms],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
@@ -1365,20 +1373,22 @@ impl<'connection> AggregateReader<'connection> {
                 },
             )
             .map_err(map_sql_error)?;
-        let inclusive_usage = self.aggregate_for_root(epoch, range, root, None)?;
-        let self_usage = self.aggregate_for_root(epoch, range, root, Some(true))?;
-        let subagent_usage = self.aggregate_for_root(epoch, range, root, Some(false))?;
+        let inclusive_usage = self.aggregate_for_root(range, root, None)?;
+        let self_usage = self.aggregate_for_root(range, root, Some(true))?;
+        let subagent_usage = self.aggregate_for_root(range, root, Some(false))?;
         let subagent_count = self
             .connection
             .query_row(
-                "SELECT COUNT(DISTINCT thread_id) FROM usage_events
-                 WHERE ledger_epoch=?1 AND root_session_id=?2 AND thread_id<>root_session_id
-                   AND occurred_at_ms>=?3 AND occurred_at_ms<?4",
-                params![epoch, root, range.start_ms, range.end_ms],
+                "SELECT COUNT(DISTINCT ue.thread_id) FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE ue.root_session_id=?1 AND ue.thread_id<>ue.root_session_id
+                   AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3",
+                params![root, range.start_ms, range.end_ms],
                 |row| row.get(0),
             )
             .map_err(map_sql_error)?;
-        let models_used = self.models_for_root(epoch, range, root)?;
+        let models_used = self.models_for_root(range, root)?;
         let data_status = status_for_totals(&inclusive_usage);
         Ok(SessionUsageRow {
             root_session_id: root.to_owned(),
@@ -1481,22 +1491,20 @@ impl<'connection> AggregateReader<'connection> {
 
     fn aggregate_for_root(
         &self,
-        epoch: i64,
         range: TimeRange,
         root: &str,
         self_only: Option<bool>,
     ) -> Result<TokenTotals, AggregateError> {
         let predicate = match self_only {
-            None => "root_session_id=?4",
-            Some(true) => "root_session_id=?4 AND thread_id=root_session_id",
-            Some(false) => "root_session_id=?4 AND thread_id<>root_session_id",
+            None => "root_session_id=?3",
+            Some(true) => "root_session_id=?3 AND thread_id=root_session_id",
+            Some(false) => "root_session_id=?3 AND thread_id<>root_session_id",
         };
-        self.aggregate_for(epoch, range, predicate, &[root])
+        self.aggregate_for(range, predicate, &[root])
     }
 
     fn aggregate_for(
         &self,
-        epoch: i64,
         range: TimeRange,
         predicate: &str,
         extra: &[&str],
@@ -1508,9 +1516,12 @@ impl<'connection> AggregateReader<'connection> {
                     SUM(estimated_cost_nanos_usd),
                     COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events WHERE ledger_epoch=?1 AND occurred_at_ms>=?2 AND occurred_at_ms<?3 AND {predicate}"
+             FROM usage_events
+             JOIN source_usage_epochs sue
+               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
+             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2 AND {predicate}"
         );
-        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&epoch, &range.start_ms, &range.end_ms];
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&range.start_ms, &range.end_ms];
         values.extend(extra.iter().map(|value| value as &dyn rusqlite::ToSql));
         let row = self
             .connection
@@ -1531,6 +1542,8 @@ impl<'connection> AggregateReader<'connection> {
                         SUM(ue.estimated_cost_nanos_usd) AS session_cost_nanos_usd,
                         SUM(ue.total_tokens) AS session_tokens
                  FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
                  LEFT JOIN threads root ON root.thread_id=ue.root_session_id
                  WHERE {}
                  GROUP BY ue.root_session_id
@@ -1549,10 +1562,9 @@ impl<'connection> AggregateReader<'connection> {
 
     fn aggregate_for_summary(
         &self,
-        epoch: i64,
         query: &SummaryQuery,
     ) -> Result<(TokenTotals, Vec<Value>), AggregateError> {
-        let values = summary_values(epoch, query);
+        let values = summary_values(query);
         let sql = format!(
             "SELECT COALESCE(SUM(ue.input_tokens),0), COALESCE(SUM(ue.cached_tokens),0), SUM(ue.cache_write_tokens),
                     COALESCE(SUM(ue.output_tokens),0), COALESCE(SUM(ue.reasoning_tokens),0), COALESCE(SUM(ue.total_tokens),0),
@@ -1561,6 +1573,8 @@ impl<'connection> AggregateReader<'connection> {
                     COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
              FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
              LEFT JOIN threads root ON root.thread_id=ue.root_session_id
              WHERE {}",
             summary_where_clause(query.filter())
@@ -1572,15 +1586,10 @@ impl<'connection> AggregateReader<'connection> {
         Ok((row.into_totals()?, values))
     }
 
-    fn models_for_root(
-        &self,
-        epoch: i64,
-        range: TimeRange,
-        root: &str,
-    ) -> Result<Vec<String>, AggregateError> {
-        let mut statement = self.connection.prepare("SELECT model FROM usage_events WHERE ledger_epoch=?1 AND root_session_id=?2 AND occurred_at_ms>=?3 AND occurred_at_ms<?4 GROUP BY model ORDER BY MIN(occurred_at_ms), MIN(event_id), model").map_err(map_sql_error)?;
+    fn models_for_root(&self, range: TimeRange, root: &str) -> Result<Vec<String>, AggregateError> {
+        let mut statement = self.connection.prepare("SELECT ue.model FROM usage_events ue JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch WHERE ue.root_session_id=?1 AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
         statement
-            .query_map(params![epoch, root, range.start_ms, range.end_ms], |row| {
+            .query_map(params![root, range.start_ms, range.end_ms], |row| {
                 row.get(0)
             })
             .map_err(map_sql_error)?
@@ -1589,9 +1598,8 @@ impl<'connection> AggregateReader<'connection> {
     }
 }
 
-fn summary_values(epoch: i64, query: &SummaryQuery) -> Vec<Value> {
+fn summary_values(query: &SummaryQuery) -> Vec<Value> {
     let mut values = vec![
-        Value::Integer(epoch),
         Value::Integer(query.range().start_ms),
         Value::Integer(query.range().end_ms),
     ];
@@ -1609,11 +1617,10 @@ fn summary_values(epoch: i64, query: &SummaryQuery) -> Vec<Value> {
 
 fn summary_where_clause(filter: &UsageFilter) -> String {
     let mut clauses = vec![
-        "ue.ledger_epoch=?1".to_owned(),
-        "ue.occurred_at_ms>=?2".to_owned(),
-        "ue.occurred_at_ms<?3".to_owned(),
+        "ue.occurred_at_ms>=?1".to_owned(),
+        "ue.occurred_at_ms<?2".to_owned(),
     ];
-    let mut next_placeholder = 4_usize;
+    let mut next_placeholder = 3_usize;
     if !filter.models.is_empty() {
         let placeholders = (next_placeholder..next_placeholder + filter.models.len())
             .map(|value| format!("?{value}"))
@@ -1845,9 +1852,6 @@ struct DetailAggregateRow {
     model: String,
     reasoning_effort: Option<String>,
     last_activity_at_ms: i64,
-    file_generation: i64,
-    source_file_id: i64,
-    source_end_offset: i64,
     totals: TokenTotals,
 }
 
@@ -1894,9 +1898,6 @@ fn detail_row(row: &Row<'_>) -> rusqlite::Result<DetailAggregateRow> {
         model: row.get(1)?,
         reasoning_effort: row.get(13)?,
         last_activity_at_ms: row.get(2)?,
-        file_generation: row.get(14)?,
-        source_file_id: row.get(15)?,
-        source_end_offset: row.get(16)?,
         totals,
     })
 }
@@ -2016,6 +2017,30 @@ mod tests {
             .into_owned()
     }
 
+    /// Promote the compact legacy-shaped fixture to the v11 canonical query
+    /// contract after its rows have been populated.
+    fn promote_to_v11(connection: &Connection, active_epoch: i64) {
+        connection
+            .execute_batch(
+                "ALTER TABLE usage_events ADD COLUMN source TEXT;
+                 ALTER TABLE usage_events ADD COLUMN source_epoch INTEGER;
+                 UPDATE usage_events SET source='codex',source_epoch=ledger_epoch;
+                 CREATE TABLE source_usage_epochs(
+                    source TEXT PRIMARY KEY, active_epoch INTEGER NOT NULL,
+                    build_epoch INTEGER, active_parser_version INTEGER NOT NULL DEFAULT 0,
+                    build_parser_version INTEGER
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_usage_epochs(source,active_epoch,active_parser_version)
+                 VALUES ('codex',?1,0)",
+                [active_epoch],
+            )
+            .unwrap();
+    }
+
     fn fixture() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         let project_a = fixture_path("project/a");
@@ -2108,6 +2133,7 @@ mod tests {
             0,
             0,
         );
+        promote_to_v11(&connection, 7);
         connection
     }
 
@@ -2199,6 +2225,13 @@ mod tests {
             10,
             1,
         );
+        connection
+            .execute(
+                "UPDATE usage_events SET source='codex',source_epoch=ledger_epoch
+                 WHERE source IS NULL",
+                [],
+            )
+            .unwrap();
         connection
             .execute(
                 "UPDATE usage_events
@@ -2398,6 +2431,7 @@ mod tests {
             90,
             9,
         );
+        promote_to_v11(&connection, 7);
         connection
     }
 
@@ -2480,6 +2514,7 @@ mod tests {
             Some(600),
         );
         insert("child-unknown", 8, "child", "m-child", None, None);
+        promote_to_v11(&connection, 7);
         connection
     }
 
@@ -2561,6 +2596,7 @@ mod tests {
                  total_tokens,reasoning_effort,estimated_cost_nanos_usd
              ) VALUES (7,'b',2,'r','r','m',9000,900,1000,900,180,9900,NULL,NULL);",
         ).unwrap();
+        promote_to_v11(&known, 7);
         let exact = AggregateReader::new(&known)
             .summary(SummaryQuery::new(
                 TimeRange::new(0, 3).unwrap(),
@@ -2841,6 +2877,8 @@ mod tests {
         );
         insert("sol-high", 5, "child", "Sol", "high", 5, 3, 1, 5, 2, 50, 50);
 
+        promote_to_v11(&connection, 7);
+
         let detail = AggregateReader::new(&connection)
             .session_detail(
                 TimeRange::new(0, 10).unwrap(),
@@ -2857,36 +2895,37 @@ mod tests {
                 .map(|block| (block.model.as_str(), block.reasoning_effort.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                ("Sol", Some("high")),
-                ("Sol", Some("medium")),
                 ("Luna", Some("high")),
                 ("Luna", Some("max")),
+                ("Sol", Some("high")),
+                ("Sol", Some("medium")),
             ]
         );
         assert_eq!(child.model_usage[0].last_activity_at_ms, 5);
         assert_eq!(child.model_usage[1].last_activity_at_ms, 5);
         assert_eq!(child.model_usage[2].last_activity_at_ms, 5);
         assert_eq!(child.model_usage[3].last_activity_at_ms, 5);
-        assert_eq!(child.model_usage[0].usage.input_tokens, 5);
+        assert_eq!(child.model_usage[0].usage.input_tokens, 3);
         assert_eq!(
             child.model_usage[0].usage.estimated_cost_nanos_usd,
-            Some(50)
-        );
-        assert_eq!(child.model_usage[1].usage.input_tokens, 6);
-        assert_eq!(child.model_usage[1].usage.output_tokens, 6);
-        assert_eq!(
-            child.model_usage[1].usage.estimated_cost_nanos_usd,
-            Some(60)
-        );
-        assert_eq!(child.model_usage[2].usage.input_tokens, 3);
-        assert_eq!(
-            child.model_usage[2].usage.estimated_cost_nanos_usd,
             Some(30)
         );
-        assert_eq!(child.model_usage[3].usage.input_tokens, 1);
+        assert_eq!(child.model_usage[1].usage.input_tokens, 1);
+        assert_eq!(child.model_usage[1].usage.output_tokens, 1);
+        assert_eq!(
+            child.model_usage[1].usage.estimated_cost_nanos_usd,
+            Some(10)
+        );
+        assert_eq!(child.model_usage[2].usage.input_tokens, 5);
+        assert_eq!(
+            child.model_usage[2].usage.estimated_cost_nanos_usd,
+            Some(50)
+        );
+        assert_eq!(child.model_usage[3].usage.input_tokens, 6);
+        assert_eq!(child.model_usage[3].usage.output_tokens, 6);
         assert_eq!(
             child.model_usage[3].usage.estimated_cost_nanos_usd,
-            Some(10)
+            Some(60)
         );
 
         let mut summed = TokenTotals::zero();
@@ -3253,6 +3292,13 @@ mod tests {
             3,
             0,
         );
+        connection
+            .execute(
+                "UPDATE usage_events SET source='codex',source_epoch=ledger_epoch
+                 WHERE source IS NULL",
+                [],
+            )
+            .unwrap();
 
         let reader = AggregateReader::new(&connection);
         let range = TimeRange::new(100, 400).unwrap();
@@ -3302,6 +3348,13 @@ mod tests {
             0,
             0,
         );
+        connection
+            .execute(
+                "UPDATE usage_events SET source='codex',source_epoch=ledger_epoch
+                 WHERE source IS NULL",
+                [],
+            )
+            .unwrap();
         assert_eq!(
             reader.summary(SummaryQuery::new(
                 TimeRange::new(0, 400).unwrap(),
@@ -3538,6 +3591,13 @@ mod tests {
                 [],
             )
             .unwrap();
+        connection
+            .execute(
+                "UPDATE usage_events SET source='codex',source_epoch=ledger_epoch
+                 WHERE source IS NULL",
+                [],
+            )
+            .unwrap();
 
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -3628,6 +3688,13 @@ mod tests {
             1,
             0,
         );
+        connection
+            .execute(
+                "UPDATE usage_events SET source='codex',source_epoch=ledger_epoch
+                 WHERE source IS NULL",
+                [],
+            )
+            .unwrap();
 
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -3646,5 +3713,173 @@ mod tests {
                 .any(|option| { option.model == "gpt-reserve" && option.provider == "openai" })
         );
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn t_s05_s06_per_source_active_epochs_are_union_and_isolated() {
+        let connection = fixture();
+        connection
+            .execute(
+                "UPDATE usage_events SET source_epoch=2 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE source_usage_epochs
+                 SET active_epoch=2,build_epoch=3
+                 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_usage_epochs(
+                    source,active_epoch,active_parser_version
+                 ) VALUES ('fake-source',8,1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    ledger_epoch,source,source_epoch,event_id,occurred_at_ms,
+                    thread_id,root_session_id,model,input_tokens,cached_tokens,
+                    cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+                    reasoning_effort
+                 ) VALUES (8,'fake-source',8,'fake-active',260,
+                    'root-b','root-b','fake-model',7,0,0,3,0,10,NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    ledger_epoch,source,source_epoch,event_id,occurred_at_ms,
+                    thread_id,root_session_id,model,input_tokens,cached_tokens,
+                    cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+                    reasoning_effort
+                 ) VALUES (3,'codex',3,'codex-build',270,
+                    'root-b','root-b','build-only',100,0,0,1,0,101,NULL)",
+                [],
+            )
+            .unwrap();
+
+        let reader = AggregateReader::new(&connection);
+        let before_activation = reader
+            .summary(SummaryQuery::new(
+                TimeRange::new(0, 400).unwrap(),
+                UsageFilter::default(),
+            ))
+            .unwrap();
+        assert!(before_activation.totals.input_tokens >= 7);
+        assert!(
+            !reader
+                .models(TimeRange::new(0, 400).unwrap())
+                .unwrap()
+                .iter()
+                .any(|row| row.model == "build-only")
+        );
+
+        connection
+            .execute(
+                "UPDATE source_usage_epochs
+                 SET active_epoch=3,build_epoch=NULL
+                 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        let after_activation = AggregateReader::new(&connection)
+            .models(TimeRange::new(0, 400).unwrap())
+            .unwrap();
+        assert!(after_activation.iter().any(|row| row.model == "fake-model"));
+        assert!(after_activation.iter().any(|row| row.model == "build-only"));
+        assert!(!after_activation.iter().any(|row| row.model == "gpt-a"));
+    }
+
+    #[test]
+    fn t_phase3b_explain_active_source_epoch_join_uses_source_key() {
+        let connection = fixture();
+        let mut statement = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT ue.event_id
+                 FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE ue.occurred_at_ms>=?1 AND ue.occurred_at_ms<?2",
+            )
+            .unwrap();
+        let details = statement
+            .query_map(params![0_i64, 400_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("source_usage_epochs"))
+        );
+        assert!(details.iter().any(|detail| detail.contains("ue")));
+    }
+
+    #[test]
+    fn t_phase3b_explain_major_queries_use_per_source_active_join() {
+        let connection = fixture();
+        let queries = [
+            "SELECT SUM(ue.total_tokens)
+             FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+             WHERE ue.occurred_at_ms>=0 AND ue.occurred_at_ms<400",
+            "WITH roots AS (
+                 SELECT ue.root_session_id,MAX(ue.occurred_at_ms) AS last_activity_at_ms
+                 FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE ue.occurred_at_ms>=0 AND ue.occurred_at_ms<400
+                 GROUP BY ue.root_session_id
+             ) SELECT root_session_id,last_activity_at_ms FROM roots",
+            "SELECT ue.model,SUM(ue.total_tokens)
+             FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             WHERE ue.root_session_id='root-a' AND ue.occurred_at_ms>=0
+               AND ue.occurred_at_ms<400
+             GROUP BY ue.model",
+            "SELECT ue.model,SUM(ue.total_tokens)
+             FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             WHERE ue.occurred_at_ms>=0 AND ue.occurred_at_ms<400
+             GROUP BY ue.model",
+            "SELECT root.project_path,SUM(ue.total_tokens)
+             FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+             WHERE ue.occurred_at_ms>=0 AND ue.occurred_at_ms<400
+             GROUP BY root.project_path",
+            "SELECT DISTINCT ue.model
+             FROM usage_events ue
+             JOIN source_usage_epochs sue
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch",
+        ];
+        for query in queries {
+            let explain = format!("EXPLAIN QUERY PLAN {query}");
+            let mut statement = connection.prepare(&explain).unwrap();
+            let details = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("source_usage_epochs")),
+                "query plan omitted active source epoch join: {details:?}"
+            );
+        }
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
-use crate::domain::{CheckpointProcessingStatus, UsageEpochState};
+use crate::domain::{CheckpointProcessingStatus, SourceUsageEpochState};
 use crate::usage::normalized::{NormalizedTokenUsage, canonical_algorithm_for};
 
 use super::{Ledger, Result as StorageResult, StorageError};
@@ -473,7 +473,7 @@ pub(crate) struct UsageSourcePlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsageScanState {
-    pub epoch: UsageEpochState,
+    pub epoch: SourceUsageEpochState,
     pub plans: Vec<UsageSourcePlan>,
 }
 
@@ -485,7 +485,7 @@ pub(crate) struct UsageWorkListRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsageWorkListState {
-    pub epoch: UsageEpochState,
+    pub epoch: SourceUsageEpochState,
     pub rows: Vec<UsageWorkListRow>,
 }
 
@@ -530,7 +530,7 @@ impl Ledger {
                 if epoch.build_epoch.is_some() {
                     load_usage_build_work_list_chunk(
                         &transaction,
-                        epoch,
+                        epoch.clone(),
                         parser_version,
                         canonical,
                         chunk,
@@ -539,7 +539,7 @@ impl Ledger {
                 } else {
                     load_usage_stable_work_list_chunk(
                         &transaction,
-                        epoch,
+                        epoch.clone(),
                         parser_version,
                         canonical,
                         chunk,
@@ -563,7 +563,7 @@ impl Ledger {
         &self,
         source_file_ids: &[i64],
         parser_version: i64,
-        expected_epoch: UsageEpochState,
+        expected_epoch: SourceUsageEpochState,
     ) -> StorageResult<UsageScanState> {
         validate_usage_source_ids(source_file_ids)?;
         let mut connection = self.connection()?;
@@ -580,7 +580,7 @@ impl Ledger {
                 &transaction,
                 source_file_id,
                 parser_version,
-                epoch,
+                epoch.clone(),
             )?);
         }
         plans.sort_by_key(|plan| plan.source_file_id);
@@ -603,7 +603,7 @@ impl Ledger {
                 &transaction,
                 source_file_id,
                 parser_version,
-                epoch,
+                epoch.clone(),
             )?);
         }
         plans.sort_by_key(|plan| plan.source_file_id);
@@ -672,7 +672,7 @@ impl Ledger {
             }
             write_source_state(&transaction, batch, source)?;
             write_usage_checkpoint(&transaction, batch, source)?;
-            update_build_progress(&transaction, epoch, batch, source)?;
+            update_build_progress(&transaction, epoch.clone(), batch, source)?;
             verify_source_postconditions(&transaction, batch, source)?;
         }
         if has_local_replay {
@@ -735,7 +735,7 @@ impl Ledger {
             .build_epoch
             .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
         let parser = epoch.working_parser_version();
-        let plan = load_source_plan(&transaction, source_file_id, parser, epoch)?;
+        let plan = load_source_plan(&transaction, source_file_id, parser, epoch.clone())?;
         if plan.action != UsagePlanAction::BeginCarry {
             return Err(StorageError::invalid_state(
                 "usage source is not eligible for BeginCarry",
@@ -811,7 +811,7 @@ impl Ledger {
             .build_epoch
             .ok_or_else(|| StorageError::invalid_state("usage carry requires a build"))?;
         let parser = epoch.working_parser_version();
-        let plan = load_source_plan(&transaction, source_file_id, parser, epoch)?;
+        let plan = load_source_plan(&transaction, source_file_id, parser, epoch.clone())?;
         if plan.action != UsagePlanAction::ResumeCarry {
             return Err(StorageError::invalid_state(
                 "usage source is not in ResumeCarry",
@@ -821,7 +821,7 @@ impl Ledger {
             .build
             .as_ref()
             .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
-        verify_carry_db_proof(&transaction, epoch, source_file_id, build)?;
+        verify_carry_db_proof(&transaction, epoch.clone(), source_file_id, build)?;
 
         let phase = build.carry_phase;
         let outcome = match phase {
@@ -930,7 +930,7 @@ impl Ledger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (active, build): (i64, Option<i64>) = transaction.query_row(
-            "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -948,13 +948,17 @@ impl Ledger {
                     WHERE qs.ledger_epoch=q.ledger_epoch AND qs.root_session_id=q.root_session_id)
                 ORDER BY q.ledger_epoch,q.rowid LIMIT ?3)",
             "DELETE FROM usage_event_occurrences WHERE rowid IN (
-                SELECT rowid FROM usage_event_occurrences WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
+                SELECT rowid FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
                 ORDER BY ledger_epoch,rowid LIMIT ?3)",
             "DELETE FROM usage_events WHERE rowid IN (
-                SELECT e.rowid FROM usage_events e WHERE e.ledger_epoch<>?1 AND e.ledger_epoch<>?2
-                  AND NOT EXISTS (SELECT 1 FROM usage_event_occurrences o
-                                  WHERE o.ledger_epoch=e.ledger_epoch AND o.event_id=e.event_id)
-                ORDER BY e.ledger_epoch,e.rowid LIMIT ?3)",
+                SELECT e.rowid FROM usage_events e
+                JOIN source_usage_epochs sue ON sue.source=e.source
+                WHERE e.source_epoch<>sue.active_epoch
+                  AND (sue.build_epoch IS NULL OR e.source_epoch<>sue.build_epoch)
+                AND NOT EXISTS (SELECT 1 FROM usage_event_occurrences o
+                                  WHERE o.source='codex' AND o.source=e.source
+                                    AND o.ledger_epoch=e.source_epoch AND o.event_id=e.event_id)
+                ORDER BY e.source,e.source_epoch,e.rowid LIMIT ?3)",
             "DELETE FROM skill_usage_events WHERE rowid IN (
                 SELECT rowid FROM skill_usage_events WHERE ledger_epoch<>?1 AND ledger_epoch<>?2
                 ORDER BY ledger_epoch,rowid LIMIT ?3)",
@@ -988,15 +992,21 @@ impl Ledger {
     }
 }
 
-fn read_epoch(transaction: &Transaction<'_>) -> StorageResult<UsageEpochState> {
+fn read_epoch(transaction: &Transaction<'_>) -> StorageResult<SourceUsageEpochState> {
     let values: (i64, Option<i64>, i64, Option<i64>) = transaction.query_row(
-        "SELECT usage_active_epoch, usage_build_epoch, usage_parser_version,
-                usage_build_parser_version FROM app_meta WHERE id=1",
+        "SELECT active_epoch, build_epoch, active_parser_version,
+                build_parser_version FROM source_usage_epochs WHERE source='codex'",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
-    UsageEpochState::new(values.0, values.1, values.2, values.3)
-        .map_err(|error| StorageError::invalid_state(error.to_string()))
+    SourceUsageEpochState::new(
+        crate::source::SourceId::CODEX,
+        values.0,
+        values.1,
+        values.2,
+        values.3,
+    )
+    .map_err(|error| StorageError::invalid_state(error.to_string()))
 }
 
 fn validate_usage_source_ids(source_file_ids: &[i64]) -> StorageResult<()> {
@@ -1026,7 +1036,7 @@ fn usage_id_values_cte(source_file_ids: &[i64]) -> String {
 
 fn load_usage_stable_work_list_chunk(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     parser_version: i64,
     canonical_algorithm: i64,
     source_file_ids: &[i64],
@@ -1127,7 +1137,7 @@ fn load_usage_stable_work_list_chunk(
 
 fn load_usage_build_work_list_chunk(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     parser_version: i64,
     canonical_algorithm: i64,
     source_file_ids: &[i64],
@@ -1216,7 +1226,7 @@ fn load_source_plan(
     transaction: &Transaction<'_>,
     source_file_id: i64,
     requested_parser: i64,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
 ) -> StorageResult<UsageSourcePlan> {
     let source = transaction
         .query_row(
@@ -1676,7 +1686,7 @@ fn durable_tail_matches_build(
 
 fn local_replay_safe(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     source: &SourcePlanRow,
     source_file_id: i64,
     checkpoint: &UsageCheckpointExpectation,
@@ -1706,12 +1716,13 @@ fn local_replay_safe(
     }
     let contributed: i64 = transaction.query_row(
         "SELECT
-            (SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=?1 AND source_file_id=?2)
+            (SELECT count(*) FROM usage_event_occurrences
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM turns WHERE ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2)",
-        params![epoch.active_epoch,source_file_id],
+        params![epoch.active_epoch, source_file_id],
         |row| row.get(0),
     )?;
     Ok(contributed == 0)
@@ -1727,7 +1738,7 @@ struct CarryEligibility<'a> {
 
 fn begin_carry_eligible(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     source_file_id: i64,
     input: CarryEligibility<'_>,
 ) -> StorageResult<bool> {
@@ -1809,7 +1820,7 @@ fn begin_carry_eligible(
 
 fn verify_carry_db_proof(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     source_file_id: i64,
     build: &UsageBuildPlanState,
 ) -> StorageResult<()> {
@@ -1887,7 +1898,7 @@ fn carry_occurrence_page(
     let mut statement = transaction.prepare(
         "SELECT source_start_offset FROM (
              SELECT source_start_offset FROM usage_event_occurrences
-              WHERE ledger_epoch=?1 AND source_file_id=?2
+              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
              UNION
              SELECT source_start_offset FROM skill_usage_events
               WHERE ledger_epoch=?1 AND source_file_id=?2
@@ -1906,7 +1917,7 @@ fn carry_occurrence_page(
         let event_id: Option<String> = transaction
             .query_row(
                 "SELECT event_id FROM usage_event_occurrences
-                 WHERE ledger_epoch=?1 AND source_file_id=?2 AND source_start_offset=?3",
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND source_start_offset=?3",
                 params![active_epoch, source_file_id, start],
                 |row| row.get(0),
             )
@@ -1964,16 +1975,16 @@ fn carry_canonical_event(
 ) -> StorageResult<()> {
     let inserted = transaction.execute(
         "INSERT INTO usage_events(
-            ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
+            source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
             reasoning_effort,input_tokens,cached_tokens,cache_write_tokens,
             output_tokens,reasoning_tokens,total_tokens,quality_status,estimated_cost_nanos_usd,
-            source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms)
-         SELECT ?1,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
+            created_at_ms)
+         SELECT 'codex',?1,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
             reasoning_effort,input_tokens,cached_tokens,cache_write_tokens,
             output_tokens,reasoning_tokens,total_tokens,quality_status,estimated_cost_nanos_usd,
-            source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms
-         FROM usage_events WHERE ledger_epoch=?2 AND event_id=?3
-           AND NOT EXISTS(SELECT 1 FROM usage_events WHERE ledger_epoch=?1 AND event_id=?3)",
+            created_at_ms
+         FROM usage_events WHERE source='codex' AND source_epoch=?2 AND event_id=?3
+           AND NOT EXISTS(SELECT 1 FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?3)",
         params![build_epoch, active_epoch, event_id],
     )?;
     if inserted > 1 {
@@ -1982,7 +1993,7 @@ fn carry_canonical_event(
         ));
     }
     let active_exists: i64 = transaction.query_row(
-        "SELECT count(*) FROM usage_events WHERE ledger_epoch=?1 AND event_id=?2",
+        "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
         params![active_epoch, event_id],
         |row| row.get(0),
     )?;
@@ -1992,8 +2003,8 @@ fn carry_canonical_event(
         ));
     }
     let equal: i64 = transaction.query_row(
-        "SELECT count(*) FROM usage_events a JOIN usage_events b ON b.ledger_epoch=?2 AND b.event_id=a.event_id
-         WHERE a.ledger_epoch=?1 AND a.event_id=?3
+        "SELECT count(*) FROM usage_events a JOIN usage_events b ON b.source='codex' AND b.source_epoch=?2 AND b.event_id=a.event_id
+         WHERE a.source='codex' AND a.source_epoch=?1 AND a.event_id=?3
            AND b.event_kind=a.event_kind AND b.occurred_at_ms=a.occurred_at_ms
            AND b.thread_id=a.thread_id AND b.root_session_id=a.root_session_id
                AND b.turn_key IS a.turn_key AND b.model=a.model
@@ -2023,21 +2034,21 @@ fn carry_occurrence(
 ) -> StorageResult<()> {
     transaction.execute(
         "INSERT INTO usage_event_occurrences(
-            ledger_epoch,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms)
-         SELECT ?1,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms
-         FROM usage_event_occurrences WHERE ledger_epoch=?2 AND source_file_id=?3 AND source_start_offset=?4
+            source,ledger_epoch,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms)
+         SELECT 'codex',?1,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms
+         FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND source_start_offset=?4
            AND NOT EXISTS(SELECT 1 FROM usage_event_occurrences
-                          WHERE ledger_epoch=?1 AND source_file_id=?3
+                          WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3
                             AND file_generation=usage_event_occurrences.file_generation
                             AND source_start_offset=?4)",
         params![build_epoch, active_epoch, source_file_id, start_offset],
     )?;
     let equal: i64 = transaction.query_row(
         "SELECT count(*) FROM usage_event_occurrences a
-         JOIN usage_event_occurrences b ON b.ledger_epoch=?2
+         JOIN usage_event_occurrences b ON b.source='codex' AND b.ledger_epoch=?2
            AND b.source_file_id=a.source_file_id AND b.file_generation=a.file_generation
            AND b.source_start_offset=a.source_start_offset
-         WHERE a.ledger_epoch=?1 AND a.source_file_id=?3 AND a.source_start_offset=?4
+         WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.source_file_id=?3 AND a.source_start_offset=?4
            AND b.source_end_offset=a.source_end_offset AND b.event_id=a.event_id",
         params![active_epoch, build_epoch, source_file_id, start_offset],
         |row| row.get(0),
@@ -2293,7 +2304,7 @@ fn carry_anomaly(
 
 fn finalize_carry(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     source_file_id: i64,
     build: &UsageBuildPlanState,
     now_ms: i64,
@@ -2426,16 +2437,16 @@ fn verify_carry_sets(
         "SELECT
           (SELECT count(*) FROM (
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM usage_event_occurrences
-              WHERE ledger_epoch=?1 AND source_file_id=?3
+              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM usage_event_occurrences
-              WHERE ledger_epoch=?2 AND source_file_id=?3))
+              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3))
         + (SELECT count(*) FROM (
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM usage_event_occurrences
-              WHERE ledger_epoch=?2 AND source_file_id=?3
+              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM usage_event_occurrences
-              WHERE ledger_epoch=?1 AND source_file_id=?3))",
+              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3))",
         params![active_epoch, build_epoch, source_file_id],
         |row| row.get(0),
     )?;
@@ -2521,10 +2532,10 @@ fn verify_carry_canonical_events(
         .query_row(
             "SELECT build.event_id
              FROM usage_events build
-             WHERE build.ledger_epoch=?1
+             WHERE build.source='codex' AND build.source_epoch=?1
                AND NOT EXISTS (
                    SELECT 1 FROM usage_event_occurrences occurrence
-                   WHERE occurrence.ledger_epoch=?1
+                   WHERE occurrence.source='codex' AND occurrence.ledger_epoch=?1
                      AND occurrence.event_id=build.event_id
                )
              ORDER BY build.event_id
@@ -3034,15 +3045,27 @@ fn validate_group_relationship(
     thread_id: &str,
     root_session_id: &str,
 ) -> StorageResult<()> {
-    let root: Option<String> = transaction
+    let row: Option<(String, Option<String>)> = transaction
         .query_row(
-            "SELECT root_session_id FROM threads WHERE thread_id=?1",
+            "SELECT source,root_session_id FROM threads WHERE thread_id=?1",
             [thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((source, root)) = row else {
+        return Err(StorageError::invalid_state("usage thread does not exist"));
+    };
+    let root_source: Option<String> = transaction
+        .query_row(
+            "SELECT source FROM threads WHERE thread_id=?1",
+            [root_session_id],
             |row| row.get(0),
         )
-        .optional()?
-        .flatten();
-    if root.as_deref() != Some(root_session_id) {
+        .optional()?;
+    if root.as_deref() != Some(root_session_id)
+        || source != "codex"
+        || root_source.as_deref() != Some(source.as_str())
+    {
         return Err(StorageError::invalid_state(
             "usage root relationship is not confirmed",
         ));
@@ -3118,7 +3141,7 @@ fn prepare_local_replay(
     if source.expected_checkpoint_missing {
         let facts: i64 = transaction.query_row(
             "SELECT
-                (SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=?1 AND source_file_id=?2) +
+                (SELECT count(*) FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM turns WHERE ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2) +
@@ -3153,7 +3176,7 @@ fn prepare_local_replay(
     }
 
     transaction.execute(
-        "DELETE FROM usage_event_occurrences WHERE ledger_epoch=?1 AND source_file_id=?2",
+        "DELETE FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2",
         params![batch.ledger_epoch, source.source_file_id],
     )?;
     transaction.execute(
@@ -3192,7 +3215,7 @@ fn capture_affected_canonical_visibility(
         if source.local_replay {
             let mut statement = transaction.prepare(
                 "SELECT event_id FROM usage_event_occurrences
-                 WHERE ledger_epoch=?1 AND source_file_id=?2",
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2",
             )?;
             for row in statement
                 .query_map(params![batch.ledger_epoch, source.source_file_id], |row| {
@@ -3206,7 +3229,7 @@ fn capture_affected_canonical_visibility(
     let mut visible = HashSet::new();
     for event_id in ids {
         let exists: i64 = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM usage_events WHERE ledger_epoch=?1 AND event_id=?2)",
+            "SELECT EXISTS(SELECT 1 FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?2)",
             params![batch.ledger_epoch, event_id],
             |row| row.get(0),
         )?;
@@ -3233,7 +3256,7 @@ fn affected_canonical_visibility_changed(
             (true, encoded.as_str())
         };
         let is_visible: i64 = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM usage_events WHERE ledger_epoch=?1 AND event_id=?2)",
+            "SELECT EXISTS(SELECT 1 FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?2)",
             rusqlite::params![ledger_epoch, event_id],
             |row| row.get(0),
         )?;
@@ -3250,9 +3273,9 @@ fn cleanup_local_replay_orphans(
 ) -> StorageResult<()> {
     transaction.execute(
         "DELETE FROM usage_events
-         WHERE ledger_epoch=?1 AND NOT EXISTS (
+         WHERE source='codex' AND source_epoch=?1 AND NOT EXISTS (
              SELECT 1 FROM usage_event_occurrences o
-             WHERE o.ledger_epoch=usage_events.ledger_epoch AND o.event_id=usage_events.event_id
+             WHERE o.source='codex' AND o.ledger_epoch=usage_events.source_epoch AND o.event_id=usage_events.event_id
          )",
         [ledger_epoch],
     )?;
@@ -3293,7 +3316,7 @@ fn write_or_compare_event(
         .query_row(
             "SELECT event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,reasoning_effort,
                 input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status
-             FROM usage_events WHERE ledger_epoch=?1 AND event_id=?2",
+             FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
             params![epoch, event.event_id],
             |row| {
                 Ok(CanonicalEventRow {
@@ -3344,20 +3367,14 @@ fn write_or_compare_event(
             "canonical usage event conflict",
         ));
     }
-    let occurrence = source
-        .occurrences
-        .iter()
-        .find(|occurrence| occurrence.event_id == event.event_id)
-        .ok_or_else(|| StorageError::invalid_state("event occurrence is missing"))?;
     transaction.execute(
         "INSERT INTO usage_events (
-            ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+            source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
             turn_key,model,reasoning_effort,estimated_cost_nanos_usd,input_tokens,cached_tokens,cache_write_tokens,
             output_tokens,reasoning_tokens,total_tokens,
-            quality_status,source_file_id,file_generation,source_start_offset,
-            source_end_offset,created_at_ms
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-            ?17,?18,?19,?20,?21,?22)",
+            quality_status,created_at_ms
+         ) VALUES ('codex',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
+            ?17,?18)",
         params![
             epoch,
             event.event_id,
@@ -3376,10 +3393,6 @@ fn write_or_compare_event(
             event.usage.reasoning_tokens,
             event.usage.total_tokens,
             quality,
-            source.source_file_id,
-            source.expected_file_generation,
-            occurrence.source_start_offset,
-            occurrence.source_end_offset,
             source.committed_at_ms
         ],
     )?;
@@ -3571,7 +3584,7 @@ fn write_or_compare_occurrence(
     let existing: Option<(String, i64)> = transaction
         .query_row(
             "SELECT event_id,source_end_offset FROM usage_event_occurrences
-             WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
                 AND source_start_offset=?4",
             params![
                 epoch,
@@ -3590,9 +3603,9 @@ fn write_or_compare_occurrence(
     }
     transaction.execute(
         "INSERT INTO usage_event_occurrences (
-            ledger_epoch,source_file_id,file_generation,source_start_offset,
+            source,ledger_epoch,source_file_id,file_generation,source_start_offset,
             source_end_offset,event_id,created_at_ms
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+         ) VALUES ('codex',?1,?2,?3,?4,?5,?6,?7)",
         params![
             epoch,
             source.source_file_id,
@@ -3953,7 +3966,7 @@ fn write_usage_checkpoint(
 
 fn update_build_progress(
     transaction: &Transaction<'_>,
-    epoch: UsageEpochState,
+    epoch: SourceUsageEpochState,
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
@@ -4100,8 +4113,8 @@ pub(super) fn reconcile_usage_metadata_change(
         };
     let (active_epoch, build_epoch, build_parser): (i64, Option<i64>, Option<i64>) = transaction
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_build_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,build_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
@@ -4113,7 +4126,7 @@ pub(super) fn reconcile_usage_metadata_change(
         let next_root = next_root.expect("root_changed requires a confirmed next root");
         transaction.execute(
             "UPDATE usage_events SET root_session_id=?1
-             WHERE ledger_epoch=?2 AND thread_id=?3",
+             WHERE source='codex' AND source_epoch=?2 AND thread_id=?3",
             params![next_root, active_epoch, thread_id],
         )?;
         transaction.execute(
@@ -4218,7 +4231,9 @@ mod tests {
                 let connection = ledger.connection().unwrap();
                 connection
                     .execute(
-                        "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=?1 WHERE id=1",
+                        "UPDATE source_usage_epochs
+                         SET active_epoch=1,active_parser_version=?1
+                         WHERE source='codex'",
                         [crate::usage::USAGE_PARSER_VERSION],
                     )
                     .unwrap();
@@ -4231,9 +4246,9 @@ mod tests {
                     connection
                         .execute(
                             "INSERT INTO threads (
-                                thread_id,parent_thread_id,root_session_id,agent_role,project_kind,archived,
-                                metadata_quality_status,metadata_resolved_at_ms
-                             ) VALUES (?1,?2,?3,?4,'unknown',0,'complete',1)",
+                                thread_id,source,native_session_id,parent_thread_id,root_session_id,
+                                agent_role,project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                             ) VALUES (?1,'codex',?1,?2,?3,?4,'unknown',0,'complete',1)",
                             params![thread_id, parent, root_id, role],
                         )
                         .unwrap();
@@ -4542,7 +4557,7 @@ mod tests {
                 outcome.events_deduplicated,
                 outcome.data_revision
             ),
-            (1, 0, 2)
+            (1, 0, 1)
         );
         let connection = fixture.ledger.connection().unwrap();
         let facts: (i64, i64, i64, i64, i64, i64) = connection
@@ -4584,7 +4599,7 @@ mod tests {
                 outcome.events_deduplicated,
                 outcome.data_revision
             ),
-            (0, 1, 2)
+            (0, 1, 1)
         );
         let connection = fixture.ledger.connection().unwrap();
         let counts: (i64, i64) = connection
@@ -4623,9 +4638,9 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_event_occurrences (
-                        ledger_epoch,source_file_id,file_generation,source_start_offset,
+                        source,ledger_epoch,source_file_id,file_generation,source_start_offset,
                         source_end_offset,event_id,created_at_ms
-                     ) VALUES (1,4,1,0,19,?1,1)",
+                     ) VALUES ('codex',1,4,1,0,19,?1,1)",
                     ["a".repeat(64)],
                 )
                 .unwrap();
@@ -4641,17 +4656,19 @@ mod tests {
                 .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
-        let occurrence_end_and_checkpoint: (i64, i64) = connection
+        let occurrence_end_and_checkpoint: (i64, i64, i64) = connection
             .query_row(
                 "SELECT
                     (SELECT source_end_offset FROM usage_event_occurrences WHERE source_file_id=4),
                     (SELECT committed_offset FROM source_checkpoints
-                        WHERE source_file_id=4 AND consumer_kind='usage')",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                        WHERE source_file_id=4 AND consumer_kind='usage'),
+                    (SELECT count(*) FROM usage_events
+                        WHERE source='codex' AND source_epoch=1 AND event_id=?1)",
+                ["a".repeat(64)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(occurrence_end_and_checkpoint, (19, 0));
+        assert_eq!(occurrence_end_and_checkpoint, (19, 0, 1));
         drop(connection);
 
         fixture.add_source(5, Some("child"), 15);
@@ -4681,6 +4698,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(group_state, (0, 0, 0));
+
+        // A checkpoint CAS failure happens after canonical, occurrence and
+        // private state writes.  Force that failure and prove the legacy
+        // Codex commit bridge rolls the entire IMMEDIATE transaction back.
+        drop(connection);
+        fixture.add_source(7, Some("child"), 17);
+        {
+            let connection = fixture.ledger.connection().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER force_usage_checkpoint_cas
+                     BEFORE UPDATE OF committed_offset ON source_checkpoints
+                     WHEN OLD.source_file_id=7 AND OLD.consumer_kind='usage'
+                     BEGIN SELECT RAISE(IGNORE); END",
+                )
+                .unwrap();
+        }
+        assert!(
+            fixture
+                .ledger
+                .commit_usage(&batch(
+                    "child",
+                    "root",
+                    source_commit(7, 17, "child", "root", 'g', false),
+                ))
+                .is_err()
+        );
+        let connection = fixture.ledger.connection().unwrap();
+        let checkpoint_rollback: (i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events
+                        WHERE source='codex' AND source_epoch=1 AND event_id=?1),
+                    (SELECT count(*) FROM usage_event_occurrences
+                        WHERE source='codex' AND ledger_epoch=1 AND source_file_id=7),
+                    (SELECT count(*) FROM usage_source_states
+                        WHERE ledger_epoch=1 AND source_file_id=7),
+                    (SELECT committed_offset FROM source_checkpoints
+                        WHERE source_file_id=7 AND consumer_kind='usage')",
+                ["g".repeat(64)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(checkpoint_rollback, (0, 0, 0, 0));
     }
 
     #[test]
@@ -4793,7 +4854,8 @@ mod tests {
                 "SELECT reasoning_effort,estimated_cost_nanos_usd,
                         (SELECT unresolved_reasoning_effort_seen FROM turns
                          WHERE ledger_epoch=1 AND source_file_id=1 AND turn_key='turn')
-                 FROM usage_events WHERE ledger_epoch=1 AND event_id=?1",
+                 FROM usage_events
+                 WHERE source='codex' AND source_epoch=1 AND event_id=?1",
                 ["e".repeat(64)],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -5047,7 +5109,7 @@ mod tests {
         let compensation_count: i64 = transaction
             .query_row(
                 "SELECT count(*) FROM usage_events
-                 WHERE ledger_epoch=1 AND event_kind='turn_compensation'",
+                 WHERE source='codex' AND source_epoch=1 AND event_kind='turn_compensation'",
                 [],
                 |row| row.get(0),
             )
@@ -5056,7 +5118,7 @@ mod tests {
             let compensation_effort: Option<String> = transaction
                 .query_row(
                     "SELECT reasoning_effort FROM usage_events
-                     WHERE ledger_epoch=1 AND event_kind='turn_compensation'
+                     WHERE source='codex' AND source_epoch=1 AND event_kind='turn_compensation'
                      LIMIT 1",
                     [],
                     |row| row.get(0),
@@ -5146,7 +5208,8 @@ mod tests {
         let proof: (i64, i64, String, String, Option<String>, i64) = connection
             .query_row(
                 "SELECT
-                    (SELECT count(*) FROM usage_events WHERE ledger_epoch=2 AND event_id=?1),
+                    (SELECT count(*) FROM usage_events
+                     WHERE source='codex' AND source_epoch=2 AND event_id=?1),
                     (SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=2 AND source_file_id=2 AND event_id=?1),
                     (SELECT carry_phase FROM usage_build_sources WHERE build_epoch=2 AND source_file_id=2),
                     (SELECT reasoning_effort_state FROM turns
@@ -5182,7 +5245,7 @@ mod tests {
         let copied_effort: Option<String> = connection
             .query_row(
                 "SELECT reasoning_effort FROM usage_events
-                 WHERE ledger_epoch=2 AND event_id=?1",
+                 WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                 ["a".repeat(64)],
                 |row| row.get(0),
             )
@@ -5191,7 +5254,7 @@ mod tests {
         let copied_cost: Option<i64> = connection
             .query_row(
                 "SELECT estimated_cost_nanos_usd FROM usage_events
-                 WHERE ledger_epoch=2 AND event_id=?1",
+                 WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                 ["a".repeat(64)],
                 |row| row.get(0),
             )
@@ -5301,7 +5364,7 @@ mod tests {
             .ledger
             .commit_usage(&batch("child", "root", recovery))
             .unwrap();
-        assert_eq!(outcome.data_revision, 3);
+        assert_eq!(outcome.data_revision, 2);
         let connection = fixture.ledger.connection().unwrap();
         let boundaries: (i64, i64, String) = connection
             .query_row(
@@ -5558,7 +5621,8 @@ mod tests {
         let active_roots: (String, String) = connection
             .query_row(
                 "SELECT
-                    (SELECT root_session_id FROM usage_events WHERE ledger_epoch=1 AND thread_id='child'),
+                    (SELECT root_session_id FROM usage_events
+                     WHERE source='codex' AND source_epoch=1 AND thread_id='child'),
                     (SELECT root_session_id FROM usage_source_states WHERE ledger_epoch=1 AND owning_thread_id='child')",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -5948,7 +6012,8 @@ mod tests {
             let connection = conflict.ledger.connection().unwrap();
             connection
                 .execute(
-                    "UPDATE usage_events SET model='seed-conflict' WHERE ledger_epoch=2 AND event_id=?1",
+                    "UPDATE usage_events SET model='seed-conflict'
+                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                     ["a".repeat(64)],
                 )
                 .unwrap();
@@ -5979,17 +6044,16 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms)
-                     SELECT ledger_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
+                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        2,1,source_start_offset,source_end_offset,created_at_ms
-                     FROM usage_events WHERE ledger_epoch=2 AND event_id=?1",
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
+                     FROM usage_events
+                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                     params!["a".repeat(64), "orphan"],
                 )
                 .unwrap();
@@ -6022,17 +6086,16 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms)
-                     SELECT ledger_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
+                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        2,1,source_start_offset,source_end_offset,created_at_ms
-                     FROM usage_events WHERE ledger_epoch=2 AND event_id=?1",
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
+                     FROM usage_events
+                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                     params!["a".repeat(64), "late-orphan"],
                 )
                 .unwrap();
@@ -6057,8 +6120,8 @@ mod tests {
             .query_row(
                 "SELECT b.carry_phase,b.carry_after_start_offset,b.carry_after_turn_key,
                         b.carry_after_anomaly_id,c.committed_offset,c.processing_status,
-                        (SELECT count(*) FROM usage_events
-                         WHERE ledger_epoch=2 AND event_id='late-orphan')
+                         (SELECT count(*) FROM usage_events
+                         WHERE source='codex' AND source_epoch=2 AND event_id='late-orphan')
                  FROM usage_build_sources b
                  JOIN source_checkpoints c ON c.source_file_id=b.source_file_id
                     AND c.consumer_kind='usage'
@@ -6099,24 +6162,23 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms)
-                     SELECT ledger_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
+                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
-                        output_tokens,reasoning_tokens,total_tokens,quality_status,
-                        source_file_id,file_generation,source_start_offset,source_end_offset,created_at_ms
-                     FROM usage_events WHERE ledger_epoch=2 AND event_id=?1",
+                        output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
+                     FROM usage_events
+                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
                     params!["a".repeat(64), "wrong-event"],
                 )
                 .unwrap();
             connection
                 .execute(
                     "UPDATE usage_event_occurrences SET event_id='wrong-event'
-                     WHERE ledger_epoch=2 AND source_file_id=1 AND source_start_offset=0",
+                     WHERE source='codex' AND ledger_epoch=2 AND source_file_id=1 AND source_start_offset=0",
                     [],
                 )
                 .unwrap();

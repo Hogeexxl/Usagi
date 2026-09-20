@@ -357,7 +357,7 @@ fn process_thread_group(
     usage: &UsageLedger<'_>,
     ledger: &Ledger,
     work_thread: &UsageWorkThread,
-    expected_epoch: &crate::domain::UsageEpochState,
+    expected_epoch: &crate::domain::SourceUsageEpochState,
     present: &BTreeMap<i64, (&DiscoveredFile, i64)>,
     present_ids: &[i64],
     state_snapshot: &StateSnapshot,
@@ -365,11 +365,15 @@ fn process_thread_group(
     cancellation: &AtomicBool,
     report: &mut ScanReport,
 ) -> UsageThreadOutcome {
-    let mut scan =
-        match load_exact_state(usage, &work_thread.source_file_ids, *expected_epoch, report) {
-            Ok(scan) => scan,
-            Err(error_code) => return UsageThreadOutcome::OrdinaryError(error_code),
-        };
+    let mut scan = match load_exact_state(
+        usage,
+        &work_thread.source_file_ids,
+        expected_epoch.clone(),
+        report,
+    ) {
+        Ok(scan) => scan,
+        Err(error_code) => return UsageThreadOutcome::OrdinaryError(error_code),
+    };
 
     'group_loop: loop {
         if cancelled(cancellation) {
@@ -415,7 +419,7 @@ fn process_thread_group(
                     scan = match load_exact_state(
                         usage,
                         &work_thread.source_file_ids,
-                        *expected_epoch,
+                        expected_epoch.clone(),
                         report,
                     ) {
                         Ok(scan) => scan,
@@ -468,7 +472,7 @@ fn process_thread_group(
                     scan = match load_exact_state(
                         usage,
                         &work_thread.source_file_ids,
-                        *expected_epoch,
+                        expected_epoch.clone(),
                         report,
                     ) {
                         Ok(scan) => scan,
@@ -488,7 +492,7 @@ fn process_thread_group(
                     scan = match load_exact_state(
                         usage,
                         &work_thread.source_file_ids,
-                        *expected_epoch,
+                        expected_epoch.clone(),
                         report,
                     ) {
                         Ok(scan) => scan,
@@ -664,7 +668,7 @@ fn process_thread_group(
                 scan = match load_exact_state(
                     usage,
                     &work_thread.source_file_ids,
-                    *expected_epoch,
+                    expected_epoch.clone(),
                     report,
                 ) {
                     Ok(scan) => scan,
@@ -717,7 +721,7 @@ fn load_work_list(
 fn load_exact_state(
     usage: &UsageLedger<'_>,
     source_ids: &[i64],
-    expected_epoch: crate::domain::UsageEpochState,
+    expected_epoch: crate::domain::SourceUsageEpochState,
     report: &mut ScanReport,
 ) -> Result<UsageScanState, &'static str> {
     let started = Instant::now();

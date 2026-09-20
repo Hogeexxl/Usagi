@@ -159,8 +159,8 @@ impl<'connection> RebuildLedger<'connection> {
         verify_present_ids(&transaction, &present)?;
         let (active_epoch, existing_build, existing_target): (i64, Option<i64>, Option<i64>) =
             transaction.query_row(
-                "SELECT usage_active_epoch, usage_build_epoch, usage_build_parser_version
-                 FROM app_meta WHERE id=1",
+                "SELECT active_epoch, build_epoch, build_parser_version
+                 FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
@@ -171,8 +171,9 @@ impl<'connection> RebuildLedger<'connection> {
         match (existing_build, existing_target) {
             (None, None) => {
                 transaction.execute(
-                    "UPDATE app_meta SET usage_build_epoch=?1, usage_build_parser_version=?2
-                     WHERE id=1 AND usage_build_epoch IS NULL",
+                    "UPDATE source_usage_epochs
+                     SET build_epoch=?1, build_parser_version=?2
+                     WHERE source='codex' AND build_epoch IS NULL",
                     params![build_epoch, target_parser_version],
                 )?;
                 freeze_initial_members(
@@ -514,7 +515,8 @@ impl<'connection> RebuildLedger<'connection> {
 
         let leaked: i64 = transaction.query_row(
             "SELECT
-                (SELECT count(*) FROM usage_events WHERE ledger_epoch=?1 AND root_session_id=?2)
+                (SELECT count(*) FROM usage_events
+                 WHERE source='codex' AND source_epoch=?1 AND root_session_id=?2)
               + (SELECT count(*) FROM turns WHERE ledger_epoch=?1 AND thread_id IN (
                     SELECT thread_id FROM threads WHERE root_session_id=?2 OR thread_id=?2))
               + (SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND root_session_id=?2)",
@@ -537,7 +539,7 @@ impl<'connection> RebuildLedger<'connection> {
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
         let active_epoch: i64 = transaction.query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )?;
@@ -681,15 +683,19 @@ impl<'connection> RebuildLedger<'connection> {
             }
         }
         let changed = transaction.execute(
-            "UPDATE app_meta SET usage_active_epoch=?1, usage_parser_version=?2,
-                    usage_build_epoch=NULL, usage_build_parser_version=NULL,
-                    data_revision=data_revision+1
-             WHERE id=1 AND usage_build_epoch=?1 AND usage_build_parser_version=?2",
+            "UPDATE source_usage_epochs
+             SET active_epoch=?1, active_parser_version=?2,
+                 build_epoch=NULL, build_parser_version=NULL
+             WHERE source='codex' AND build_epoch=?1 AND build_parser_version=?2",
             params![build_epoch, target_parser],
         )?;
         if changed != 1 {
             return Err(RebuildError::Cas("build changed before activation"));
         }
+        transaction.execute(
+            "UPDATE app_meta SET data_revision=data_revision+1 WHERE id=1",
+            [],
+        )?;
         transaction.execute(
             "DELETE FROM usage_build_sources WHERE build_epoch=?1",
             [build_epoch],
@@ -814,7 +820,8 @@ fn replace_target_preserving_members(
     // same primitive is also used by source/root replacements with an
     // explicit affected-source set via `replace_build_preserving_all_members`.
     let old_target: i64 = transaction.query_row(
-        "SELECT usage_build_parser_version FROM app_meta WHERE id=1 AND usage_build_epoch=?1",
+        "SELECT build_parser_version FROM source_usage_epochs
+         WHERE source='codex' AND build_epoch=?1",
         [build_epoch],
         |row| row.get(0),
     )?;
@@ -866,7 +873,7 @@ pub(crate) fn replace_build_preserving_all_members_tx(
         return Err(RebuildError::Invalid("negative parser version or time"));
     }
     let current_build: Option<i64> = transaction.query_row(
-        "SELECT usage_build_epoch FROM app_meta WHERE id=1",
+        "SELECT build_epoch FROM source_usage_epochs WHERE source='codex'",
         [],
         |row| row.get(0),
     )?;
@@ -891,14 +898,15 @@ pub(crate) fn replace_build_preserving_all_members_tx(
         .collect::<BTreeSet<_>>();
 
     let old_target: i64 = transaction.query_row(
-        "SELECT usage_build_parser_version FROM app_meta WHERE id=1 AND usage_build_epoch=?1",
+        "SELECT build_parser_version FROM source_usage_epochs
+         WHERE source='codex' AND build_epoch=?1",
         [build_epoch],
         |row| row.get(0),
     )?;
     let parser_changed = old_target != parser;
     transaction.execute(
-        "UPDATE app_meta SET usage_build_parser_version=?1
-         WHERE id=1 AND usage_build_epoch=?2",
+        "UPDATE source_usage_epochs SET build_parser_version=?1
+         WHERE source='codex' AND build_epoch=?2",
         params![parser, build_epoch],
     )?;
 
@@ -1011,7 +1019,8 @@ pub(crate) fn replace_build_preserving_all_members_tx(
                 // new root. The shared checkpoint may currently belong to the
                 // build epoch, so it cannot be used to reconstruct this proof.
                 let active_parser: i64 = transaction.query_row(
-                    "SELECT usage_parser_version FROM app_meta WHERE id=1",
+                    "SELECT active_parser_version FROM source_usage_epochs
+             WHERE source='codex'",
                     [],
                     |row| row.get(0),
                 )?;
@@ -1088,14 +1097,14 @@ pub(crate) fn cleanup_build_source(
         "DELETE FROM usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
         params![build_epoch, source_file_id],
     )?;
-    // Canonical rows are source-independent. Delete only those no longer
-    // referenced by any occurrence in the same epoch.
+    // Canonical rows are source-aware. Delete only Codex build rows no longer
+    // referenced by any Codex occurrence in the same source epoch.
     transaction.execute(
         "DELETE FROM usage_events
-         WHERE ledger_epoch=?1
+         WHERE source='codex' AND source_epoch=?1
            AND NOT EXISTS (
                SELECT 1 FROM usage_event_occurrences o
-               WHERE o.ledger_epoch=usage_events.ledger_epoch
+               WHERE o.source='codex' AND o.ledger_epoch=usage_events.source_epoch
                  AND o.event_id=usage_events.event_id
            )",
         [build_epoch],
@@ -1118,8 +1127,8 @@ pub(crate) fn apply_source_observations_to_build_tx(
 ) -> Result<(), RebuildError> {
     let (active_epoch, build_epoch, target_parser): (i64, Option<i64>, Option<i64>) = transaction
         .query_row(
-        "SELECT usage_active_epoch,usage_build_epoch,usage_build_parser_version
-             FROM app_meta WHERE id=1",
+        "SELECT active_epoch,build_epoch,build_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
@@ -1408,7 +1417,8 @@ fn freeze_member(
     };
     let active_parser: i64 = if active_epoch > 0 {
         transaction.query_row(
-            "SELECT usage_parser_version FROM app_meta WHERE id=1",
+            "SELECT active_parser_version FROM source_usage_epochs
+                     WHERE source='codex'",
             [],
             |row| row.get(0),
         )?
@@ -1626,7 +1636,8 @@ fn reset_checkpoint(
 
 fn current_build(transaction: &Transaction<'_>) -> Result<(i64, i64), RebuildError> {
     let pair = transaction.query_row(
-        "SELECT usage_build_epoch,usage_build_parser_version FROM app_meta WHERE id=1",
+        "SELECT build_epoch,build_parser_version FROM source_usage_epochs
+         WHERE source='codex'",
         [],
         |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
     )?;
@@ -1637,8 +1648,8 @@ fn current_build(transaction: &Transaction<'_>) -> Result<(i64, i64), RebuildErr
 
 fn load_snapshot(transaction: &Transaction<'_>) -> Result<BuildSnapshot, RebuildError> {
     let (active_epoch, build_epoch, parser): (i64, i64, i64) = transaction.query_row(
-        "SELECT usage_active_epoch,usage_build_epoch,usage_build_parser_version
-         FROM app_meta WHERE id=1",
+        "SELECT active_epoch,build_epoch,build_parser_version
+         FROM source_usage_epochs WHERE source='codex'",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
@@ -1956,7 +1967,7 @@ fn verify_complete_present_set(
         return Err(RebuildError::Cas("present source missing from manifest"));
     }
     let active_epoch: i64 = transaction.query_row(
-        "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+        "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
         [],
         |row| row.get(0),
     )?;
@@ -2043,15 +2054,53 @@ mod tests {
                 "../storage/schema/0009_skill_usage_events.sql"
             ))
             .unwrap();
+        // Promote the compact fixture to the v11 source-aware canonical
+        // columns. The real migration performs this transformation before
+        // runtime code executes; this local fixture keeps legacy insert
+        // statements readable while mirroring their Codex source identity.
+        connection
+            .execute_batch(
+                "ALTER TABLE usage_events ADD COLUMN source TEXT;
+                 ALTER TABLE usage_events ADD COLUMN source_epoch INTEGER;
+                 ALTER TABLE usage_event_occurrences ADD COLUMN source TEXT;
+                 CREATE TABLE source_usage_epochs(
+                    source TEXT PRIMARY KEY, active_epoch INTEGER NOT NULL,
+                    build_epoch INTEGER, active_parser_version INTEGER NOT NULL,
+                    build_parser_version INTEGER
+                 );
+                 INSERT INTO source_usage_epochs(source,active_epoch,active_parser_version)
+                    VALUES ('codex',0,0);
+                 CREATE TRIGGER usage_events_v11_defaults AFTER INSERT ON usage_events
+                 WHEN NEW.source IS NULL
+                 BEGIN
+                    UPDATE usage_events SET source='codex',source_epoch=NEW.ledger_epoch
+                    WHERE rowid=NEW.rowid;
+                 END;
+                 CREATE TRIGGER usage_occurrences_v11_defaults AFTER INSERT ON usage_event_occurrences
+                 WHEN NEW.source IS NULL
+                 BEGIN
+                    UPDATE usage_event_occurrences SET source='codex' WHERE rowid=NEW.rowid;
+                 END;
+                 CREATE TRIGGER app_meta_epoch_v11 AFTER UPDATE OF usage_active_epoch,
+                    usage_build_epoch,usage_parser_version,usage_build_parser_version ON app_meta
+                 BEGIN
+                    UPDATE source_usage_epochs SET active_epoch=NEW.usage_active_epoch,
+                      build_epoch=NEW.usage_build_epoch,
+                      active_parser_version=NEW.usage_parser_version,
+                      build_parser_version=NEW.usage_build_parser_version
+                    WHERE source='codex';
+                 END;",
+            )
+            .unwrap();
         connection
     }
 
     fn thread(connection: &Connection, id: &str) {
         connection
             .execute(
-                "INSERT INTO threads(thread_id,parent_thread_id,root_session_id,agent_role,
+                "INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,
                 archived,metadata_quality_status,metadata_resolved_at_ms)
-             VALUES (?1,NULL,?1,'main',0,'complete',1)",
+             VALUES (?1,'codex',?1,NULL,?1,'main',0,'complete',1)",
                 [id],
             )
             .unwrap();
@@ -2189,7 +2238,7 @@ mod tests {
         assert!(ledger.activate(&[1, 2]).is_err());
         let app_before: (i64, Option<i64>) = connection
             .query_row(
-                "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+                "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -2219,9 +2268,14 @@ mod tests {
                 data_revision: 1
             }
         );
-        let app: (i64,Option<i64>,i64) = connection.query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version FROM app_meta WHERE id=1", [],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let app: (i64, Option<i64>, i64) = connection
+            .query_row(
+                "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(app, (1, None, crate::usage::USAGE_PARSER_VERSION));
         assert_eq!(
             connection
@@ -2272,9 +2326,14 @@ mod tests {
                 .is_err(),
             "new present source is not silently omitted"
         );
-        let state: (i64,Option<i64>,i64) = connection.query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,data_revision FROM app_meta WHERE id=1", [],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let state: (i64, Option<i64>, i64) = connection
+            .query_row(
+                "SELECT active_epoch,build_epoch,(SELECT data_revision FROM app_meta WHERE id=1)
+             FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(state, (0, Some(1), 0));
 
         let snapshot = RebuildLedger::new(&mut connection)
@@ -2323,7 +2382,7 @@ mod tests {
         // the current parser never starts a new canonical write for parser 2.
         connection
             .execute(
-                "UPDATE app_meta SET usage_build_parser_version=2 WHERE id=1",
+                "UPDATE source_usage_epochs SET build_parser_version=2 WHERE source='codex'",
                 [],
             )
             .unwrap();

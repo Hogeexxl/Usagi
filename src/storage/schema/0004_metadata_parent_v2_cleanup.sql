@@ -99,6 +99,7 @@ CREATE INDEX rollout_metadata_facts_thread_idx
 
 CREATE TABLE app_meta_v4 (
     id INTEGER PRIMARY KEY CHECK (id = 1),
+    metadata_parser_version INTEGER NOT NULL CHECK (metadata_parser_version >= 0),
     data_revision INTEGER NOT NULL CHECK (data_revision >= 0),
     status_revision INTEGER NOT NULL CHECK (status_revision >= 0),
     scan_state TEXT NOT NULL CHECK (scan_state IN ('idle', 'running', 'failed')),
@@ -121,6 +122,9 @@ CREATE TABLE app_meta_v4 (
         followup_enqueued_status_revision IS NULL OR followup_enqueued_status_revision >= 0
     ),
     followup_error_code TEXT,
+    last_full_import_completed_at_ms INTEGER CHECK (
+        last_full_import_completed_at_ms IS NULL OR last_full_import_completed_at_ms >= 0
+    ),
     codex_home_fingerprint TEXT,
     source_binding_status TEXT NOT NULL CHECK (
         source_binding_status IN ('unbound', 'ready', 'source_changed')
@@ -161,21 +165,21 @@ CREATE TABLE app_meta_v4 (
 );
 
 INSERT INTO app_meta_v4 (
-    id, data_revision, status_revision, scan_state,
+    id, metadata_parser_version, data_revision, status_revision, scan_state,
     active_scan_id, last_finished_scan_id, last_finished_scan_result,
     last_scan_started_at_ms, last_scan_completed_at_ms, last_scan_failed_at_ms,
     last_scan_error_code, followup_scan_id, followup_state, followup_trigger,
     followup_requested_at_ms, followup_enqueued_status_revision, followup_error_code,
-    codex_home_fingerprint, source_binding_status,
+    last_full_import_completed_at_ms, codex_home_fingerprint, source_binding_status,
     usage_active_epoch, usage_build_epoch, usage_parser_version, usage_build_parser_version
 )
 SELECT
-    id, data_revision, status_revision, scan_state,
+    id, metadata_parser_version, data_revision, status_revision, scan_state,
     active_scan_id, last_finished_scan_id, last_finished_scan_result,
     last_scan_started_at_ms, last_scan_completed_at_ms, last_scan_failed_at_ms,
     last_scan_error_code, followup_scan_id, followup_state, followup_trigger,
     followup_requested_at_ms, followup_enqueued_status_revision, followup_error_code,
-    codex_home_fingerprint, source_binding_status,
+    last_full_import_completed_at_ms, codex_home_fingerprint, source_binding_status,
     usage_active_epoch, usage_build_epoch, usage_parser_version, usage_build_parser_version
 FROM app_meta;
 

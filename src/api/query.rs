@@ -1357,7 +1357,6 @@ mod tests {
             &range,
             UsageSnapshot {
                 data_revision: 9,
-                active_epoch: 2,
                 value: UsageSummary {
                     totals: TokenTotals {
                         input_tokens: 0,
@@ -1399,7 +1398,6 @@ mod tests {
             &range,
             SessionSnapshot {
                 data_revision: 9,
-                active_epoch: 2,
                 rows: vec![SessionUsageRow {
                     root_session_id: "root-a".into(),
                     title: None,
@@ -1530,7 +1528,6 @@ mod tests {
             &range,
             UsageSnapshot {
                 data_revision: 9,
-                active_epoch: 2,
                 value: vec![
                     ModelUsageRow {
                         model: "unknown".into(),
@@ -1572,7 +1569,6 @@ mod tests {
                 &range,
                 UsageSnapshot {
                     data_revision: JSON_SAFE_INTEGER_MAX + 1,
-                    active_epoch: 2,
                     value: UsageSummary {
                         totals: totals(Some(3), 1, 0),
                         session_count: 0,
@@ -1599,7 +1595,6 @@ mod tests {
             &range,
             SessionDetailSnapshot {
                 data_revision: 9,
-                active_epoch: 2,
                 value: SessionDetail {
                     root_session_id: "root".into(),
                     last_activity_at_ms: 20,

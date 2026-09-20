@@ -777,7 +777,6 @@ mod tests {
             created_at_ms: None,
             updated_at_ms: None,
             archived: false,
-            current_rollout_path: None,
             metadata_quality_status: MetadataQualityStatus::Partial,
         }
     }

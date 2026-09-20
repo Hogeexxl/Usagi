@@ -192,21 +192,32 @@ const INTERNAL_VALIDATION_PATH: &str = r"C:\validated\by\storage";
 #[cfg(not(windows))]
 const INTERNAL_VALIDATION_PATH: &str = "/validated/by/storage";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UsageEpochState {
+/// Source-scoped usage epoch state.  The source is part of the value so an
+/// epoch can never be mistaken for a global value or applied to another
+/// source's canonical data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceUsageEpochState {
+    pub source: crate::source::SourceId,
     pub active_epoch: i64,
     pub build_epoch: Option<i64>,
     pub active_parser_version: i64,
     pub build_parser_version: Option<i64>,
 }
 
-impl UsageEpochState {
+impl SourceUsageEpochState {
     pub fn new(
+        source: crate::source::SourceId,
         active_epoch: i64,
         build_epoch: Option<i64>,
         active_parser_version: i64,
         build_parser_version: Option<i64>,
     ) -> Result<Self, DomainError> {
+        source
+            .validate()
+            .map_err(|error| DomainError::InvalidValue {
+                field: "source",
+                reason: error.to_string(),
+            })?;
         non_negative(active_epoch, "usage_active_epoch")?;
         non_negative(active_parser_version, "usage_parser_version")?;
         if build_epoch.is_some() != build_parser_version.is_some() {
@@ -224,6 +235,7 @@ impl UsageEpochState {
         }
         optional_non_negative(build_parser_version, "usage_build_parser_version")?;
         Ok(Self {
+            source,
             active_epoch,
             build_epoch,
             active_parser_version,
@@ -231,14 +243,14 @@ impl UsageEpochState {
         })
     }
 
-    pub const fn working_epoch(self) -> i64 {
+    pub const fn working_epoch(&self) -> i64 {
         match self.build_epoch {
             Some(epoch) => epoch,
             None => self.active_epoch,
         }
     }
 
-    pub const fn working_parser_version(self) -> i64 {
+    pub const fn working_parser_version(&self) -> i64 {
         match self.build_parser_version {
             Some(version) => version,
             None => self.active_parser_version,
@@ -1693,6 +1705,10 @@ impl MetadataScanState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedThreadPatch {
     pub thread_id: String,
+    /// Canonical Session identity.  These fields are immutable after the
+    /// thread is created; Codex resolution keeps the legacy identity.
+    pub source: crate::source::SourceId,
+    pub native_session_id: String,
     pub parent_thread_id: Patch<String>,
     pub root_session_id: Patch<String>,
     pub agent_role: Patch<AgentRole>,
@@ -1704,7 +1720,6 @@ pub struct ResolvedThreadPatch {
     pub created_at_ms: Patch<i64>,
     pub updated_at_ms: Patch<i64>,
     pub archived: Patch<bool>,
-    pub current_rollout_path: Patch<String>,
     pub metadata_quality_status: MetadataQualityStatus,
     pub resolved_at_ms: i64,
     pub full_resolution: bool,
@@ -1716,6 +1731,8 @@ pub struct ResolvedThreadPatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExistingThreadProjection {
     pub thread_id: String,
+    pub source: crate::source::SourceId,
+    pub native_session_id: String,
     pub parent_thread_id: Option<String>,
     pub root_session_id: Option<String>,
     pub agent_role: AgentRole,
@@ -1727,7 +1744,6 @@ pub struct ExistingThreadProjection {
     pub created_at_ms: Option<i64>,
     pub updated_at_ms: Option<i64>,
     pub archived: bool,
-    pub current_rollout_path: Option<String>,
     pub metadata_quality_status: MetadataQualityStatus,
 }
 
@@ -1735,8 +1751,11 @@ impl ResolvedThreadPatch {
     /// Create a no-op patch.  Callers fill fields with `Set`/`Clear` values and
     /// can use `full_resolution(true)` before clearing values.
     pub fn new(thread_id: impl Into<String>, resolved_at_ms: i64) -> Result<Self, DomainError> {
+        let thread_id = thread_id.into();
         let value = Self {
-            thread_id: thread_id.into(),
+            thread_id: thread_id.clone(),
+            source: crate::source::SourceId::CODEX,
+            native_session_id: thread_id.clone(),
             parent_thread_id: Patch::Keep,
             root_session_id: Patch::Keep,
             agent_role: Patch::Keep,
@@ -1748,7 +1767,6 @@ impl ResolvedThreadPatch {
             created_at_ms: Patch::Keep,
             updated_at_ms: Patch::Keep,
             archived: Patch::Keep,
-            current_rollout_path: Patch::Keep,
             metadata_quality_status: MetadataQualityStatus::Complete,
             resolved_at_ms,
             full_resolution: false,
@@ -1768,6 +1786,13 @@ impl ResolvedThreadPatch {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         non_empty(&self.thread_id, "thread_id")?;
+        self.source
+            .validate()
+            .map_err(|error| DomainError::InvalidValue {
+                field: "source",
+                reason: error.to_string(),
+            })?;
+        non_empty(&self.native_session_id, "native_session_id")?;
         non_negative(self.resolved_at_ms, "resolved_at_ms")?;
         validate_patch_string(&self.parent_thread_id, "parent_thread_id")?;
         validate_patch_string(&self.root_session_id, "root_session_id")?;
@@ -1775,9 +1800,7 @@ impl ResolvedThreadPatch {
         validate_patch_string(&self.project_name, "project_name")?;
         validate_patch_string(&self.project_path, "project_path")?;
         validate_patch_string(&self.metadata_model, "metadata_model")?;
-        validate_patch_string(&self.current_rollout_path, "current_rollout_path")?;
         validate_patch_path(&self.project_path, "project_path")?;
-        validate_patch_path(&self.current_rollout_path, "current_rollout_path")?;
         validate_patch_time(&self.created_at_ms, "created_at_ms")?;
         validate_patch_time(&self.updated_at_ms, "updated_at_ms")?;
         if self.agent_role.is_clear() || self.project_kind.is_clear() || self.archived.is_clear() {
@@ -1821,7 +1844,6 @@ impl ResolvedThreadPatch {
             || self.created_at_ms.is_clear()
             || self.updated_at_ms.is_clear()
             || self.archived.is_clear()
-            || self.current_rollout_path.is_clear()
     }
 }
 
@@ -2966,18 +2988,27 @@ mod tests {
             None
         );
 
-        let active = UsageEpochState::new(3, None, 7, None).unwrap();
+        let active =
+            SourceUsageEpochState::new(crate::source::SourceId::CODEX, 3, None, 7, None).unwrap();
         assert_eq!(
             (active.working_epoch(), active.working_parser_version()),
             (3, 7)
         );
-        let building = UsageEpochState::new(3, Some(4), 7, Some(8)).unwrap();
+        let building =
+            SourceUsageEpochState::new(crate::source::SourceId::CODEX, 3, Some(4), 7, Some(8))
+                .unwrap();
         assert_eq!(
             (building.working_epoch(), building.working_parser_version()),
             (4, 8)
         );
-        assert!(UsageEpochState::new(3, Some(5), 7, Some(8)).is_err());
-        assert!(UsageEpochState::new(3, Some(4), 7, None).is_err());
+        assert!(
+            SourceUsageEpochState::new(crate::source::SourceId::CODEX, 3, Some(5), 7, Some(8))
+                .is_err()
+        );
+        assert!(
+            SourceUsageEpochState::new(crate::source::SourceId::CODEX, 3, Some(4), 7, None)
+                .is_err()
+        );
     }
 
     #[test]

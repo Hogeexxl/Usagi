@@ -58,31 +58,31 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
     let repository = BundledPricingRepository::new();
     let estimator = CostEstimator::new();
     let mut statement = transaction.prepare(
-        "SELECT ledger_epoch,event_id,event_kind,occurred_at_ms,model,
+        "SELECT source,source_epoch,event_id,event_kind,occurred_at_ms,model,
                 input_tokens,cached_tokens,cache_write_tokens,output_tokens,
                 reasoning_tokens,total_tokens
-         FROM usage_events ORDER BY ledger_epoch,event_id",
+         FROM usage_events ORDER BY source,source_epoch,event_id",
     )?;
     let mut rows = statement.query([])?;
     let mut updates = Vec::new();
     while let Some(row) = rows.next()? {
-        let event_kind: String = row.get(2)?;
+        let event_kind: String = row.get(3)?;
         let granularity = match event_kind.as_str() {
             "normal" | "recovered" => UsageCostGranularity::RequestScoped,
             "turn_compensation" => UsageCostGranularity::AggregateCompensation,
             _ => return Err(StorageError::invalid_state("invalid usage event kind")),
         };
         let usage = NormalizedTokenUsage::new(
-            row.get(5)?,
             row.get(6)?,
             row.get(7)?,
             row.get(8)?,
             row.get(9)?,
             row.get(10)?,
+            row.get(11)?,
         )
         .map_err(|_| StorageError::invalid_state("invalid canonical usage row"))?;
-        let model: String = row.get(4)?;
-        let occurred_at_ms: i64 = row.get(3)?;
+        let model: String = row.get(5)?;
+        let occurred_at_ms: i64 = row.get(4)?;
         let estimated_cost = estimate_event_cost(
             &repository,
             &estimator,
@@ -92,25 +92,47 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
             &usage,
         )?;
         updates.push((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
             estimated_cost,
         ));
     }
     drop(rows);
     drop(statement);
 
-    for (epoch, event_id, estimated_cost) in updates {
+    let mut active_cost_changed = false;
+    for (source, epoch, event_id, estimated_cost) in updates {
+        let old_cost: Option<i64> = transaction.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events
+             WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
+            params![source, epoch, event_id],
+            |row| row.get(0),
+        )?;
         transaction.execute(
             "UPDATE usage_events SET estimated_cost_nanos_usd=?1
-             WHERE ledger_epoch=?2 AND event_id=?3",
-            params![estimated_cost, epoch, event_id],
+             WHERE source=?2 AND source_epoch=?3 AND event_id=?4",
+            params![estimated_cost, source, epoch, event_id],
         )?;
+        if old_cost != estimated_cost {
+            let is_active: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_usage_epochs sue
+                    WHERE sue.source=?1 AND sue.active_epoch=?2)",
+                params![source, epoch],
+                |row| row.get::<_, i64>(0).map(|value| value != 0),
+            )?;
+            active_cost_changed |= is_active;
+        }
     }
 
-    let next_revision = current_revision
-        .checked_add(1)
-        .ok_or_else(|| StorageError::invalid_state("data revision overflow"))?;
+    let next_revision = if active_cost_changed {
+        current_revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::invalid_state("data revision overflow"))?
+    } else {
+        current_revision
+    };
     let changed = transaction.execute(
         "UPDATE app_meta
          SET cost_algorithm_version=?1,pricing_catalog_version=?2,data_revision=?3

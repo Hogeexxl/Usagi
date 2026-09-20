@@ -82,7 +82,6 @@ pub struct SkillsUsage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalyticsSnapshot<T> {
     pub data_revision: i64,
-    pub active_epoch: i64,
     pub value: T,
 }
 
@@ -91,7 +90,10 @@ fn snapshot_meta(
 ) -> Result<(i64, i64, i64), UsageLedgerError> {
     let values = transaction
         .query_row(
-            "SELECT data_revision,usage_active_epoch,usage_parser_version FROM app_meta WHERE id=1",
+            "SELECT app.data_revision,sue.active_epoch,sue.active_parser_version
+             FROM app_meta app
+             JOIN source_usage_epochs sue ON sue.source='codex'
+             WHERE app.id=1",
             [],
             |row| {
                 Ok((
@@ -113,19 +115,13 @@ fn snapshot_meta(
 fn scoped_where(
     event_alias: &str,
     root_alias: &str,
-    epoch: i64,
     range: TimeRange,
     filter: &UsageFilter,
 ) -> (String, Vec<Value>) {
-    let mut values = vec![
-        Value::Integer(epoch),
-        Value::Integer(range.start_ms),
-        Value::Integer(range.end_ms),
-    ];
+    let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
     let mut clauses = vec![
-        format!("{event_alias}.ledger_epoch=?1"),
-        format!("{event_alias}.occurred_at_ms>=?2"),
-        format!("{event_alias}.occurred_at_ms<?3"),
+        format!("{event_alias}.occurred_at_ms>=?1"),
+        format!("{event_alias}.occurred_at_ms<?2"),
     ];
     if !filter.models().is_empty() {
         let mut placeholders = Vec::new();
@@ -203,12 +199,14 @@ pub fn model_distribution_snapshot(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(StorageError::sqlite)?;
-    let (data_revision, active_epoch, _) = snapshot_meta(&transaction)?;
-    let (where_clause, values) = scoped_where("ue", "root", active_epoch, range, filter);
+    let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
+    let (where_clause, values) = scoped_where("ue", "root", range, filter);
     let sql = format!(
         "SELECT ue.model,COALESCE(SUM(ue.total_tokens),0),SUM(ue.estimated_cost_nanos_usd),
                 SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),COUNT(*)
-         FROM usage_events ue LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+         FROM usage_events ue
+         JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+         LEFT JOIN threads root ON root.thread_id=ue.root_session_id
          WHERE {where_clause} GROUP BY ue.model ORDER BY ue.model"
     );
     let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
@@ -238,7 +236,6 @@ pub fn model_distribution_snapshot(
     transaction.commit().map_err(StorageError::sqlite)?;
     Ok(AnalyticsSnapshot {
         data_revision,
-        active_epoch,
         value,
     })
 }
@@ -252,8 +249,8 @@ pub fn project_distribution_snapshot(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(StorageError::sqlite)?;
-    let (data_revision, active_epoch, _) = snapshot_meta(&transaction)?;
-    let (where_clause, values) = scoped_where("ue", "root", active_epoch, range, filter);
+    let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
+    let (where_clause, values) = scoped_where("ue", "root", range, filter);
     let sql = format!(
         "WITH scoped AS (
            SELECT CASE
@@ -264,7 +261,9 @@ pub fn project_distribution_snapshot(
                   CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_name END AS project_name,
                   CASE WHEN root.project_kind='project' AND root.project_name IS NOT NULL AND root.project_path IS NOT NULL THEN root.project_path END AS project_path,
                   ue.total_tokens,ue.estimated_cost_nanos_usd
-           FROM usage_events ue LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+           FROM usage_events ue
+           JOIN source_usage_epochs sue ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+           LEFT JOIN threads root ON root.thread_id=ue.root_session_id
            WHERE {where_clause}
          )
          SELECT kind,project_name,project_path,COALESCE(SUM(total_tokens),0),SUM(estimated_cost_nanos_usd),
@@ -310,7 +309,6 @@ pub fn project_distribution_snapshot(
     transaction.commit().map_err(StorageError::sqlite)?;
     Ok(AnalyticsSnapshot {
         data_revision,
-        active_epoch,
         value,
     })
 }
@@ -329,10 +327,12 @@ pub fn skills_usage_snapshot(
     let mut output = Vec::with_capacity(days.len());
     for day in days {
         let range = TimeRange::new(day.start_ms, day.end_ms)?;
-        let (where_clause, values) = scoped_where("se", "root", active_epoch, range, filter);
+        let (where_clause, values) = scoped_where("se", "root", range, filter);
         let mut skills = if ready {
             let sql = format!(
                 "SELECT se.skill_name,COUNT(*) FROM skill_usage_events se
+                 JOIN source_usage_epochs sue
+                   ON sue.source='codex' AND sue.active_epoch=se.ledger_epoch
                  LEFT JOIN threads root ON root.thread_id=se.root_session_id
                  WHERE {where_clause} GROUP BY se.skill_name
                  ORDER BY COUNT(*) DESC,se.skill_name ASC"
@@ -379,7 +379,6 @@ pub fn skills_usage_snapshot(
     transaction.commit().map_err(StorageError::sqlite)?;
     Ok(AnalyticsSnapshot {
         data_revision,
-        active_epoch,
         value: SkillsUsage {
             ready,
             days: output,
@@ -415,7 +414,9 @@ mod tests {
             .connection()
             .unwrap()
             .execute(
-                "UPDATE app_meta SET usage_active_epoch=1,usage_parser_version=?1 WHERE id=1",
+                "UPDATE source_usage_epochs
+                 SET active_epoch=1,active_parser_version=?1
+                 WHERE source='codex'",
                 [parser_version],
             )
             .unwrap();

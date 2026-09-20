@@ -44,7 +44,22 @@ impl Ledger {
     /// terminal historical row; beginning a new direct scan clears only its
     /// app-meta slot projection.
     pub fn mark_scan_started(&self, event: ScanStartEvent) -> Result<ScanState> {
+        // Compatibility seam for callers that only exercise the global v10
+        // lifecycle.  The v11 coordinator always calls the explicit
+        // registry-snapshot variant below.
+        self.mark_scan_started_with_sources(event, &[])
+    }
+
+    /// Start a new direct scan and atomically freeze the registry snapshot as
+    /// queued source child rows.  The parent row, app projection, and child
+    /// manifest all become visible in one transaction.
+    pub fn mark_scan_started_with_sources(
+        &self,
+        event: ScanStartEvent,
+        sources: &[String],
+    ) -> Result<ScanState> {
         event.validate().map_err(domain_storage_error)?;
+        validate_source_manifest(sources)?;
 
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -77,6 +92,7 @@ impl Ledger {
                 next_revision,
             ],
         )?;
+        insert_source_scan_manifest(&transaction, &event.scan_id, sources)?;
         transaction.execute(
             "UPDATE app_meta
              SET status_revision = ?1,
@@ -173,7 +189,20 @@ impl Ledger {
 
     /// Atomically consume a queued follow-up and make it the active scan.
     pub fn mark_followup_started(&self, event: FollowupStartedEvent) -> Result<ScanState> {
+        self.mark_followup_started_with_sources(event, &[])
+    }
+
+    /// Atomically consume a queued follow-up, freeze the current registry
+    /// snapshot, and make the follow-up the active scan.  Child creation and
+    /// the global running transition share one status revision and SQLite
+    /// transaction.
+    pub fn mark_followup_started_with_sources(
+        &self,
+        event: FollowupStartedEvent,
+        sources: &[String],
+    ) -> Result<ScanState> {
         event.validate().map_err(domain_storage_error)?;
+        validate_source_manifest(sources)?;
 
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -204,6 +233,7 @@ impl Ledger {
                 "queued follow-up changed before it could start".to_owned(),
             ));
         }
+        insert_source_scan_manifest(&transaction, &event.scan_id, sources)?;
         transaction.execute(
             "UPDATE app_meta
              SET status_revision = ?1,
@@ -293,32 +323,87 @@ impl Ledger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = require_active_scan(&transaction, &event.scan_id)?;
+
+        let failed_child: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM source_scan_runs
+                 WHERE scan_id = ?1 AND state = 'failed' LIMIT 1",
+                [&event.scan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let unfinished_children: i64 = transaction.query_row(
+            "SELECT count(*) FROM source_scan_runs
+             WHERE scan_id = ?1 AND state IN ('queued', 'running')",
+            [&event.scan_id],
+            |row| row.get(0),
+        )?;
+        if unfinished_children != 0 {
+            return Err(StorageError::invalid_state(
+                "cannot complete a scan while source runs remain unfinished".to_owned(),
+            ));
+        }
         let next_revision = increment_status_revision(current.status_revision)?;
 
-        let changed = transaction.execute(
-            "UPDATE scan_runs
-             SET state = 'completed', finished_at_ms = ?1,
-                 terminal_status_revision = ?2
-             WHERE scan_id = ?3 AND state = 'running'",
-            params![event.completed_at_ms, next_revision, event.scan_id],
-        )?;
+        let (global_state, global_error) = if failed_child.is_some() {
+            ("failed", Some("SOURCE_RUN_FAILED"))
+        } else {
+            ("completed", None)
+        };
+        let changed = if global_state == "failed" {
+            transaction.execute(
+                "UPDATE scan_runs
+                 SET state = 'failed', finished_at_ms = ?1,
+                     terminal_status_revision = ?2, error_code = ?3
+                 WHERE scan_id = ?4 AND state = 'running'",
+                params![
+                    event.completed_at_ms,
+                    next_revision,
+                    global_error,
+                    event.scan_id
+                ],
+            )?
+        } else {
+            transaction.execute(
+                "UPDATE scan_runs
+                 SET state = 'completed', finished_at_ms = ?1,
+                     terminal_status_revision = ?2
+                 WHERE scan_id = ?3 AND state = 'running'",
+                params![event.completed_at_ms, next_revision, event.scan_id],
+            )?
+        };
         if changed != 1 {
             return Err(StorageError::invalid_state(
                 "active scan is no longer running".to_owned(),
             ));
         }
-        transaction.execute(
-            "UPDATE app_meta
-             SET status_revision = ?1,
-                 scan_state = 'idle',
-                 active_scan_id = NULL,
-                 last_scan_completed_at_ms = ?2,
-                 last_scan_error_code = NULL,
-                 last_finished_scan_id = ?3,
-                 last_finished_scan_result = 'completed'
-             WHERE id = 1",
-            params![next_revision, event.completed_at_ms, event.scan_id],
-        )?;
+        if global_state == "failed" {
+            transaction.execute(
+                "UPDATE app_meta
+                 SET status_revision = ?1,
+                     scan_state = 'failed',
+                     active_scan_id = NULL,
+                     last_scan_failed_at_ms = ?2,
+                     last_scan_error_code = 'SOURCE_RUN_FAILED',
+                     last_finished_scan_id = ?3,
+                     last_finished_scan_result = 'failed'
+                 WHERE id = 1",
+                params![next_revision, event.completed_at_ms, event.scan_id],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE app_meta
+                 SET status_revision = ?1,
+                     scan_state = 'idle',
+                     active_scan_id = NULL,
+                     last_scan_completed_at_ms = ?2,
+                     last_scan_error_code = NULL,
+                     last_finished_scan_id = ?3,
+                     last_finished_scan_result = 'completed'
+                 WHERE id = 1",
+                params![next_revision, event.completed_at_ms, event.scan_id],
+            )?;
+        }
 
         let state = read_scan_state(&transaction)?;
         let data_revision = current.data_revision;
@@ -355,6 +440,16 @@ impl Ledger {
                 "active scan is no longer running".to_owned(),
             ));
         }
+        // A global terminal transition owns any source children that have
+        // not yet reached a terminal state.  Keeping this in the same
+        // transaction prevents shutdown/recovery from exposing a failed
+        // parent with queued or running children.
+        transaction.execute(
+            "UPDATE source_scan_runs
+             SET state = 'failed', finished_at_ms = ?1, error_code = ?2
+             WHERE scan_id = ?3 AND state IN ('queued', 'running')",
+            params![event.failed_at_ms, event.error_code, event.scan_id],
+        )?;
         transaction.execute(
             "UPDATE app_meta
              SET status_revision = ?1,
@@ -379,6 +474,153 @@ impl Ledger {
         self.publish_scan_state(data_revision, &state);
         Ok(state)
     }
+
+    /// Move one source child from queued to running and publish the resulting
+    /// status revision after the transaction commits.
+    pub fn mark_source_scan_started(
+        &self,
+        scan_id: &str,
+        source: &str,
+        started_at_ms: i64,
+    ) -> Result<ScanState> {
+        transition_source_scan(
+            self,
+            scan_id,
+            source,
+            started_at_ms,
+            SourceChildTransition::Start,
+        )
+    }
+
+    /// Move one source child from running to completed.
+    pub fn mark_source_scan_completed(
+        &self,
+        scan_id: &str,
+        source: &str,
+        finished_at_ms: i64,
+    ) -> Result<ScanState> {
+        transition_source_scan(
+            self,
+            scan_id,
+            source,
+            finished_at_ms,
+            SourceChildTransition::Complete,
+        )
+    }
+
+    /// Move one source child from queued to skipped.  A skipped child never
+    /// receives a started timestamp.
+    pub fn mark_source_scan_skipped(
+        &self,
+        scan_id: &str,
+        source: &str,
+        finished_at_ms: i64,
+    ) -> Result<ScanState> {
+        transition_source_scan(
+            self,
+            scan_id,
+            source,
+            finished_at_ms,
+            SourceChildTransition::Skip,
+        )
+    }
+
+    /// Move one source child from queued or running to failed, retaining the
+    /// source-specific error code.  Global cancellation/recovery terminalizes
+    /// all remaining children through `mark_scan_failed` instead.
+    pub fn mark_source_scan_failed(
+        &self,
+        scan_id: &str,
+        source: &str,
+        finished_at_ms: i64,
+        error_code: &str,
+    ) -> Result<ScanState> {
+        validate_error_code(error_code)?;
+        transition_source_scan(
+            self,
+            scan_id,
+            source,
+            finished_at_ms,
+            SourceChildTransition::Fail(error_code),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SourceChildTransition<'a> {
+    Start,
+    Complete,
+    Skip,
+    Fail(&'a str),
+}
+
+fn transition_source_scan(
+    ledger: &Ledger,
+    scan_id: &str,
+    source: &str,
+    at_ms: i64,
+    transition: SourceChildTransition<'_>,
+) -> Result<ScanState> {
+    validate_id(scan_id, "scan_id")?;
+    validate_source(source)?;
+    if at_ms < 0 {
+        return Err(StorageError::invalid_state(
+            "source scan timestamp must be non-negative".to_owned(),
+        ));
+    }
+
+    let mut connection = ledger.connection()?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = read_app_state(&transaction)?;
+    if current.scan_state != ScanLifecycleState::Running
+        || current.active_scan_id.as_deref() != Some(scan_id)
+    {
+        return Err(StorageError::invalid_state(
+            "source child transition requires the active global scan".to_owned(),
+        ));
+    }
+    ensure_scan_row_state(&transaction, scan_id, ScanRunState::Running)?;
+    let next_revision = increment_status_revision(current.status_revision)?;
+    let changed = match transition {
+        SourceChildTransition::Start => transaction.execute(
+            "UPDATE source_scan_runs
+             SET state = 'running', started_at_ms = ?1
+             WHERE scan_id = ?2 AND source = ?3 AND state = 'queued'",
+            params![at_ms, scan_id, source],
+        )?,
+        SourceChildTransition::Complete => transaction.execute(
+            "UPDATE source_scan_runs
+             SET state = 'completed', finished_at_ms = ?1
+             WHERE scan_id = ?2 AND source = ?3 AND state = 'running'",
+            params![at_ms, scan_id, source],
+        )?,
+        SourceChildTransition::Skip => transaction.execute(
+            "UPDATE source_scan_runs
+             SET state = 'skipped', finished_at_ms = ?1
+             WHERE scan_id = ?2 AND source = ?3 AND state = 'queued'",
+            params![at_ms, scan_id, source],
+        )?,
+        SourceChildTransition::Fail(error_code) => transaction.execute(
+            "UPDATE source_scan_runs
+             SET state = 'failed', finished_at_ms = ?1, error_code = ?2
+             WHERE scan_id = ?3 AND source = ?4 AND state IN ('queued', 'running')",
+            params![at_ms, error_code, scan_id, source],
+        )?,
+    };
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "source child is not in the expected state".to_owned(),
+        ));
+    }
+    transaction.execute(
+        "UPDATE app_meta SET status_revision = ?1 WHERE id = 1",
+        [next_revision],
+    )?;
+    let state = read_scan_state(&transaction)?;
+    let data_revision = current.data_revision;
+    transaction.commit()?;
+    ledger.publish_scan_state(data_revision, &state);
+    Ok(state)
 }
 
 fn validate_id(value: &str, field: &'static str) -> Result<()> {
@@ -386,6 +628,63 @@ fn validate_id(value: &str, field: &'static str) -> Result<()> {
         return Err(StorageError::invalid_state(format!(
             "invalid {field}: scan id must be non-empty and contain no control characters"
         )));
+    }
+    Ok(())
+}
+
+fn validate_source(value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(StorageError::invalid_state(
+            "source must be non-empty and contain no control characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_error_code(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(StorageError::invalid_state(
+            "source scan error code is not safe".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_manifest(sources: &[String]) -> Result<()> {
+    for source in sources {
+        validate_source(source)?;
+    }
+    for (index, source) in sources.iter().enumerate() {
+        if sources[..index].iter().any(|prior| prior == source) {
+            return Err(StorageError::invalid_state(format!(
+                "duplicate source in registry snapshot: {source}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn insert_source_scan_manifest(
+    transaction: &Transaction<'_>,
+    scan_id: &str,
+    sources: &[String],
+) -> Result<()> {
+    for source in sources {
+        transaction.execute(
+            "INSERT INTO source_scan_runs (
+                scan_id, source, state, started_at_ms, finished_at_ms, error_code
+             ) VALUES (?1, ?2, 'queued', NULL, NULL, NULL)",
+            params![scan_id, source],
+        )?;
     }
     Ok(())
 }
@@ -686,7 +985,8 @@ mod tests {
         assert_eq!(state.status_revision, 1);
         assert_eq!(state.scan_state, ScanLifecycleState::Running);
         assert_eq!(state.active_scan_id.as_deref(), Some("scan-a"));
-        assert_eq!(ledger.app_state().unwrap().data_revision, 1);
+        // Starting a scan is status-only; stable query data is unchanged.
+        assert_eq!(ledger.app_state().unwrap().data_revision, 0);
 
         let snapshot = ledger.scan_status_snapshot(Some("scan-a")).unwrap();
         assert_eq!(snapshot.status_revision, 1);
@@ -857,7 +1157,8 @@ mod tests {
         ledger
             .mark_scan_failed(ScanFailedEvent::new("scan-a", 20, "SCAN_INTERRUPTED").unwrap())
             .unwrap();
-        assert_eq!(ledger.app_state().unwrap().data_revision, 1);
+        // Failed lifecycle transitions are status-only as well.
+        assert_eq!(ledger.app_state().unwrap().data_revision, 0);
 
         start(&ledger, "scan-b", 30);
         let stale = ledger.mark_scan_completed(ScanCompletedEvent::new("scan-a", 40).unwrap());

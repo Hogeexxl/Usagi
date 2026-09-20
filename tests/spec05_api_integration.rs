@@ -770,16 +770,13 @@ async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snap
     let frozen = UsageLedger::new(&ledger)
         .summary_snapshot(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
-    let (db_revision, db_epoch): (i64, i64) = Connection::open(&fixture.db)
+    let db_revision: i64 = Connection::open(&fixture.db)
         .unwrap()
-        .query_row(
-            "SELECT data_revision,usage_active_epoch FROM app_meta WHERE id=1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(frozen.data_revision, db_revision);
-    assert_eq!(frozen.active_epoch, db_epoch);
     assert_eq!(frozen.value.totals.total_tokens, 30);
 
     let page1_response = call(&app, Method::GET, "/api/usage/sessions?range=year", &[]).await;
@@ -1313,9 +1310,9 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
     let db = Connection::open(&fixture.db).unwrap();
     db.execute(
         "DELETE FROM usage_event_occurrences
-         WHERE (ledger_epoch, event_id) IN (
-             SELECT ledger_epoch, event_id FROM usage_events
-             WHERE root_session_id=?1 AND thread_id=?1
+         WHERE source='codex' AND (ledger_epoch, event_id) IN (
+             SELECT source_epoch, event_id FROM usage_events
+             WHERE source='codex' AND root_session_id=?1 AND thread_id=?1
          )",
         [GATE_ROOT],
     )
@@ -1698,7 +1695,10 @@ async fn t_mu03_f01_real_structure_cost_effort_closes_db_aggregate_detail_chain(
     let event_rows: Vec<(String, Option<String>, Option<i64>)> = db
         .prepare(
             "SELECT model,reasoning_effort,estimated_cost_nanos_usd
-             FROM usage_events WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)
+             FROM usage_events
+             WHERE source='codex' AND source_epoch=(
+                 SELECT active_epoch FROM source_usage_epochs WHERE source='codex'
+             )
              ORDER BY thread_id,occurred_at_ms",
         )
         .unwrap()

@@ -405,8 +405,12 @@ fn active_events(
 ) -> Vec<(i64, i64, String, i64, Option<String>)> {
     let mut statement = connection
         .prepare(
-            "SELECT source_file_id,source_start_offset,model,total_tokens,reasoning_effort
-             FROM usage_events WHERE ledger_epoch=?1 ORDER BY source_file_id,source_start_offset",
+            "SELECT o.source_file_id,o.source_start_offset,e.model,e.total_tokens,e.reasoning_effort
+             FROM usage_event_occurrences o
+             JOIN usage_events e
+               ON e.source='codex' AND e.source_epoch=o.ledger_epoch AND e.event_id=o.event_id
+             WHERE o.source='codex' AND o.ledger_epoch=?1
+             ORDER BY o.source_file_id,o.source_start_offset",
         )
         .expect("prepare active event query");
     statement
@@ -441,7 +445,8 @@ fn seed_parser9_skill_fixture(fixture: &SkillFixture) -> (Arc<Ledger>, i64, i64)
     let connection = Connection::open(&fixture.db).expect("open seeded skill database");
     let (active_epoch, parser_version): (i64, i64) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_parser_version FROM app_meta WHERE id=1",
+            "SELECT active_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -464,7 +469,11 @@ fn seed_parser9_skill_fixture(fixture: &SkillFixture) -> (Arc<Ledger>, i64, i64)
     // Fixture seed: this is the parser-9 active state that predates the
     // parser-11 rebuild exercised by the tests below.
     connection
-        .execute("UPDATE app_meta SET usage_parser_version=9 WHERE id=1", [])
+        .execute(
+            "UPDATE source_usage_epochs SET active_parser_version=9
+             WHERE source='codex'",
+            [],
+        )
         .expect("seed parser-9 active metadata");
     connection
         .execute(
@@ -526,7 +535,7 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     let connection = Connection::open(&fixture.db).expect("open fixture database");
     let initial_epoch: i64 = connection
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )
@@ -564,7 +573,11 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     // fix: the genuine pre-context token stays unknown, while the later event
     // has been persisted with the same unknown model and lost effort.
     connection
-        .execute("UPDATE app_meta SET usage_parser_version=4 WHERE id=1", [])
+        .execute(
+            "UPDATE source_usage_epochs SET active_parser_version=4
+             WHERE source='codex'",
+            [],
+        )
         .expect("mark active parser v4");
     connection
         .execute(
@@ -586,7 +599,11 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     connection
         .execute(
             "UPDATE usage_events SET model='unknown',reasoning_effort=NULL
-             WHERE ledger_epoch=?1 AND source_file_id=?2 AND model='gpt-5.6-sol'",
+             WHERE source='codex' AND source_epoch=?1 AND model='gpt-5.6-sol'
+               AND event_id IN (
+                   SELECT event_id FROM usage_event_occurrences
+                   WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               )",
             params![initial_epoch, child_source_id],
         )
         .expect("persist historical unknown event");
@@ -626,8 +643,8 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version
-                 FROM app_meta WHERE id=1",
+                "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| Ok((
                     row.get::<_, i64>(0)?,
@@ -654,8 +671,8 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     let connection = Connection::open(&fixture.db).expect("open rebuilt database");
     let (active_epoch, build_epoch, parser_version): (i64, Option<i64>, i64) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -694,7 +711,8 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=?1",
+                "SELECT count(*) FROM usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1",
                 [active_epoch],
                 |row| row.get::<_, i64>(0),
             )
@@ -705,7 +723,7 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
         connection
             .query_row(
                 "SELECT count(DISTINCT event_id) FROM usage_event_occurrences
-                 WHERE ledger_epoch=?1",
+                 WHERE source='codex' AND ledger_epoch=?1",
                 [active_epoch],
                 |row| row.get::<_, i64>(0),
             )
@@ -756,9 +774,9 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
     let connection = Connection::open(&fixture.db).expect("open parser-9 rebuild database");
     let before: (i64, Option<i64>, i64, Option<i64>) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,
-                    usage_parser_version,usage_build_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,
+                    active_parser_version,build_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -792,9 +810,9 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
     let connection = Connection::open(&fixture.db).expect("open activated parser-11 database");
     let after: (i64, Option<i64>, i64, Option<i64>) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,
-                    usage_parser_version,usage_build_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,
+                    active_parser_version,build_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -933,8 +951,8 @@ fn t_s07_004_skill_event_source_replace_clears_old_rows_before_activation() {
     let connection = Connection::open(&fixture.db).expect("open activated replacement database");
     let (active_epoch, build_epoch, parser_version): (i64, Option<i64>, i64) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )

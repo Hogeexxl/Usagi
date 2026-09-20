@@ -13,7 +13,6 @@ use std::{
 
 use crate::domain::{
     DomainError, FollowupState, ScanLifecycleState, ScanResult, ScanState, ScanTrigger,
-    UsageEpochState,
 };
 use crate::platform::paths;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -42,6 +41,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "threads",
     "usage_events",
     "usage_event_occurrences",
+    "source_usage_epochs",
+    "source_scan_runs",
     "turns",
     "ingest_anomalies",
     "usage_source_states",
@@ -571,32 +572,6 @@ impl Ledger {
         Ok(self.app_state()?.source_binding_status)
     }
 
-    /// Read the v10 usage epoch projection for the source-bound compatibility
-    /// capability. The global v10 row remains until the v11 source epoch
-    /// migration; adapters cannot select another source through this seam.
-    pub(crate) fn load_usage_epoch_state(&self) -> Result<UsageEpochState> {
-        let connection = self.connection()?;
-        let (active_epoch, build_epoch, active_parser_version, build_parser_version): (
-            i64,
-            Option<i64>,
-            i64,
-            Option<i64>,
-        ) = connection.query_row(
-            "SELECT usage_active_epoch, usage_build_epoch, usage_parser_version,
-                    usage_build_parser_version
-             FROM app_meta WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-        UsageEpochState::new(
-            active_epoch,
-            build_epoch,
-            active_parser_version,
-            build_parser_version,
-        )
-        .map_err(|error| StorageError::invalid_state(error.to_string()))
-    }
-
     /// Return an error for consumers that would write source-derived facts.
     /// A `source_changed` Ledger remains usable for read-only queries.
     pub fn ensure_source_ready(&self) -> Result<()> {
@@ -730,7 +705,7 @@ fn read_pragma_state(connection: &Connection) -> rusqlite::Result<PragmaState> {
     })
 }
 
-fn validate_schema(connection: &Connection, db_path: &Path) -> rusqlite::Result<()> {
+pub(crate) fn validate_schema(connection: &Connection, db_path: &Path) -> rusqlite::Result<()> {
     let quick_check: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if !quick_check.eq_ignore_ascii_case("ok") {
         return Err(rusqlite::Error::InvalidParameterName(format!(
@@ -753,7 +728,228 @@ fn validate_schema(connection: &Connection, db_path: &Path) -> rusqlite::Result<
             )));
         }
     }
+
+    require_not_null_columns(connection, "threads", &["source", "native_session_id"])?;
+    require_non_empty_check(connection, "threads", "source")?;
+    require_non_empty_check(connection, "threads", "native_session_id")?;
+    require_unique_key(connection, "threads", &["source", "native_session_id"])?;
+
+    require_non_empty_check(connection, "source_usage_epochs", "source")?;
+    require_primary_key(connection, "source_usage_epochs", &["source"])?;
+
+    require_not_null_columns(connection, "usage_events", &["source", "source_epoch"])?;
+    require_non_empty_check(connection, "usage_events", "source")?;
+    require_check_fragment(connection, "usage_events", "source_epoch>0")?;
+    require_primary_key(
+        connection,
+        "usage_events",
+        &["source", "source_epoch", "event_id"],
+    )?;
+    for check in [
+        "cached_tokens<=input_tokens",
+        "cache_write_tokensisnullorcached_tokens+cache_write_tokens<=input_tokens",
+        "reasoning_tokens<=output_tokens",
+        "total_tokens=input_tokens+output_tokens",
+    ] {
+        require_check_fragment(connection, "usage_events", check)?;
+    }
+    require_foreign_key(
+        connection,
+        "usage_events",
+        "source_usage_epochs",
+        &[("source", "source")],
+    )?;
+
+    require_not_null_columns(connection, "usage_event_occurrences", &["source"])?;
+    require_check_fragment(connection, "usage_event_occurrences", "source='codex'")?;
+    require_primary_key(
+        connection,
+        "usage_event_occurrences",
+        &[
+            "source",
+            "ledger_epoch",
+            "source_file_id",
+            "file_generation",
+            "source_start_offset",
+        ],
+    )?;
+    require_foreign_key(
+        connection,
+        "usage_event_occurrences",
+        "usage_events",
+        &[
+            ("source", "source"),
+            ("ledger_epoch", "source_epoch"),
+            ("event_id", "event_id"),
+        ],
+    )?;
+
+    require_not_null_columns(connection, "source_scan_runs", &["scan_id", "source"])?;
+    require_non_empty_check(connection, "source_scan_runs", "source")?;
+    require_primary_key(connection, "source_scan_runs", &["scan_id", "source"])?;
+    for check in [
+        "statein('queued','running','completed','skipped','failed')",
+        "state='queued'andstarted_at_msisnullandfinished_at_msisnullanderror_codeisnull",
+        "state='running'andstarted_at_msisnotnullandfinished_at_msisnullanderror_codeisnull",
+        "state='completed'andstarted_at_msisnotnullandfinished_at_msisnotnullanderror_codeisnull",
+        "state='skipped'andstarted_at_msisnullandfinished_at_msisnotnullanderror_codeisnull",
+        "state='failed'andfinished_at_msisnotnullanderror_codeisnotnullandlength(error_code)>0",
+        "started_at_msisnullorstarted_at_ms>=0",
+        "finished_at_msisnullorfinished_at_ms>=0",
+        "started_at_msisnullorfinished_at_msisnullorfinished_at_ms>=started_at_ms",
+    ] {
+        require_check_fragment(connection, "source_scan_runs", check)?;
+    }
+
     Ok(())
+}
+
+fn require_not_null_columns(
+    connection: &Connection,
+    table: &str,
+    columns: &[&str],
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info('{table}')"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)? != 0))
+    })?;
+    let mut found = std::collections::HashMap::new();
+    for row in rows {
+        let (name, not_null) = row?;
+        found.insert(name, not_null);
+    }
+    for column in columns {
+        if !found.get(*column).copied().unwrap_or(false) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "required NOT NULL column {table}.{column} is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_primary_key(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info('{table}')"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+    })?;
+    let mut actual = rows
+        .map(|row| row.map(|(name, order)| (order, name)))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    actual.retain(|(order, _)| *order > 0);
+    actual.sort_by_key(|(order, _)| *order);
+    let actual = actual.into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+    if actual
+        != expected
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>()
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "{table} primary key does not match required schema"
+        )));
+    }
+    Ok(())
+}
+
+fn require_unique_key(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> rusqlite::Result<()> {
+    let mut indexes = connection.prepare(&format!("PRAGMA index_list('{table}')"))?;
+    let index_rows = indexes.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+    })?;
+    for index_row in index_rows {
+        let (index, unique) = index_row?;
+        if !unique {
+            continue;
+        }
+        let mut info = connection.prepare(&format!("PRAGMA index_info('{index}')"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns == expected {
+            return Ok(());
+        }
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "{table} is missing required unique key"
+    )))
+}
+
+fn require_foreign_key(
+    connection: &Connection,
+    table: &str,
+    parent: &str,
+    expected: &[(&str, &str)],
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list('{table}')"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids = rows
+        .iter()
+        .filter(|(_, table_name, _, _)| table_name == parent)
+        .map(|(id, _, _, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.iter().any(|id| {
+        expected.iter().all(|(from, to)| {
+            rows.iter().any(|(row_id, table_name, row_from, row_to)| {
+                row_id == id && table_name == parent && row_from == from && row_to == to
+            })
+        })
+    }) {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "{table} is missing required foreign key to {parent}"
+    )))
+}
+
+fn require_non_empty_check(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<()> {
+    require_check_fragment(connection, table, &format!("length({column})>0"))
+}
+
+fn require_check_fragment(
+    connection: &Connection,
+    table: &str,
+    fragment: &str,
+) -> rusqlite::Result<()> {
+    let sql: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let normalized_sql = normalize(&sql);
+    if normalized_sql.contains(&normalize(fragment)) {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "{table} is missing required CHECK constraint"
+    )))
 }
 
 fn bind_codex_home(connection: &mut Connection, fingerprint: &str) -> rusqlite::Result<()> {
@@ -922,7 +1118,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
     use super::{
         Ledger, LedgerOptions, PragmaState, SourceBindingStatus, StorageErrorKind,
@@ -1030,7 +1226,7 @@ mod tests {
         let root = TempDir::new();
         let ledger = Ledger::open(options(&root)).unwrap();
         assert!(ledger.database_path().exists());
-        assert_eq!(ledger.schema_version().unwrap(), 10);
+        assert_eq!(ledger.schema_version().unwrap(), 11);
         assert_eq!(
             ledger.pragma_state().unwrap(),
             PragmaState {
@@ -1041,7 +1237,7 @@ mod tests {
             }
         );
         let state = ledger.app_state().unwrap();
-        assert_eq!(state.data_revision, 1);
+        assert_eq!(state.data_revision, 0);
         assert_eq!(state.status_revision, 0);
         assert_eq!(state.source_binding_status, SourceBindingStatus::Ready);
         assert!(!root.path().join("codex").is_dir());
@@ -1056,7 +1252,7 @@ mod tests {
         drop(first);
         let second = Ledger::open(opts).unwrap();
         assert_eq!(second.expected_codex_home_fingerprint(), fingerprint);
-        assert_eq!(second.schema_version().unwrap(), 10);
+        assert_eq!(second.schema_version().unwrap(), 11);
         assert_eq!(second.app_state().unwrap().status_revision, 0);
     }
 
@@ -1162,7 +1358,7 @@ mod tests {
         let before = fs::read(&db).unwrap();
         let error = Ledger::open(LedgerOptions::new(&db, root.path().join("codex"))).unwrap_err();
         assert_eq!(error.kind(), StorageErrorKind::SchemaTooNew);
-        assert_eq!(error.schema_versions(), Some((99, 10)));
+        assert_eq!(error.schema_versions(), Some((99, 11)));
         assert_eq!(fs::read(&db).unwrap(), before);
     }
 
@@ -1211,10 +1407,18 @@ mod tests {
         let connection = ledger.connection().unwrap();
         connection
             .execute(
+                "UPDATE source_usage_epochs
+                 SET active_epoch=1,active_parser_version=7
+                 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
                 "INSERT INTO threads(
-                    thread_id,parent_thread_id,root_session_id,agent_role,archived,
+                    thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,archived,
                     project_kind,metadata_quality_status,metadata_resolved_at_ms
-                 ) VALUES ('cost-root',NULL,'cost-root','main',0,'unknown','complete',0)",
+                 ) VALUES ('cost-root','codex','cost-root',NULL,'cost-root','main',0,'unknown','complete',0)",
                 [],
             )
             .unwrap();
@@ -1231,15 +1435,14 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
-                        total_tokens,quality_status,source_file_id,file_generation,source_start_offset,
-                        source_end_offset,created_at_ms
-                     ) VALUES (1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review',NULL,NULL,
-                               1000,200,100,50,20,1050,'complete',1,1,0,1,0),
-                              (1,'overflow','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol',NULL,NULL,
-                               9000000000000000,0,0,0,0,9000000000000000,'complete',1,1,1,2,0)",
+                        total_tokens,quality_status,created_at_ms
+                     ) VALUES ('codex',1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review',NULL,NULL,
+                               1000,200,100,50,20,1050,'complete',0),
+                              ('codex',1,'overflow','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol',NULL,NULL,
+                               9000000000000000,0,0,0,0,9000000000000000,'complete',0)",
                     [],
                 )
                 .unwrap();
@@ -1247,17 +1450,16 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO usage_events(
-                        ledger_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
-                        total_tokens,quality_status,source_file_id,file_generation,source_start_offset,
-                        source_end_offset,created_at_ms
-                     ) VALUES (1,'known','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol','high',NULL,
-                               1000,200,100,50,20,1050,'complete',1,1,0,1,0),
-                              (1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review','high',NULL,
-                               1000,200,100,50,20,1050,'complete',1,1,1,2,0),
-                              (1,'unknown','recovered',0,'cost-root','cost-root',NULL,'unknown-model',NULL,NULL,
-                               1000,200,100,50,20,1050,'complete',1,1,2,3,0)",
+                        total_tokens,quality_status,created_at_ms
+                     ) VALUES ('codex',1,'known','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol','high',NULL,
+                               1000,200,100,50,20,1050,'complete',0),
+                              ('codex',1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review','high',NULL,
+                               1000,200,100,50,20,1050,'complete',0),
+                              ('codex',1,'unknown','recovered',0,'cost-root','cost-root',NULL,'unknown-model',NULL,NULL,
+                               1000,200,100,50,20,1050,'complete',0)",
                     [],
                 )
                 .unwrap();
@@ -1276,21 +1478,60 @@ mod tests {
         revision
     }
 
+    fn insert_cost_event(
+        connection: &Connection,
+        source: &str,
+        source_epoch: i64,
+        event_id: &str,
+        model: &str,
+        estimated_cost_nanos_usd: Option<i64>,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    source,source_epoch,event_id,event_kind,occurred_at_ms,
+                    thread_id,root_session_id,turn_key,model,reasoning_effort,
+                    estimated_cost_nanos_usd,input_tokens,cached_tokens,cache_write_tokens,
+                    output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
+                 ) VALUES (?1,?2,?3,'normal',0,'cost-root','cost-root',NULL,?4,NULL,?5,
+                           1000,200,100,50,20,1050,'complete',0)",
+                params![
+                    source,
+                    source_epoch,
+                    event_id,
+                    model,
+                    estimated_cost_nanos_usd,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn mark_cost_versions_stale(connection: &Connection) {
+        connection
+            .execute(
+                "UPDATE app_meta
+                 SET cost_algorithm_version=0,pricing_catalog_version=0
+                 WHERE id=1",
+                [],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn t_mu04_a02_open_reprices_pricing_catalog_atomically() {
         let root = TempDir::new();
         let opts = options(&root);
         let first = Ledger::open(opts.clone()).unwrap();
+        let before_revision = seed_cost_events(&first, false);
         let parser_version_before: i64 = first
             .connection()
             .unwrap()
             .query_row(
-                "SELECT usage_parser_version FROM app_meta WHERE id=1",
+                "SELECT active_parser_version FROM source_usage_epochs WHERE source='codex'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        let before_revision = seed_cost_events(&first, false);
         drop(first);
 
         let reopened = Ledger::open(opts).unwrap();
@@ -1315,7 +1556,7 @@ mod tests {
                     (SELECT cost_algorithm_version FROM app_meta WHERE id=1),
                     (SELECT pricing_catalog_version FROM app_meta WHERE id=1),
                     (SELECT data_revision FROM app_meta WHERE id=1),
-                    (SELECT usage_parser_version FROM app_meta WHERE id=1)",
+                    (SELECT active_parser_version FROM source_usage_epochs WHERE source='codex')",
                 [],
                 |row| {
                     Ok((
@@ -1385,5 +1626,172 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, (None, None, 0, 0, before_revision));
+    }
+
+    #[test]
+    fn t_q08_cost_repricing_revision_matrix() {
+        // (1) Inactive and build history is repriced, but no active row is
+        // visible, so the dashboard revision remains unchanged.
+        let root = TempDir::new();
+        let opts = options(&root);
+        let first = Ledger::open(opts.clone()).unwrap();
+        let before_revision = seed_cost_events(&first, false);
+        let connection = first.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE source_usage_epochs
+                 SET active_epoch=2,build_epoch=3,build_parser_version=7
+                 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        insert_cost_event(
+            &connection,
+            "codex",
+            3,
+            "build-only",
+            "gpt-5.6-sol",
+            Some(0),
+        );
+        connection
+            .execute(
+                "UPDATE usage_events SET estimated_cost_nanos_usd=0
+                 WHERE source='codex' AND event_id IN ('known','build-only')",
+                [],
+            )
+            .unwrap();
+        mark_cost_versions_stale(&connection);
+        drop(connection);
+        drop(first);
+
+        let reopened = Ledger::open(opts).unwrap();
+        let connection = reopened.connection().unwrap();
+        let (inactive, build, revision): (Option<i64>, Option<i64>, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT estimated_cost_nanos_usd FROM usage_events
+                     WHERE source='codex' AND source_epoch=1 AND event_id='known'),
+                    (SELECT estimated_cost_nanos_usd FROM usage_events
+                     WHERE source='codex' AND source_epoch=3 AND event_id='build-only'),
+                    (SELECT data_revision FROM app_meta WHERE id=1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(inactive, Some(4_380_000));
+        assert_eq!(build, Some(4_380_000));
+        assert_eq!(revision, before_revision);
+
+        // (2) An actual active-cost change bumps the global revision once.
+        let root = TempDir::new();
+        let opts = options(&root);
+        let first = Ledger::open(opts.clone()).unwrap();
+        let before_revision = seed_cost_events(&first, false);
+        let connection = first.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE usage_events SET estimated_cost_nanos_usd=0
+                 WHERE source='codex' AND event_id='known'",
+                [],
+            )
+            .unwrap();
+        mark_cost_versions_stale(&connection);
+        drop(connection);
+        drop(first);
+        let reopened = Ledger::open(opts).unwrap();
+        let connection = reopened.connection().unwrap();
+        let (known, revision): (Option<i64>, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT estimated_cost_nanos_usd FROM usage_events
+                     WHERE source='codex' AND source_epoch=1 AND event_id='known'),
+                    (SELECT data_revision FROM app_meta WHERE id=1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(known, Some(4_380_000));
+        assert_eq!(revision, before_revision + 1);
+
+        // (3) Repricing an active row to its existing value does not bump.
+        let root = TempDir::new();
+        let opts = options(&root);
+        let first = Ledger::open(opts.clone()).unwrap();
+        let before_revision = seed_cost_events(&first, false);
+        let connection = first.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE usage_events SET estimated_cost_nanos_usd=CASE event_id
+                     WHEN 'known' THEN 4380000
+                     WHEN 'auto-review' THEN 229000
+                     ELSE NULL END
+                 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        mark_cost_versions_stale(&connection);
+        drop(connection);
+        drop(first);
+        let reopened = Ledger::open(opts).unwrap();
+        assert_eq!(reopened.current_revision().data_revision, before_revision);
+
+        // (4) The complete source-aware key prevents same-event-id rows from
+        // different sources from being cross-updated.
+        let root = TempDir::new();
+        let opts = options(&root);
+        let first = Ledger::open(opts.clone()).unwrap();
+        let before_revision = seed_cost_events(&first, false);
+        let connection = first.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_usage_epochs(
+                    source,active_epoch,active_parser_version
+                 ) VALUES ('fake-source',8,1)",
+                [],
+            )
+            .unwrap();
+        insert_cost_event(
+            &connection,
+            "fake-source",
+            8,
+            "known",
+            "codex-auto-review",
+            Some(0),
+        );
+        connection
+            .execute(
+                "UPDATE usage_events SET estimated_cost_nanos_usd=0
+                 WHERE event_id='known'",
+                [],
+            )
+            .unwrap();
+        mark_cost_versions_stale(&connection);
+        drop(connection);
+        drop(first);
+        let reopened = Ledger::open(opts).unwrap();
+        let connection = reopened.connection().unwrap();
+        let rows = connection
+            .prepare(
+                "SELECT source,estimated_cost_nanos_usd FROM usage_events
+                 WHERE event_id='known' ORDER BY source",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("codex".to_owned(), Some(4_380_000)),
+                ("fake-source".to_owned(), Some(229_000)),
+            ]
+        );
+        assert_eq!(
+            reopened.current_revision().data_revision,
+            before_revision + 1
+        );
     }
 }

@@ -398,7 +398,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 10);
+    assert_eq!(user_version, 11);
     let source_id = 1_i64;
     let db = Connection::open(&fixture.db).unwrap();
     let old_metadata: (i64, i64, Option<String>, Option<String>, Option<i64>) = db
@@ -460,8 +460,8 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let db = Connection::open(&fixture.db).unwrap();
     let before_scan: (i64, Option<i64>, i64) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version
-             FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -498,8 +498,9 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let db = Connection::open(&fixture.db).unwrap();
     let after_scan: (i64, Option<i64>, i64, i64) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version,data_revision
-             FROM app_meta WHERE id=1",
+            "SELECT sue.active_epoch,sue.build_epoch,sue.active_parser_version,am.data_revision
+             FROM source_usage_epochs sue JOIN app_meta am ON am.id=1
+             WHERE sue.source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -616,7 +617,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let usage_event: (String, String, i64, String) = db
         .query_row(
             "SELECT thread_id,root_session_id,total_tokens,model
-             FROM usage_events WHERE ledger_epoch=1",
+             FROM usage_events WHERE source='codex' AND source_epoch=1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -724,11 +725,12 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
     let backfilled_cost: Option<i64> = db
         .query_row(
-            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE ledger_epoch=1 AND event_id=?1",
+            "SELECT estimated_cost_nanos_usd FROM usage_events
+             WHERE source='codex' AND source_epoch=1 AND event_id=?1",
             [&event_id],
             |row| row.get(0),
         )
@@ -744,7 +746,7 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     let db = Connection::open(&fixture.db).unwrap();
     let active_epoch: i64 = db
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )
@@ -753,7 +755,7 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
         .query_row(
             "SELECT count(*),COALESCE(SUM(total_tokens),0),
                     MIN(estimated_cost_nanos_usd),MIN(model),MIN(reasoning_effort)
-             FROM usage_events WHERE ledger_epoch=?1",
+             FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [active_epoch],
             |row| {
                 Ok((
@@ -820,8 +822,11 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     // The same raw two-event history is retained while the active epoch is
     // marked as the legacy parser/canonical v3 baseline.
     let db = Connection::open(&fixture.db).unwrap();
-    db.execute("UPDATE app_meta SET usage_parser_version=3 WHERE id=1", [])
-        .unwrap();
+    db.execute(
+        "UPDATE source_usage_epochs SET active_parser_version=3 WHERE source='codex'",
+        [],
+    )
+    .unwrap();
     db.execute(
         "UPDATE source_checkpoints SET parser_version=3
          WHERE source_file_id=1 AND consumer_kind='usage'",
@@ -830,7 +835,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     .unwrap();
     db.execute(
         "UPDATE usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
-         WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)
+         WHERE ledger_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
            AND source_file_id=1",
         [],
     )
@@ -840,8 +845,9 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
             "SELECT count(*),COALESCE(SUM(total_tokens),0),
                     SUM(CASE WHEN reasoning_effort IS NULL THEN 1 ELSE 0 END),
                     SUM(CASE WHEN reasoning_effort='high' THEN 1 ELSE 0 END),
-                    (SELECT usage_parser_version FROM app_meta WHERE id=1)
-             FROM usage_events WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)",
+                    (SELECT active_parser_version FROM source_usage_epochs WHERE source='codex')
+             FROM usage_events
+             WHERE source='codex' AND source_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
@@ -864,8 +870,11 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
         .unwrap();
     drop(state);
     let db = Connection::open(&fixture.db).unwrap();
-    db.execute("UPDATE app_meta SET usage_parser_version=3 WHERE id=1", [])
-        .unwrap();
+    db.execute(
+        "UPDATE source_usage_epochs SET active_parser_version=3 WHERE source='codex'",
+        [],
+    )
+    .unwrap();
     db.execute(
         "UPDATE source_checkpoints SET parser_version=3,committed_offset=0,
                 guard_hash=NULL,processing_status='pending'
@@ -875,7 +884,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     .unwrap();
     db.execute(
         "UPDATE usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
-         WHERE ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1)
+         WHERE ledger_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
            AND source_file_id=1",
         [],
     )
@@ -886,7 +895,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     let db = Connection::open(&fixture.db).unwrap();
     let active_epoch: i64 = db
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| row.get(0),
         )
@@ -897,8 +906,8 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
                     SUM(CASE WHEN reasoning_effort IS NULL THEN 1 ELSE 0 END),
                     SUM(CASE WHEN reasoning_effort='high' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN reasoning_effort='low' THEN 1 ELSE 0 END),
-                    (SELECT usage_parser_version FROM app_meta WHERE id=1)
-             FROM usage_events WHERE ledger_epoch=?1",
+                    (SELECT active_parser_version FROM source_usage_epochs WHERE source='codex')
+             FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [active_epoch],
             |row| {
                 Ok((
@@ -1008,8 +1017,10 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     let db = Connection::open(&fixture.db).unwrap();
     let initial: (i64, i64, i64, i64, i64) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_parser_version,cost_algorithm_version,
-                    pricing_catalog_version,data_revision FROM app_meta WHERE id=1",
+            "SELECT sue.active_epoch,sue.active_parser_version,am.cost_algorithm_version,
+                    am.pricing_catalog_version,am.data_revision
+             FROM source_usage_epochs sue JOIN app_meta am ON am.id=1
+             WHERE sue.source='codex'",
             [],
             |row| {
                 Ok((
@@ -1026,7 +1037,8 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     assert_eq!((initial.2, initial.3), (1, 4));
     let initial_tokens: i64 = db
         .query_row(
-            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events WHERE ledger_epoch=?1",
+            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events
+             WHERE source='codex' AND source_epoch=?1",
             [initial.0],
             |row| row.get(0),
         )
@@ -1053,17 +1065,18 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     let db = Connection::open(&fixture.db).unwrap();
     let metadata_only: (i64, i64, i64) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_parser_version,
+            "SELECT sue.active_epoch,sue.active_parser_version,
                     (SELECT parser_version FROM source_checkpoints
                      WHERE source_file_id=1 AND consumer_kind='metadata')
-             FROM app_meta WHERE id=1",
+             FROM source_usage_epochs sue WHERE sue.source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     let tokens_after_metadata: i64 = db
         .query_row(
-            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events WHERE ledger_epoch=?1",
+            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events
+             WHERE source='codex' AND source_epoch=?1",
             [metadata_only.0],
             |row| row.get(0),
         )
@@ -1090,7 +1103,8 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     )
     .unwrap();
     db.execute(
-        "UPDATE usage_events SET estimated_cost_nanos_usd=NULL WHERE ledger_epoch=?1",
+        "UPDATE usage_events SET estimated_cost_nanos_usd=NULL
+         WHERE source='codex' AND source_epoch=?1",
         [initial.0],
     )
     .unwrap();
@@ -1099,10 +1113,11 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     let db = Connection::open(&fixture.db).unwrap();
     let cost_only: (i64, i64, i64, Option<i64>) = db
         .query_row(
-            "SELECT usage_active_epoch,cost_algorithm_version,pricing_catalog_version,
+            "SELECT sue.active_epoch,am.cost_algorithm_version,am.pricing_catalog_version,
                     (SELECT estimated_cost_nanos_usd FROM usage_events
-                     WHERE ledger_epoch=?1 LIMIT 1)
-             FROM app_meta WHERE id=1",
+                     WHERE source='codex' AND source_epoch=?1 LIMIT 1)
+             FROM source_usage_epochs sue JOIN app_meta am ON am.id=1
+             WHERE sue.source='codex'",
             [initial.0],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -1115,8 +1130,11 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     // Finally force a usage parser/canonical v3 -> v5 shadow rebuild.  The
     // metadata checkpoint stays at v3 and cost versions remain current.
     let db = Connection::open(&fixture.db).unwrap();
-    db.execute("UPDATE app_meta SET usage_parser_version=3 WHERE id=1", [])
-        .unwrap();
+    db.execute(
+        "UPDATE source_usage_epochs SET active_parser_version=3 WHERE source='codex'",
+        [],
+    )
+    .unwrap();
     db.execute(
         "UPDATE source_checkpoints SET parser_version=3,committed_offset=0,
                 guard_hash=NULL,processing_status='pending'
@@ -1148,11 +1166,12 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     let db = Connection::open(&fixture.db).unwrap();
     let usage_only: (i64, i64, i64, i64, i64) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_parser_version,cost_algorithm_version,
+            "SELECT sue.active_epoch,sue.active_parser_version,am.cost_algorithm_version,
                     pricing_catalog_version,
                     (SELECT parser_version FROM source_checkpoints
                      WHERE source_file_id=1 AND consumer_kind='metadata')
-             FROM app_meta WHERE id=1",
+             FROM source_usage_epochs sue JOIN app_meta am ON am.id=1
+             WHERE sue.source='codex'",
             [],
             |row| {
                 Ok((
@@ -1190,15 +1209,20 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
     );
 
     let db = Connection::open(&fixture.db).unwrap();
-    let app: (i64, Option<i64>, i64) = db.query_row(
-        "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version FROM app_meta WHERE id=1",
-        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let app: (i64, Option<i64>, i64) = db
+        .query_row(
+            "SELECT active_epoch,build_epoch,active_parser_version
+         FROM source_usage_epochs WHERE source='codex'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(app.0, 1);
     assert!(app.1.is_none());
     assert_eq!(app.2, usagi::usage::USAGE_PARSER_VERSION);
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_events WHERE ledger_epoch=1",
+            "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=1",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -1207,7 +1231,8 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
     );
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=1",
+            "SELECT count(*) FROM usage_event_occurrences
+             WHERE source='codex' AND ledger_epoch=1",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -1367,7 +1392,7 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
     let db = Connection::open(&fixture.db).unwrap();
     let active_during: i64 = db
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |r| r.get(0),
         )
@@ -1381,14 +1406,14 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
     let db = Connection::open(&fixture.db).unwrap();
     let epoch: (i64, Option<i64>) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
     assert_eq!(epoch, (2, None));
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_event_occurrences WHERE ledger_epoch=2 AND source_file_id=?1", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
+        db.query_row("SELECT count(*) FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch=2 AND source_file_id=?1", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
         1
     );
     assert_eq!(
@@ -1452,7 +1477,8 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     let db = Connection::open(&fixture.db).unwrap();
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_events WHERE event_kind='recovered'",
+            "SELECT count(*) FROM usage_events
+             WHERE source='codex' AND event_kind='recovered'",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -1474,9 +1500,17 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     fs::write(&rollout, &bytes).unwrap();
     request_and_wait(&handle, &ledger);
     let db = Connection::open(&fixture.db).unwrap();
-    let tail: (i64, String, Option<i64>) = db.query_row(
-        "SELECT c.committed_offset,s.raw_tail_status,s.raw_tail_start_offset FROM source_checkpoints c JOIN usage_source_states s ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1) WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
-        [source_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let tail: (i64, String, Option<i64>) = db
+        .query_row(
+            "SELECT c.committed_offset,s.raw_tail_status,s.raw_tail_start_offset
+         FROM source_checkpoints c JOIN usage_source_states s
+           ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(
+               SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
+         WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
+            [source_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(tail, (half_start, "half_line".to_owned(), Some(half_start)));
     assert_eq!(
         db.query_row("SELECT count(*) FROM usage_events", [], |r| r
@@ -1514,9 +1548,17 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
         25
     );
     let db = Connection::open(&fixture.db).unwrap();
-    let final_tail: (i64, i64, String) = db.query_row(
-        "SELECT c.committed_offset,s.observed_raw_size,s.raw_tail_status FROM source_checkpoints c JOIN usage_source_states s ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(SELECT usage_active_epoch FROM app_meta WHERE id=1) WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
-        [source_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let final_tail: (i64, i64, String) = db
+        .query_row(
+            "SELECT c.committed_offset,s.observed_raw_size,s.raw_tail_status
+         FROM source_checkpoints c JOIN usage_source_states s
+           ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(
+               SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
+         WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
+            [source_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(final_tail.0, final_tail.1);
     assert_eq!(final_tail.2, "none");
     handle.shutdown().unwrap();
@@ -1628,7 +1670,7 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
         .unwrap();
     let epoch_before: i64 = db
         .query_row(
-            "SELECT usage_active_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |r| r.get(0),
         )
@@ -1649,7 +1691,10 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
 
     let db = Connection::open(&fixture.db).unwrap();
     let (active, build, revision, offset, raw): (i64, Option<i64>, i64, i64, i64) = db.query_row(
-        "SELECT a.usage_active_epoch,a.usage_build_epoch,a.data_revision,c.committed_offset,s.observed_size FROM app_meta a,source_checkpoints c JOIN source_files s USING(source_file_id) WHERE a.id=1 AND c.consumer_kind='usage' AND c.source_file_id=?1",
+        "SELECT sue.active_epoch,sue.build_epoch,a.data_revision,c.committed_offset,s.observed_size
+         FROM app_meta a JOIN source_usage_epochs sue ON sue.source='codex',
+              source_checkpoints c JOIN source_files s USING(source_file_id)
+         WHERE a.id=1 AND c.consumer_kind='usage' AND c.source_file_id=?1",
         [source_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
     assert_eq!(
         active,
@@ -1665,7 +1710,7 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     assert_eq!(offset, raw);
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_events WHERE ledger_epoch=?1",
+            "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=?1",
             [active],
             |r| r.get::<_, i64>(0)
         )
@@ -1742,7 +1787,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
         .unwrap();
     let first_epoch: (i64, Option<i64>) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1864,7 +1909,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     let db = Connection::open(&fixture.db).unwrap();
     let final_epoch: (i64, Option<i64>) = db
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1934,8 +1979,8 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     let final_event: (i64, Option<String>, i64) = db
         .query_row(
             "SELECT count(*),MIN(reasoning_effort),COALESCE(SUM(total_tokens),0)
-             FROM usage_events WHERE ledger_epoch=?1 AND source_file_id=?2",
-            params![final_epoch.0, source_id],
+             FROM usage_events WHERE source='codex' AND source_epoch=?1",
+            [final_epoch.0],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
@@ -1994,7 +2039,7 @@ fn t_s04_019_t_s02_020_late_foreign_meta_discards_preceding_usage_and_starts_reb
     let db = Connection::open(&fixture.db).unwrap();
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_events WHERE ledger_epoch=1",
+            "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=1",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -2004,8 +2049,8 @@ fn t_s04_019_t_s02_020_late_foreign_meta_discards_preceding_usage_and_starts_reb
     );
     let build: (i64, Option<i64>, String, i64) = db.query_row(
         "SELECT
-            (SELECT usage_active_epoch FROM app_meta WHERE id=1),
-            (SELECT usage_build_epoch FROM app_meta WHERE id=1),
+            (SELECT active_epoch FROM source_usage_epochs WHERE source='codex'),
+            (SELECT build_epoch FROM source_usage_epochs WHERE source='codex'),
             (SELECT processing_status FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'),
             (SELECT committed_offset FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage')",
         [source_id],
@@ -2057,8 +2102,8 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
     let first: (i64, Option<i64>, i64, String, String, i64, String, String) = db
         .query_row(
             "SELECT
-                a.usage_active_epoch,
-                a.usage_build_epoch,
+                sue.active_epoch,
+                sue.build_epoch,
                 c.committed_offset,
                 c.processing_status,
                 s.continuation_state,
@@ -2066,11 +2111,12 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
                 s.owning_thread_id,
                 s.root_session_id
              FROM app_meta a
+             JOIN source_usage_epochs sue ON sue.source='codex'
              JOIN source_files f ON f.current_path=?1
              JOIN source_checkpoints c
                ON c.source_file_id=f.source_file_id AND c.consumer_kind='usage'
              JOIN usage_source_states s
-               ON s.ledger_epoch=a.usage_active_epoch AND s.source_file_id=f.source_file_id
+               ON s.ledger_epoch=sue.active_epoch AND s.source_file_id=f.source_file_id
              WHERE a.id=1",
             [rollout.to_str().unwrap()],
             |r| {
@@ -2131,11 +2177,12 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
         .query_row(
             "SELECT c.committed_offset,s.continuation_state
              FROM app_meta a
+             JOIN source_usage_epochs sue ON sue.source='codex'
              JOIN source_files f ON f.current_path=?1
              JOIN source_checkpoints c
                ON c.source_file_id=f.source_file_id AND c.consumer_kind='usage'
              JOIN usage_source_states s
-               ON s.ledger_epoch=a.usage_active_epoch AND s.source_file_id=f.source_file_id
+               ON s.ledger_epoch=sue.active_epoch AND s.source_file_id=f.source_file_id
              WHERE a.id=1",
             [rollout.to_str().unwrap()],
             |r| Ok((r.get(0)?, r.get(1)?)),

@@ -297,7 +297,7 @@ fn t_s01_001_v1_schema_initial_state_pragmas_and_reopen_matrix() {
     assert_eq!(pragmas.busy_timeout_ms, 5_000);
 
     let app = ledger.app_state().unwrap();
-    assert_eq!(app.data_revision, 1);
+    assert_eq!(app.data_revision, 0);
     assert_eq!(app.scan.status_revision, 0);
     assert!(app.scan.active_scan_id.is_none());
     assert!(app.scan.followup_scan_id.is_none());
@@ -713,7 +713,7 @@ fn t_s01_009_metadata_transaction_rollback_survives_reopen() {
                 |row| { row.get::<_, i64>(0) }
             )
             .unwrap(),
-        1
+        0
     );
     drop(connection);
     drop(reopened);

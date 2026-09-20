@@ -134,9 +134,23 @@ pub(crate) trait ScanWorker: Send + Sync + 'static {
 trait LifecycleStore: Send + Sync + 'static {
     fn scan_state(&self) -> Result<ScanState, StorageError>;
     fn mark_started(&self, event: ScanStartEvent) -> Result<ScanState, StorageError>;
+    fn mark_started_with_sources(
+        &self,
+        event: ScanStartEvent,
+        _sources: &[String],
+    ) -> Result<ScanState, StorageError> {
+        self.mark_started(event)
+    }
     fn reserve_followup(&self, event: ReserveScanFollowupEvent) -> Result<ScanState, StorageError>;
     fn mark_followup_started(&self, event: FollowupStartedEvent)
     -> Result<ScanState, StorageError>;
+    fn mark_followup_started_with_sources(
+        &self,
+        event: FollowupStartedEvent,
+        _sources: &[String],
+    ) -> Result<ScanState, StorageError> {
+        self.mark_followup_started(event)
+    }
     fn mark_followup_start_failed(
         &self,
         event: FollowupStartFailedEvent,
@@ -154,6 +168,14 @@ impl LifecycleStore for Ledger {
         self.mark_scan_started(event)
     }
 
+    fn mark_started_with_sources(
+        &self,
+        event: ScanStartEvent,
+        sources: &[String],
+    ) -> Result<ScanState, StorageError> {
+        self.mark_scan_started_with_sources(event, sources)
+    }
+
     fn reserve_followup(&self, event: ReserveScanFollowupEvent) -> Result<ScanState, StorageError> {
         self.reserve_scan_followup(event)
     }
@@ -163,6 +185,14 @@ impl LifecycleStore for Ledger {
         event: FollowupStartedEvent,
     ) -> Result<ScanState, StorageError> {
         self.mark_followup_started(event)
+    }
+
+    fn mark_followup_started_with_sources(
+        &self,
+        event: FollowupStartedEvent,
+        sources: &[String],
+    ) -> Result<ScanState, StorageError> {
+        self.mark_followup_started_with_sources(event, sources)
     }
 
     fn mark_followup_start_failed(
@@ -277,13 +307,24 @@ impl ScanCoordinator {
         Self::start_with_interval(config.interval, store, worker)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn start_interval_with_reports(
         interval: Duration,
         ledger: Arc<Ledger>,
         worker: Arc<dyn ScanWorker>,
         reports: Arc<std::sync::Mutex<Vec<SourceRunReport>>>,
     ) -> Result<ScanHandle, ScanStartError> {
-        Self::start_with_interval_and_reports(interval, ledger, worker, Some(reports))
+        Self::start_with_interval_and_reports(interval, ledger, worker, Some(reports), Vec::new())
+    }
+
+    pub(crate) fn start_interval_with_reports_and_sources(
+        interval: Duration,
+        ledger: Arc<Ledger>,
+        worker: Arc<dyn ScanWorker>,
+        reports: Arc<std::sync::Mutex<Vec<SourceRunReport>>>,
+        sources: Vec<String>,
+    ) -> Result<ScanHandle, ScanStartError> {
+        Self::start_with_interval_and_reports(interval, ledger, worker, Some(reports), sources)
     }
 
     fn start_with_interval(
@@ -291,7 +332,7 @@ impl ScanCoordinator {
         store: Arc<dyn LifecycleStore>,
         worker: Arc<dyn ScanWorker>,
     ) -> Result<ScanHandle, ScanStartError> {
-        Self::start_with_interval_and_reports(interval, store, worker, None)
+        Self::start_with_interval_and_reports(interval, store, worker, None, Vec::new())
     }
 
     fn start_with_interval_and_reports(
@@ -299,6 +340,7 @@ impl ScanCoordinator {
         store: Arc<dyn LifecycleStore>,
         worker: Arc<dyn ScanWorker>,
         reports: Option<Arc<std::sync::Mutex<Vec<SourceRunReport>>>>,
+        manifest_sources: Vec<String>,
     ) -> Result<ScanHandle, ScanStartError> {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let availability = Arc::new(AtomicU8::new(RECOVERING));
@@ -314,6 +356,7 @@ impl ScanCoordinator {
                     receiver,
                     loop_commands,
                     loop_availability,
+                    manifest_sources,
                 )
                 .run();
             })
@@ -335,6 +378,7 @@ struct EventLoop {
     interval: Duration,
     store: Arc<dyn LifecycleStore>,
     worker: Arc<dyn ScanWorker>,
+    manifest_sources: Vec<String>,
     receiver: Receiver<Command>,
     commands: SyncSender<Command>,
     availability: Arc<AtomicU8>,
@@ -356,11 +400,13 @@ impl EventLoop {
         receiver: Receiver<Command>,
         commands: SyncSender<Command>,
         availability: Arc<AtomicU8>,
+        manifest_sources: Vec<String>,
     ) -> Self {
         Self {
             interval,
             store,
             worker,
+            manifest_sources,
             receiver,
             commands,
             availability,
@@ -487,7 +533,10 @@ impl EventLoop {
                     .expect("validated queued state has an id");
                 let event = FollowupStartedEvent::new(scan_id.clone(), now_ms())
                     .expect("fixed follow-up event is valid");
-                match self.store.mark_followup_started(event) {
+                match self
+                    .store
+                    .mark_followup_started_with_sources(event, &self.manifest_sources)
+                {
                     Ok(_) => {
                         self.retry_attempt = 0;
                         self.spawn_worker(scan_id);
@@ -514,7 +563,10 @@ impl EventLoop {
             let scan_id = next_scan_id();
             let event = ScanStartEvent::new(scan_id.clone(), ScanTrigger::Startup, now_ms())
                 .expect("generated startup event is valid");
-            match self.store.mark_started(event) {
+            match self
+                .store
+                .mark_started_with_sources(event, &self.manifest_sources)
+            {
                 Ok(_) => {
                     self.retry_attempt = 0;
                     self.spawn_worker(scan_id);
@@ -540,7 +592,13 @@ impl EventLoop {
             }
             Command::WorkerFinished { scan_id, result } => {
                 self.handle_terminal(scan_id, result);
-                if self.availability.load(Ordering::Acquire) == SHUTTING_DOWN {
+                // `ScanHandle::shutdown` publishes SHUTTING_DOWN before it
+                // enqueues the command carrying the reply channel.  A worker
+                // completion can therefore arrive first; keep the event loop
+                // alive until that explicit command installs `shutdown_reply`.
+                if self.availability.load(Ordering::Acquire) == SHUTTING_DOWN
+                    && self.shutdown_reply.is_some()
+                {
                     let _ = self.drive_shutdown();
                 }
                 self.shutdown_reply.is_none()
@@ -599,7 +657,7 @@ impl EventLoop {
             .expect("generated scan event is valid");
         let state = self
             .store
-            .mark_started(event)
+            .mark_started_with_sources(event, &self.manifest_sources)
             .map_err(|error| map_commit_error(error, true))?;
         let revision = state.status_revision;
         self.spawn_worker(scan_id.clone());
@@ -717,7 +775,10 @@ impl EventLoop {
             .expect("validated queued state has an id");
         let event = FollowupStartedEvent::new(scan_id.clone(), now_ms())
             .expect("generated follow-up event is valid");
-        match self.store.mark_followup_started(event) {
+        match self
+            .store
+            .mark_followup_started_with_sources(event, &self.manifest_sources)
+        {
             Ok(_) => {
                 self.retry_at = None;
                 self.retry_attempt = 0;
@@ -1003,22 +1064,34 @@ impl IngestionCoordinator {
             .validate()
             .map_err(IngestionStartError::InvalidConfig)?;
         let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let manifest_sources = registry
+            .source_ids()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         let worker = Arc::new(RegistryWorker {
             registry,
+            ledger: Arc::clone(&ledger),
             storage_factory: SourceStorageFactory::new(Arc::clone(&ledger)),
             reports: Arc::clone(&reports),
         });
-        ScanCoordinator::start_interval_with_reports(config.interval, ledger, worker, reports)
-            .map_err(|error| match error {
-                ScanStartError::InvalidConfig(_) | ScanStartError::CoordinatorUnavailable => {
-                    IngestionStartError::CoordinatorUnavailable
-                }
-            })
+        ScanCoordinator::start_interval_with_reports_and_sources(
+            config.interval,
+            ledger,
+            worker,
+            reports,
+            manifest_sources,
+        )
+        .map_err(|error| match error {
+            ScanStartError::InvalidConfig(_) | ScanStartError::CoordinatorUnavailable => {
+                IngestionStartError::CoordinatorUnavailable
+            }
+        })
     }
 }
 
 struct RegistryWorker {
     registry: SourceRegistry,
+    ledger: Arc<Ledger>,
     storage_factory: SourceStorageFactory,
     reports: Arc<std::sync::Mutex<Vec<SourceRunReport>>>,
 }
@@ -1042,21 +1115,74 @@ impl ScanWorker for RegistryWorker {
             }
             match adapter.availability() {
                 Ok(AdapterAvailability::Unavailable(reason)) => {
-                    reports.push(SourceRunReport::skipped_with_detail(
-                        scan_id, &source, reason,
-                    ));
+                    if source == crate::source::SourceId::CODEX {
+                        let detail = reason;
+                        let _child_result = self.ledger.mark_source_scan_failed(
+                            scan_id,
+                            source.as_str(),
+                            now_ms(),
+                            "SCANNER_UNAVAILABLE",
+                        );
+                        reports.push(SourceRunReport::failed_with_detail(
+                            scan_id,
+                            &source,
+                            "SCANNER_UNAVAILABLE",
+                            detail,
+                        ));
+                        failed = true;
+                    } else {
+                        if self
+                            .ledger
+                            .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
+                            .is_err()
+                        {
+                            failed = true;
+                        }
+                        reports.push(SourceRunReport::skipped_with_detail(
+                            scan_id, &source, reason,
+                        ));
+                    }
                     continue;
                 }
                 Ok(AdapterAvailability::NotInstalled) => {
-                    reports.push(SourceRunReport::skipped_with_detail(
-                        scan_id,
-                        &source,
-                        "source is not installed",
-                    ));
+                    if source == crate::source::SourceId::CODEX {
+                        let _ = self.ledger.mark_source_scan_failed(
+                            scan_id,
+                            source.as_str(),
+                            now_ms(),
+                            "SCANNER_UNAVAILABLE",
+                        );
+                        reports.push(SourceRunReport::failed_with_detail(
+                            scan_id,
+                            &source,
+                            "SCANNER_UNAVAILABLE",
+                            "source is not installed",
+                        ));
+                        failed = true;
+                    } else {
+                        if self
+                            .ledger
+                            .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
+                            .is_err()
+                        {
+                            failed = true;
+                        }
+                        reports.push(SourceRunReport::skipped_with_detail(
+                            scan_id,
+                            &source,
+                            "source is not installed",
+                        ));
+                    }
                     continue;
                 }
                 Ok(AdapterAvailability::Available) => {}
                 Err(error) => {
+                    let _ = self.ledger.mark_source_scan_failed(
+                        scan_id,
+                        source.as_str(),
+                        now_ms(),
+                        error.code(),
+                    );
                     reports.push(SourceRunReport::failed_with_detail(
                         scan_id,
                         &source,
@@ -1068,9 +1194,30 @@ impl ScanWorker for RegistryWorker {
                 }
             }
 
+            if self
+                .ledger
+                .mark_source_scan_started(scan_id, source.as_str(), now_ms())
+                .is_err()
+            {
+                reports.push(SourceRunReport::failed_with_detail(
+                    scan_id,
+                    &source,
+                    "SOURCE_RUN_FAILED",
+                    "source child could not be started",
+                ));
+                failed = true;
+                continue;
+            }
+
             let context = match self.storage_factory.context(scan_id, adapter.descriptor()) {
                 Ok(context) => context,
                 Err(error) => {
+                    let _ = self.ledger.mark_source_scan_failed(
+                        scan_id,
+                        source.as_str(),
+                        now_ms(),
+                        "SOURCE_CONTEXT_FAILED",
+                    );
                     reports.push(SourceRunReport::failed_with_detail(
                         scan_id,
                         &source,
@@ -1082,8 +1229,38 @@ impl ScanWorker for RegistryWorker {
                 }
             };
             match adapter.run_scan(&context, cancellation) {
-                Ok(()) => reports.push(SourceRunReport::completed(scan_id, &source)),
+                Ok(()) if cancellation.load(Ordering::Acquire) => {
+                    let _ = self.ledger.mark_source_scan_failed(
+                        scan_id,
+                        source.as_str(),
+                        now_ms(),
+                        "SCAN_CANCELLED",
+                    );
+                    reports.push(SourceRunReport::failed_with_detail(
+                        scan_id,
+                        &source,
+                        "SCAN_CANCELLED",
+                        "source run cancelled during execution",
+                    ));
+                    failed = true;
+                }
+                Ok(()) => {
+                    if self
+                        .ledger
+                        .mark_source_scan_completed(scan_id, source.as_str(), now_ms())
+                        .is_err()
+                    {
+                        failed = true;
+                    }
+                    reports.push(SourceRunReport::completed(scan_id, &source));
+                }
                 Err(error) => {
+                    let _ = self.ledger.mark_source_scan_failed(
+                        scan_id,
+                        source.as_str(),
+                        now_ms(),
+                        error.code(),
+                    );
                     reports.push(SourceRunReport::failed_with_detail(
                         scan_id,
                         &source,
@@ -1410,6 +1587,46 @@ mod tests {
     }
 
     #[test]
+    fn worker_finished_before_shutdown_command_still_acknowledges_shutdown() {
+        let (_temp, ledger, _config) = setup("shutdown-order");
+        let scan_id = "scan-shutdown-order";
+        ledger
+            .mark_scan_started(ScanStartEvent::new(scan_id, ScanTrigger::Manual, 1).unwrap())
+            .unwrap();
+
+        let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let availability = Arc::new(AtomicU8::new(SHUTTING_DOWN));
+        let (worker, _started, _release) = worker();
+        let mut event_loop = EventLoop::new_interval(
+            Duration::from_secs(3_600),
+            Arc::clone(&ledger) as Arc<dyn LifecycleStore>,
+            worker,
+            receiver,
+            commands,
+            Arc::clone(&availability),
+            Vec::new(),
+        );
+        event_loop.active = Some(ActiveWorker {
+            scan_id: scan_id.to_owned(),
+            cancellation: Arc::new(AtomicBool::new(false)),
+        });
+
+        // ScanHandle::shutdown publishes SHUTTING_DOWN before its command
+        // carrying the reply channel is received.  Deliver the worker event
+        // first to exercise that ordering explicitly.
+        assert!(!event_loop.handle_command(Command::WorkerFinished {
+            scan_id: scan_id.to_owned(),
+            result: WorkerResult::Completed,
+        }));
+        assert_eq!(availability.load(Ordering::Acquire), SHUTTING_DOWN);
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        assert!(event_loop.handle_command(Command::Shutdown { reply: reply_tx }));
+        assert_eq!(reply_rx.recv().unwrap(), Ok(()));
+        assert_eq!(availability.load(Ordering::Acquire), STOPPED);
+    }
+
+    #[test]
     fn concurrent_requests_share_one_durable_followup_and_ack() {
         let (_temp, ledger, config) = setup("coalesce");
         let (worker_impl, started, release) = worker();
@@ -1528,7 +1745,8 @@ mod tests {
             ledger.app_state().unwrap().scan_state == ScanLifecycleState::Idle
         });
         let completed = ledger.app_state().unwrap();
-        assert_eq!(completed.data_revision, 1);
+        // Scan lifecycle/status transitions do not change stable query data.
+        assert_eq!(completed.data_revision, 0);
         assert_eq!(completed.status_revision, started_revision + 1);
         assert_eq!(
             ledger

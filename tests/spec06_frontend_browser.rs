@@ -703,7 +703,7 @@ async fn spec06_real_axum_browser_gate() {
     let ledger = Arc::new(
         Ledger::open(LedgerOptions::new(&database, &codex_home)).expect("temporary ledger"),
     );
-    assert_eq!(ledger.schema_version().expect("browser schema version"), 10);
+    assert_eq!(ledger.schema_version().expect("browser schema version"), 11);
     let source_ids = sources
         .iter()
         .map(|(source_id, _, _)| *source_id)

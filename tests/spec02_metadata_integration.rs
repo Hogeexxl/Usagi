@@ -471,7 +471,14 @@ fn t_s02_019_late_foreign_meta_marks_metadata_rebuild() {
     assert_eq!(state.last_finished_scan_result, Some(ScanResult::Failed));
     assert_eq!(
         state.last_scan_error_code.as_deref(),
-        Some("METADATA_CONTINUATION_UNSTABLE")
+        Some("SOURCE_RUN_FAILED")
+    );
+    assert!(
+        handle
+            .source_reports()
+            .iter()
+            .any(|report| report.error_code.as_deref() == Some("METADATA_CONTINUATION_UNSTABLE")),
+        "the source report retains the concrete metadata continuation error"
     );
 
     let (_, committed_offset, processing_status, thread_id) = fixture.source_row();

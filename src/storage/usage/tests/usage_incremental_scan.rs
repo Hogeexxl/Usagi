@@ -225,8 +225,9 @@ fn t_perf_002_build_global_control_worklist_matrix() {
         .connection()
         .unwrap()
         .execute(
-            "UPDATE app_meta SET usage_active_epoch=0,usage_build_epoch=NULL,
-                usage_build_parser_version=NULL WHERE id=1",
+            "UPDATE source_usage_epochs
+             SET active_epoch=0,build_epoch=NULL,build_parser_version=NULL
+             WHERE source='codex'",
             [],
         )
         .unwrap();
@@ -243,7 +244,10 @@ fn t_perf_002_build_global_control_worklist_matrix() {
         .ledger
         .connection()
         .unwrap()
-        .execute("UPDATE app_meta SET usage_parser_version=3 WHERE id=1", [])
+        .execute(
+            "UPDATE source_usage_epochs SET active_parser_version=3 WHERE source='codex'",
+            [],
+        )
         .unwrap();
     assert!(
         parser_mismatch
@@ -338,11 +342,22 @@ fn t_perf_003_exact_detailed_plan_only_requested_sources() {
     commit_source(&fixture, 1, 11, "child", "root", 'a');
     commit_source(&fixture, 2, 12, "other-root", "other-root", 'b');
     commit_source(&fixture, 3, 13, "child", "root", 'c');
-    let expected = UsageEpochState::new(1, None, crate::usage::USAGE_PARSER_VERSION, None).unwrap();
+    let expected = crate::domain::SourceUsageEpochState::new(
+        crate::source::SourceId::CODEX,
+        1,
+        None,
+        crate::usage::USAGE_PARSER_VERSION,
+        None,
+    )
+    .unwrap();
 
     let exact = fixture
         .ledger
-        .load_usage_scan_state_exact(&[3, 1], crate::usage::USAGE_PARSER_VERSION, expected)
+        .load_usage_scan_state_exact(
+            &[3, 1],
+            crate::usage::USAGE_PARSER_VERSION,
+            expected.clone(),
+        )
         .unwrap();
     assert_eq!(
         exact
@@ -357,17 +372,27 @@ fn t_perf_003_exact_detailed_plan_only_requested_sources() {
     let duplicate = fixture.ledger.load_usage_scan_state_exact(
         &[1, 1],
         crate::usage::USAGE_PARSER_VERSION,
-        expected,
+        expected.clone(),
     );
     assert!(duplicate.is_err());
     assert!(
         fixture
             .ledger
-            .load_usage_scan_state_exact(&[0], crate::usage::USAGE_PARSER_VERSION, expected)
+            .load_usage_scan_state_exact(
+                &[0],
+                crate::usage::USAGE_PARSER_VERSION,
+                expected.clone(),
+            )
             .is_err()
     );
-    let stale_epoch =
-        UsageEpochState::new(2, None, crate::usage::USAGE_PARSER_VERSION, None).unwrap();
+    let stale_epoch = crate::domain::SourceUsageEpochState::new(
+        crate::source::SourceId::CODEX,
+        2,
+        None,
+        crate::usage::USAGE_PARSER_VERSION,
+        None,
+    )
+    .unwrap();
     assert!(
         fixture
             .ledger
@@ -381,7 +406,8 @@ fn t_perf_003_exact_detailed_plan_only_requested_sources() {
             .begin_or_resume(crate::usage::USAGE_PARSER_VERSION, &[1, 2, 3], 40)
             .unwrap();
     }
-    let building = UsageEpochState::new(
+    let building = crate::domain::SourceUsageEpochState::new(
+        crate::source::SourceId::CODEX,
         1,
         Some(2),
         crate::usage::USAGE_PARSER_VERSION,
