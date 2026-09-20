@@ -308,6 +308,7 @@ impl<'a> UsageLedger<'a> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-usage:replace_build_sources",
             &mut connection,
+            Some(self.ledger.revision_publisher()),
         )
         .map_err(storage::StorageError::sqlite)?;
         source_tx.apply_codex_replace_build_sources(
