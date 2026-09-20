@@ -93,8 +93,13 @@ impl Ledger {
         let mut data_revision = None;
 
         for group in &batch.groups {
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+                "legacy-codex-metadata-commit",
+                &mut connection,
+            )?;
+            let transaction = source_tx
+                .legacy_transaction()
+                .ok_or_else(|| StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction"))?;
             ensure_source_ready(&transaction, self)?;
 
             let changed = commit_group(&transaction, group)?;
@@ -102,7 +107,7 @@ impl Ledger {
                 data_changed = true;
             }
 
-            transaction.commit()?;
+            source_tx.commit_legacy()?;
             let (revision, status_revision): (i64, i64) = connection.query_row(
                 "SELECT data_revision,status_revision FROM app_meta WHERE id = 1",
                 [],
