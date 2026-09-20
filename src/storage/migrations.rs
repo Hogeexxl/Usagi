@@ -2834,6 +2834,7 @@ mod tests {
             ingestion::{IngestionConfig, IngestionCoordinator, LegacyCodexSourceAdapter},
             source::SourceRegistry,
             storage::{Ledger, LedgerOptions},
+            ScanResult,
             usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
         };
 
@@ -3013,6 +3014,28 @@ mod tests {
                 .any(|row| row.root_session_id == "root"),
             "migrated v10 session must be visible before startup scan"
         );
+        let before_canonical: Vec<(String, String, i64)> = {
+            let connection = Connection::open(ledger.database_path()).unwrap();
+            let mut statement = connection
+                .prepare(
+                    "SELECT ue.event_id,ue.thread_id,ue.total_tokens
+                     FROM usage_events ue
+                     JOIN source_usage_epochs sue
+                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                     WHERE ue.source='codex'
+                     ORDER BY ue.event_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(
+            !before_canonical.is_empty(),
+            "fixture must expose migrated canonical usage before startup"
+        );
 
         let mut registry = SourceRegistry::new();
         registry
@@ -3023,50 +3046,83 @@ mod tests {
                 .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let terminal_scan = loop {
             let scan = ledger.app_state().unwrap().scan;
             if scan.active_scan_id.is_none() && scan.last_finished_scan_id.is_some() {
-                break;
+                break scan;
             }
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for production startup scan"
             );
             thread::sleep(Duration::from_millis(10));
-        }
+        };
+        assert_eq!(
+            terminal_scan.last_finished_scan_result,
+            Some(ScanResult::Completed),
+            "production startup scan must complete successfully"
+        );
+        assert_eq!(
+            terminal_scan.last_scan_error_code, None,
+            "production startup scan must not finish with an error"
+        );
         coordinator.shutdown().unwrap();
 
         let after = usage
             .summary(SummaryQuery::new(range, UsageFilter::default()))
             .unwrap();
-        assert!(
-            after.totals.total_tokens > 0,
-            "production startup must not activate an empty Codex dataset"
+        assert_eq!(
+            after.totals, before.totals,
+            "successful production startup must preserve migrated token totals exactly"
         );
+        assert_eq!(
+            after.session_count, before.session_count,
+            "successful production startup must preserve migrated session count"
+        );
+        assert_eq!(
+            after.cost_incomplete_session_count, before.cost_incomplete_session_count,
+            "successful production startup must preserve cost completeness"
+        );
+        assert_eq!(
+            after.health, before.health,
+            "successful production startup must preserve session quality status"
+        );
+
         let after_sessions = usage.sessions(range, SessionPageRequest::new(10)).unwrap();
+        assert_eq!(
+            after_sessions.rows.len(),
+            before_sessions.rows.len(),
+            "successful production startup must preserve the migrated session set"
+        );
         assert!(
             after_sessions
                 .rows
                 .iter()
                 .any(|row| row.root_session_id == "root"),
-            "production startup must preserve a visible migrated Codex session"
+            "production startup must preserve the original migrated thread identity"
         );
 
-        let visible_events: i64 = Connection::open(ledger.database_path())
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*)
-                 FROM usage_events ue
-                 JOIN source_usage_epochs sue
-                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
-                 WHERE ue.source='codex'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            visible_events > 0,
-            "active Codex epoch must still contain canonical usage after startup"
+        let after_canonical: Vec<(String, String, i64)> = {
+            let connection = Connection::open(ledger.database_path()).unwrap();
+            let mut statement = connection
+                .prepare(
+                    "SELECT ue.event_id,ue.thread_id,ue.total_tokens
+                     FROM usage_events ue
+                     JOIN source_usage_epochs sue
+                       ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                     WHERE ue.source='codex'
+                     ORDER BY ue.event_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            after_canonical, before_canonical,
+            "successful production startup must preserve active canonical event identities and totals"
         );
     }
 }
