@@ -106,10 +106,10 @@ impl Ledger {
             source_tx
                 .commit()
                 .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-            let (revision, status_revision): (i64, i64) = connection.query_row(
-                "SELECT data_revision,status_revision FROM app_meta WHERE id = 1",
+            let revision: i64 = connection.query_row(
+                "SELECT data_revision FROM app_meta WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )?;
             if revision < 0 {
                 return Err(StorageError::invalid_state(
