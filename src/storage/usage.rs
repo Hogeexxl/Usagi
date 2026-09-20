@@ -876,7 +876,13 @@ pub(crate) fn apply_codex_begin_usage_carry(
          WHERE build_epoch=?3 AND source_file_id=?4
            AND carry_phase='none' AND completion_status IN ('pending','blocked')
            AND required_through_offset=?5 AND active_committed_offset=?5",
-        params![epoch.active_epoch, now_ms, build_epoch, source_file_id, build.active_committed_offset],
+        params![
+            epoch.active_epoch,
+            now_ms,
+            build_epoch,
+            source_file_id,
+            build.active_committed_offset
+        ],
     )?;
     if changed != 1 {
         return Err(StorageError::invalid_state(
@@ -952,7 +958,9 @@ pub(crate) fn apply_codex_resume_usage_carry(
             )?;
             Ok(CarryStepOutcome::Progress)
         }
-        UsageCarryPhase::Finalize => finalize_carry(transaction, epoch, source_file_id, build, now_ms),
+        UsageCarryPhase::Finalize => {
+            finalize_carry(transaction, epoch, source_file_id, build, now_ms)
+        }
         UsageCarryPhase::None => Err(StorageError::invalid_state(
             "usage carry cursor is not initialized",
         )),
@@ -1073,7 +1081,8 @@ pub(crate) fn apply_codex_cleanup_inactive_usage(
         }
         let remaining = i64::try_from(max_rows - deleted)
             .map_err(|_| StorageError::invalid_state("cleanup row limit is too large"))?;
-        let count = transaction.execute(sql, params![active, excluded_build, remaining.min(limit)])?;
+        let count =
+            transaction.execute(sql, params![active, excluded_build, remaining.min(limit)])?;
         deleted += count;
         if count > 0 {
             break;
@@ -2614,10 +2623,7 @@ fn verify_carry_sets(
     Ok(())
 }
 
-fn verify_carry_canonical_events(
-    transaction: &Connection,
-    build_epoch: i64,
-) -> StorageResult<()> {
+fn verify_carry_canonical_events(transaction: &Connection, build_epoch: i64) -> StorageResult<()> {
     let extra: Option<String> = transaction
         .query_row(
             "SELECT build.event_id
@@ -3357,10 +3363,7 @@ fn affected_canonical_visibility_changed(
     Ok(false)
 }
 
-fn cleanup_local_replay_orphans(
-    transaction: &Connection,
-    ledger_epoch: i64,
-) -> StorageResult<()> {
+fn cleanup_local_replay_orphans(transaction: &Connection, ledger_epoch: i64) -> StorageResult<()> {
     transaction.execute(
         "DELETE FROM usage_events
          WHERE source='codex' AND source_epoch=?1 AND NOT EXISTS (
