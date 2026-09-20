@@ -727,6 +727,10 @@ fn load_exact_state(
     let started = Instant::now();
     let result = usage.load_scan_state_exact(source_ids, USAGE_PARSER_VERSION, expected_epoch);
     report.observe_usage_detail_plan_load(source_ids, started.elapsed());
+    #[cfg(test)]
+    if let Err(error) = &result {
+        eprintln!("USAGE_PLAN_RELOAD_FAILED detail: {error:?}");
+    }
     result.map_err(|_| "USAGE_PLAN_RELOAD_FAILED")
 }
 
