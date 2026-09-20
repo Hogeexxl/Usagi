@@ -93,7 +93,7 @@ impl Ledger {
         let mut data_revision = None;
 
         for group in &batch.groups {
-            let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+            let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
                 "legacy-codex-metadata-commit",
                 &mut connection,
             )?;
