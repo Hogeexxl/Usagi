@@ -335,8 +335,8 @@ impl<'a> UsageLedger<'a> {
             now_ms,
         )?;
         source_tx
-            .commit_legacy()
-            .map_err(storage::StorageError::sqlite)?;
+            .commit()
+            .map_err(|error| storage::StorageError::invalid_state(error.to_string()))?;
         Ok(())
     }
 
