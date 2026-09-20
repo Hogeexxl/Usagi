@@ -2839,6 +2839,7 @@ mod tests {
         };
 
         let root = TestRoot::new("spec01-upgrade-startup");
+        let root_id = "00000000-0000-4000-8000-000000000001";
         let codex_home = root.path().join("codex");
         let sessions = codex_home.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -2850,7 +2851,7 @@ mod tests {
                 "type": "session_meta",
                 "timestamp": "2026-08-08T01:02:03Z",
                 "payload": {
-                    "id": "root",
+                    "id": root_id,
                     "timestamp": "2026-08-08T01:02:03Z",
                     "cwd": "/tmp/usagi-upgrade-startup",
                     "agent_role": "main"
@@ -2925,20 +2926,48 @@ mod tests {
             .execute(
                 "INSERT INTO threads(
                     id,rollout_path,created_at_ms,updated_at_ms,archived,cwd,title,name,model,agent_role
-                 ) VALUES('root',?1,1700000000000,1700000000100,0,
+                 ) VALUES(?1,?2,1700000000000,1700000000100,0,
                           '/tmp/usagi-upgrade-startup','Root',NULL,'gpt','main')",
-                [rollout_path.to_str().unwrap()],
+                params![root_id, rollout_path.to_str().unwrap()],
             )
             .unwrap();
         drop(state);
         fs::write(
             codex_home.join("session_index.jsonl"),
-            b"{\"id\":\"root\",\"thread_name\":\"Root\",\"updated_at\":\"2026-08-08T01:02:05Z\"}\n",
+            format!(
+                "{{\"id\":\"{root_id}\",\"thread_name\":\"Root\",\"updated_at\":\"2026-08-08T01:02:05Z\"}}\n"
+            ),
         )
         .unwrap();
         fs::write(codex_home.join(".codex-global-state.json"), b"{}").unwrap();
 
         let (database, connection) = file_v10_connection_with_rows();
+
+        // The generic migration fixture predates Codex UUID identity
+        // validation and uses the sentinel "root". For this production-startup
+        // gate, normalize the entire populated v10 graph to one real-shaped
+        // Codex UUID before migration so parser, state, and historical
+        // canonical identities all describe the same session.
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        for sql in [
+            "UPDATE threads SET thread_id=?1,root_session_id=?1 WHERE thread_id='root'",
+            "UPDATE source_files SET thread_id=?1 WHERE thread_id='root'",
+            "UPDATE usage_events SET thread_id=?1,root_session_id=?1 WHERE thread_id='root'",
+            "UPDATE turns SET thread_id=?1 WHERE thread_id='root'",
+            "UPDATE ingest_anomalies SET thread_id=?1 WHERE thread_id='root'",
+            "UPDATE usage_source_states SET owning_thread_id=?1,root_session_id=?1 WHERE owning_thread_id='root'",
+        ] {
+            connection.execute(sql, [root_id]).unwrap();
+        }
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check").unwrap();
+        assert!(foreign_keys.query([]).unwrap().next().unwrap().is_none());
+        drop(foreign_keys);
+
         let rollout_file = fs::File::open(&rollout_path).unwrap();
         let metadata = crate::platform::file_identity::metadata_from_file(&rollout_file).unwrap();
         let (device_id, inode) = metadata.identity.storage_slots().unwrap();
@@ -2970,8 +2999,8 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "UPDATE threads SET current_rollout_path=?1 WHERE thread_id='root'",
-                [rollout_path.to_str().unwrap()],
+                "UPDATE threads SET current_rollout_path=?1 WHERE thread_id=?2",
+                params![rollout_path.to_str().unwrap(), root_id],
             )
             .unwrap();
         connection
@@ -3011,7 +3040,7 @@ mod tests {
             before_sessions
                 .rows
                 .iter()
-                .any(|row| row.root_session_id == "root"),
+                .any(|row| row.root_session_id == root_id),
             "migrated v10 session must be visible before startup scan"
         );
         let before_canonical: Vec<(String, String, i64)> = {
