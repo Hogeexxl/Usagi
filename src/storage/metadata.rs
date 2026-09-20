@@ -134,7 +134,7 @@ impl Ledger {
 }
 
 fn commit_group(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     group: &MetadataThreadCommit,
 ) -> StorageResult<bool> {
     let current_revision = read_data_revision(transaction)?;
@@ -245,7 +245,7 @@ fn commit_group(
 }
 
 pub(super) fn ensure_source_ready(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     ledger: &Ledger,
 ) -> StorageResult<()> {
     let (fingerprint, status): (Option<String>, String) = transaction
@@ -279,7 +279,7 @@ pub(super) fn ensure_source_ready(
     }
 }
 
-fn read_data_revision(transaction: &Transaction<'_>) -> StorageResult<i64> {
+fn read_data_revision(transaction: &Connection) -> StorageResult<i64> {
     let revision: i64 = transaction.query_row(
         "SELECT data_revision FROM app_meta WHERE id = 1",
         [],
@@ -313,7 +313,7 @@ struct ThreadRow {
     metadata_resolved_at_ms: i64,
 }
 
-fn read_thread(transaction: &Transaction<'_>, thread_id: &str) -> StorageResult<Option<ThreadRow>> {
+fn read_thread(transaction: &Connection, thread_id: &str) -> StorageResult<Option<ThreadRow>> {
     transaction
         .query_row(
             "SELECT
@@ -370,7 +370,7 @@ fn read_thread(transaction: &Transaction<'_>, thread_id: &str) -> StorageResult<
 }
 
 fn read_source(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> StorageResult<SourceFileState> {
     let source = transaction
@@ -411,7 +411,7 @@ fn read_source(
 }
 
 fn read_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> StorageResult<Option<MetadataCheckpointState>> {
     transaction
@@ -443,7 +443,7 @@ fn read_checkpoint(
 }
 
 fn read_fact(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> StorageResult<Option<RolloutMetadataFact>> {
     transaction
@@ -545,7 +545,7 @@ fn read_fact(
 }
 
 fn validate_source_commit(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     group: &MetadataThreadCommit,
     source_commit: &MetadataSourceCommit,
     source: &SourceFileState,
@@ -662,7 +662,7 @@ fn validate_fact_offsets(fact: &RolloutMetadataFact) -> StorageResult<()> {
 }
 
 fn bind_source(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     group: &MetadataThreadCommit,
     source_commit: &MetadataSourceCommit,
     source: &SourceFileState,
@@ -689,7 +689,7 @@ fn bind_source(
     Ok(())
 }
 
-fn write_fact(transaction: &Transaction<'_>, fact: &RolloutMetadataFact) -> StorageResult<()> {
+fn write_fact(transaction: &Connection, fact: &RolloutMetadataFact) -> StorageResult<()> {
     transaction.execute(
         "INSERT INTO rollout_metadata_facts (
             source_file_id, file_generation, metadata_parser_version,
@@ -776,7 +776,7 @@ fn write_fact(transaction: &Transaction<'_>, fact: &RolloutMetadataFact) -> Stor
 }
 
 fn write_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
     advance: &MetadataCheckpointAdvance,
 ) -> StorageResult<()> {
@@ -938,7 +938,7 @@ fn validate_thread_row(thread: &ThreadRow) -> StorageResult<()> {
 }
 
 fn validate_thread_relationships(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     thread: &ThreadRow,
 ) -> StorageResult<()> {
     for related_id in [
@@ -968,7 +968,7 @@ fn validate_thread_relationships(
 }
 
 fn write_thread(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     thread: &ThreadRow,
     existed: bool,
 ) -> StorageResult<()> {
@@ -1043,7 +1043,7 @@ fn write_thread(
 }
 
 fn verify_patch_postcondition(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     patch: &ResolvedThreadPatch,
     expected: &ThreadRow,
 ) -> StorageResult<()> {
@@ -1063,7 +1063,7 @@ fn verify_patch_postcondition(
 }
 
 fn verify_source_postcondition(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     group: &MetadataThreadCommit,
     source_commit: &MetadataSourceCommit,
 ) -> StorageResult<()> {
