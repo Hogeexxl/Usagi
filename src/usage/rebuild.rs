@@ -156,6 +156,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(begin_or_resume)),
             self.connection,
+            None,
         )?;
         let snapshot = source_tx.apply_codex_rebuild_begin_or_resume(
             target_parser_version,
@@ -179,6 +180,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(record_progress)),
             self.connection,
+            None,
         )?;
         let outcome = source_tx.apply_codex_rebuild_record_progress(&progress)?;
         source_tx
@@ -199,6 +201,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(block_source)),
             self.connection,
+            None,
         )?;
         source_tx.apply_codex_rebuild_block_source(source_file_id, error_code, now_ms)?;
         source_tx
@@ -221,6 +224,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(quarantine_session)),
             self.connection,
+            None,
         )?;
         let count = source_tx.apply_codex_rebuild_quarantine_session(
             root_session_id,
@@ -319,6 +323,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(retry_blocked)),
             self.connection,
+            None,
         )?;
         source_tx.apply_codex_rebuild_retry_blocked(source_file_id, now_ms)?;
         source_tx
@@ -336,6 +341,7 @@ impl<'connection> RebuildLedger<'connection> {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(activate)),
             self.connection,
+            None,
         )?;
         let outcome = source_tx.apply_codex_rebuild_activate(&present)?;
         source_tx
