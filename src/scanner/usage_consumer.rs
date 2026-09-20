@@ -1096,7 +1096,11 @@ fn process_source_batch(
         let guard = chunk.guard.map(|hash| hash.as_bytes().to_vec());
         let disposition = usage
             .process_chunk(pipeline_plan, retained, tail, guard, false, now_ms())
-            .map_err(|_| "USAGE_PIPELINE_FAILED")?;
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!("USAGE_PIPELINE_FAILED detail: {error:?}");
+                "USAGE_PIPELINE_FAILED"
+            })?;
         match disposition {
             PipelineDisposition::Commit(dto) => {
                 let metrics = UsageCommitMetrics::from_dto(&dto);
