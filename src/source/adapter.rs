@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::{
     domain::{MetadataThreadCommit, Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
-    storage::{Ledger, StorageErrorKind},
+    storage::{Ledger, RevisionPublisher, StorageErrorKind},
     usage::{EventKind, NormalizedTokenUsage},
 };
 
@@ -461,7 +461,7 @@ impl SourceStorage {
             scan_id: self.scan_id.clone(),
             source: self.source.clone(),
             connection: Some(SourceWriteConnection::Locked(guard)),
-            ledger: Some(Arc::clone(ledger)),
+            revision_publisher: Some(ledger.revision_publisher()),
             committed: false,
             poisoned: false,
             data_changed: false,
@@ -543,7 +543,7 @@ pub struct SourceWriteTxn<'a> {
     scan_id: String,
     source: SourceId,
     connection: Option<SourceWriteConnection<'a>>,
-    ledger: Option<Arc<Ledger>>,
+    revision_publisher: Option<RevisionPublisher>,
     committed: bool,
     poisoned: bool,
     data_changed: bool,
@@ -568,8 +568,8 @@ impl SourceWriteTxn<'static> {
             scan_id: scan_id.into(),
             source,
             connection: None,
-            ledger: None,
-            committed: false,
+            revision_publisher: None,
+            committed: false;
             poisoned: false,
             data_changed: false,
         }
@@ -578,20 +578,20 @@ impl SourceWriteTxn<'static> {
 
 impl<'a> SourceWriteTxn<'a> {
     /// Transitional Codex-only constructor used while the mature scanner
-    /// algorithms are retained. The returned transaction is still
-    /// source-bound and owns the only durable commit boundary; legacy
-    /// algorithms receive only the inner rusqlite transaction and therefore
-    /// cannot commit independently of SourceWriteTxn.
+    /// algorithms are retained. The transaction remains source-bound and
+    /// exposes only typed Codex bridges; durable commit and revision
+    /// publication are both owned by SourceWriteTxn::commit().
     pub(crate) fn begin_legacy_codex(
         scan_id: impl Into<String>,
         connection: &'a mut Connection,
+        revision_publisher: Option<RevisionPublisher>,
     ) -> rusqlite::Result<Self> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Ok(Self {
             scan_id: scan_id.into(),
             source: SourceId::CODEX,
             connection: Some(SourceWriteConnection::Legacy(transaction)),
-            ledger: None,
+            revision_publisher,
             committed: false,
             poisoned: false,
             data_changed: false,
@@ -603,9 +603,13 @@ impl<'a> SourceWriteTxn<'a> {
         ledger: &Ledger,
         group: &MetadataThreadCommit,
     ) -> crate::storage::Result<bool> {
-        self.apply_codex_storage(|connection| {
+        let changed = self.apply_codex_storage(|connection| {
             crate::storage::apply_codex_metadata_group(connection, ledger, group)
-        })
+        })?;
+        if changed {
+            self.data_changed = true;
+        }
+        Ok(changed)
     }
 
     pub(crate) fn apply_codex_usage_batch(
@@ -613,9 +617,13 @@ impl<'a> SourceWriteTxn<'a> {
         ledger: &Ledger,
         batch: &crate::storage::usage::UsageCommitBatch,
     ) -> crate::storage::Result<crate::storage::usage::CodexUsageCommitBridgeResult> {
-        self.apply_codex_storage(|connection| {
+        let result = self.apply_codex_storage(|connection| {
             crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
-        })
+        })?;
+        if result.visible_changed {
+            self.data_changed = true;
+        }
+        Ok(result)
     }
 
     pub(crate) fn apply_codex_begin_usage_carry(
@@ -758,9 +766,11 @@ impl<'a> SourceWriteTxn<'a> {
         &mut self,
         present: &std::collections::BTreeSet<i64>,
     ) -> Result<crate::usage::rebuild::ActivationOutcome, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
+        let outcome = self.apply_codex_rebuild(|connection| {
             crate::usage::rebuild::apply_codex_rebuild_activate(connection, present)
-        })
+        })?;
+        self.data_changed = true;
+        Ok(outcome)
     }
 
     pub(crate) fn apply_codex_rebuild_quarantine_session(
@@ -1282,10 +1292,10 @@ impl<'a> SourceWriteTxn<'a> {
             map_sql_error(error)
         })?;
         self.committed = true;
-        if let (Some(ledger), Some((data_revision, status_revision))) =
-            (self.ledger.as_ref(), revisions)
+        if let (Some(publisher), Some((data_revision, status_revision))) =
+            (self.revision_publisher.as_ref(), revisions)
         {
-            ledger.publish_revisions(data_revision, status_revision);
+            publisher.publish(data_revision, status_revision);
         }
         Ok(())
     }
