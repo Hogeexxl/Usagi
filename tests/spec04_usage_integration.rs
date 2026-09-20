@@ -1427,7 +1427,11 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
         .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
     assert_eq!(after.totals, before.totals);
-    assert_eq!(ledger.app_state().unwrap().data_revision, rev_before + 1);
+    assert_eq!(
+        ledger.app_state().unwrap().data_revision,
+        rev_before,
+        "activating an identical carried visible dataset must not bump data_revision"
+    );
     handle.shutdown().unwrap();
 }
 
@@ -1705,8 +1709,8 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     assert!(build.is_none());
     assert_eq!(
         revision,
-        revision_before + 1,
-        "failed LocalReplay attempt itself must not change query facts"
+        revision_before,
+        "failed LocalReplay and identical shadow activation must not change query facts"
     );
     assert_eq!(offset, raw);
     assert_eq!(
