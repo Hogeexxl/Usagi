@@ -347,6 +347,34 @@ impl SourceRunContext {
         result
     }
 
+    fn apply_codex_rebuild<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> Result<T, crate::usage::rebuild::RebuildError>,
+    ) -> Result<T, crate::usage::rebuild::RebuildError> {
+        self.require_open().map_err(|_| {
+            crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
+        })?;
+        let result = {
+            let connection = self.connection_mut().map_err(|_| {
+                crate::usage::rebuild::RebuildError::Invalid(
+                    "source write transaction unavailable",
+                )
+            })?;
+            operation(connection)
+        };
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    pub(crate) fn with_codex_private_state<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
+    ) -> crate::storage::Result<T> {
+        self.apply_codex_storage(operation)
+    }
+
     pub fn scan_id(&self) -> &str {
         &self.scan_id
     }
