@@ -439,119 +439,19 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         if root_session_id.is_empty() || error_code.is_empty() || now_ms < 0 {
             return Err(RebuildError::Invalid("invalid session quarantine details"));
         }
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(quarantine_session)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        let (build_epoch, target_parser) = current_build(&transaction)?;
-        let mut statement = transaction.prepare(
-            "SELECT source_file_id,expected_file_generation,expected_device_id,expected_inode,observed_raw_size
-             FROM usage_build_sources
-             WHERE build_epoch=?1 AND expected_root_session_id=?2
-             ORDER BY source_file_id",
+        let count = source_tx.apply_codex_rebuild_quarantine_session(
+            root_session_id,
+            error_code,
+            now_ms,
         )?;
-        let members = statement
-            .query_map(params![build_epoch, root_session_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        if members.is_empty() {
-            return Err(RebuildError::Cas("session has no build members"));
-        }
-
-        let last_activity_at_ms: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(COALESCE(updated_at_ms,created_at_ms,0)),0)
-             FROM threads WHERE thread_id=?1 OR root_session_id=?1",
-            [root_session_id],
-            |row| row.get(0),
-        )?;
-
-        transaction.execute(
-            "INSERT INTO usage_session_quarantine(
-                ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,
-                first_seen_at_ms,updated_at_ms
-             ) VALUES (?1,?2,?3,?4,?5,?5)
-             ON CONFLICT(ledger_epoch,root_session_id) DO UPDATE SET
-                primary_error_code=excluded.primary_error_code,
-                last_activity_at_ms=MAX(usage_session_quarantine.last_activity_at_ms,excluded.last_activity_at_ms),
-                updated_at_ms=excluded.updated_at_ms",
-            params![build_epoch, root_session_id, error_code, last_activity_at_ms, now_ms],
-        )?;
-        transaction.execute(
-            "DELETE FROM usage_session_quarantine_sources
-             WHERE ledger_epoch=?1 AND root_session_id=?2",
-            params![build_epoch, root_session_id],
-        )?;
-
-        for (source_file_id, generation, device_id, inode, observed_size) in &members {
-            cleanup_build_source(&transaction, build_epoch, *source_file_id)?;
-            reset_checkpoint(&transaction, *source_file_id, target_parser)?;
-            let changed = transaction.execute(
-                "UPDATE usage_build_sources SET
-                    completion_status='quarantined',completion_error_code=?1,
-                    completed_generation=NULL,completed_through_offset=NULL,
-                    carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                    carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?2
-                 WHERE build_epoch=?3 AND source_file_id=?4
-                   AND expected_root_session_id=?5",
-                params![
-                    error_code,
-                    now_ms,
-                    build_epoch,
-                    source_file_id,
-                    root_session_id
-                ],
-            )?;
-            if changed != 1 {
-                return Err(RebuildError::Cas("session quarantine manifest CAS failed"));
-            }
-            transaction.execute(
-                "INSERT INTO usage_session_quarantine_sources(
-                    ledger_epoch,root_session_id,source_file_id,file_generation,
-                    device_id,inode,observed_size,updated_at_ms
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    build_epoch,
-                    root_session_id,
-                    source_file_id,
-                    generation,
-                    device_id,
-                    inode,
-                    observed_size,
-                    now_ms,
-                ],
-            )?;
-        }
-
-        let leaked: i64 = transaction.query_row(
-            "SELECT
-                (SELECT count(*) FROM usage_events
-                 WHERE source='codex' AND source_epoch=?1 AND root_session_id=?2)
-              + (SELECT count(*) FROM turns WHERE ledger_epoch=?1 AND thread_id IN (
-                    SELECT thread_id FROM threads WHERE root_session_id=?2 OR thread_id=?2))
-              + (SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND root_session_id=?2)",
-            params![build_epoch, root_session_id],
-            |row| row.get(0),
-        )?;
-        if leaked != 0 {
-            return Err(RebuildError::Cas(
-                "quarantined session still has build usage rows",
-            ));
-        }
         source_tx
             .commit()
             .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-        Ok(members.len())
+        Ok(count)
     }
 
     /// Return the unchanged active quarantine source IDs and whether at least
@@ -665,6 +565,118 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         Ok(outcome)
     }
 }
+
+pub(crate) fn apply_codex_rebuild_quarantine_session(
+    transaction: &Connection,
+    root_session_id: &str,
+    error_code: &str,
+    now_ms: i64,
+) -> Result<usize, RebuildError> {
+    let (build_epoch, target_parser) = current_build(transaction)?;
+    let mut statement = transaction.prepare(
+        "SELECT source_file_id,expected_file_generation,expected_device_id,expected_inode,observed_raw_size
+         FROM usage_build_sources
+         WHERE build_epoch=?1 AND expected_root_session_id=?2
+         ORDER BY source_file_id",
+    )?;
+    let members = statement
+        .query_map(params![build_epoch, root_session_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, u64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if members.is_empty() {
+        return Err(RebuildError::Cas("session has no build members"));
+    }
+
+    let last_activity_at_ms: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(COALESCE(updated_at_ms,created_at_ms,0)),0)
+         FROM threads WHERE thread_id=?1 OR root_session_id=?1",
+        [root_session_id],
+        |row| row.get(0),
+    )?;
+
+    transaction.execute(
+        "INSERT INTO usage_session_quarantine(
+            ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,
+            first_seen_at_ms,updated_at_ms
+         ) VALUES (?1,?2,?3,?4,?5,?5)
+         ON CONFLICT(ledger_epoch,root_session_id) DO UPDATE SET
+            primary_error_code=excluded.primary_error_code,
+            last_activity_at_ms=MAX(usage_session_quarantine.last_activity_at_ms,excluded.last_activity_at_ms),
+            updated_at_ms=excluded.updated_at_ms",
+        params![build_epoch, root_session_id, error_code, last_activity_at_ms, now_ms],
+    )?;
+    transaction.execute(
+        "DELETE FROM usage_session_quarantine_sources
+         WHERE ledger_epoch=?1 AND root_session_id=?2",
+        params![build_epoch, root_session_id],
+    )?;
+
+    for (source_file_id, generation, device_id, inode, observed_size) in &members {
+        cleanup_build_source(transaction, build_epoch, *source_file_id)?;
+        reset_checkpoint(transaction, *source_file_id, target_parser)?;
+        let changed = transaction.execute(
+            "UPDATE usage_build_sources SET
+                completion_status='quarantined',completion_error_code=?1,
+                completed_generation=NULL,completed_through_offset=NULL,
+                carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?2
+             WHERE build_epoch=?3 AND source_file_id=?4
+               AND expected_root_session_id=?5",
+            params![
+                error_code,
+                now_ms,
+                build_epoch,
+                source_file_id,
+                root_session_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RebuildError::Cas("session quarantine manifest CAS failed"));
+        }
+        transaction.execute(
+            "INSERT INTO usage_session_quarantine_sources(
+                ledger_epoch,root_session_id,source_file_id,file_generation,
+                device_id,inode,observed_size,updated_at_ms
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                build_epoch,
+                root_session_id,
+                source_file_id,
+                generation,
+                device_id,
+                inode,
+                observed_size,
+                now_ms,
+            ],
+        )?;
+    }
+
+    let leaked: i64 = transaction.query_row(
+        "SELECT
+            (SELECT count(*) FROM usage_events
+             WHERE source='codex' AND source_epoch=?1 AND root_session_id=?2)
+          + (SELECT count(*) FROM turns WHERE ledger_epoch=?1 AND thread_id IN (
+                SELECT thread_id FROM threads WHERE root_session_id=?2 OR thread_id=?2))
+          + (SELECT count(*) FROM usage_source_states WHERE ledger_epoch=?1 AND root_session_id=?2)",
+        params![build_epoch, root_session_id],
+        |row| row.get(0),
+    )?;
+    if leaked != 0 {
+        return Err(RebuildError::Cas(
+            "quarantined session still has build usage rows",
+        ));
+    }
+    Ok(members.len())
+}
+
 
 pub(crate) fn apply_codex_rebuild_block_source(
     transaction: &Connection,
