@@ -448,6 +448,24 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_replace_build_sources(
+        &mut self,
+        parser_version: i64,
+        present: &std::collections::BTreeSet<i64>,
+        invalidated: &std::collections::BTreeSet<i64>,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_replace_build_sources(
+                connection,
+                parser_version,
+                present,
+                invalidated,
+                now_ms,
+            )
+        })
+    }
+
     pub(crate) fn with_codex_private_state<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
