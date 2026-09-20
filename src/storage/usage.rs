@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
 use crate::domain::{CheckpointProcessingStatus, SourceUsageEpochState};
 use crate::usage::normalized::{NormalizedTokenUsage, canonical_algorithm_for};
@@ -617,119 +617,18 @@ impl Ledger {
     ) -> StorageResult<UsageCommitOutcome> {
         validate_batch(batch)?;
         let mut connection = self.connection()?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-usage:", stringify!(commit_usage)),
             &mut connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-            StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-        })?;
-        super::metadata::ensure_source_ready(&transaction, self)?;
-        let epoch = read_epoch(&transaction)?;
-        if batch.ledger_epoch != epoch.working_epoch()
-            || batch.usage_parser_version != epoch.working_parser_version()
-            || canonical_algorithm_for(batch.usage_parser_version).is_none()
-        {
-            return Err(StorageError::invalid_state(
-                "usage working epoch or parser changed",
-            ));
-        }
-        validate_group_relationship(&transaction, &batch.thread_id, &batch.root_session_id)?;
-        let canonical_before = capture_affected_canonical_visibility(&transaction, batch)?;
-        let skills_before = capture_skill_visibility(&transaction, batch)?;
-        let has_local_replay = batch.sources.iter().any(|source| source.local_replay);
-
-        let mut inserted = 0usize;
-        let mut deduplicated = 0usize;
-        for source in &batch.sources {
-            validate_source_preconditions(&transaction, batch, source)?;
-            if source.local_replay {
-                prepare_local_replay(&transaction, batch, source)?;
-            }
-            for (event, occurrence) in source.events.iter().zip(&source.occurrences) {
-                match write_or_compare_event(&transaction, batch.ledger_epoch, source, event)? {
-                    CanonicalWrite::Inserted => inserted += 1,
-                    CanonicalWrite::Duplicate => deduplicated += 1,
-                }
-                write_or_compare_occurrence(&transaction, batch.ledger_epoch, source, occurrence)?;
-            }
-            for skill in &source.skill_events {
-                write_or_compare_skill_event(&transaction, batch.ledger_epoch, source, skill)?;
-            }
-            for turn in &source.turns {
-                write_turn(
-                    &transaction,
-                    batch.ledger_epoch,
-                    source.source_file_id,
-                    source.expected_file_generation,
-                    &batch.thread_id,
-                    turn,
-                )?;
-            }
-            for anomaly in &source.anomalies {
-                write_anomaly(
-                    &transaction,
-                    batch.ledger_epoch,
-                    &batch.thread_id,
-                    source.source_file_id,
-                    source.expected_file_generation,
-                    anomaly,
-                )?;
-            }
-            write_source_state(&transaction, batch, source)?;
-            write_usage_checkpoint(&transaction, batch, source)?;
-            update_build_progress(&transaction, epoch.clone(), batch, source)?;
-            verify_source_postconditions(&transaction, batch, source)?;
-        }
-        if has_local_replay {
-            cleanup_local_replay_orphans(&transaction, batch.ledger_epoch)?;
-        }
-        let token_visibility_changed = affected_canonical_visibility_changed(
-            &transaction,
-            batch.ledger_epoch,
-            &canonical_before,
-        )?;
-        let skill_visibility_changed =
-            affected_skill_visibility_changed(&transaction, batch.ledger_epoch, &skills_before)?;
-        let canonical_changed = token_visibility_changed || skill_visibility_changed;
-
-        let active_epoch = epoch.active_epoch;
-        let current_revision: i64 =
-            transaction.query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })?;
-        let data_revision = if canonical_changed && batch.ledger_epoch == active_epoch {
-            let next = current_revision
-                .checked_add(1)
-                .ok_or_else(|| StorageError::invalid_state("data revision overflow"))?;
-            let changed = transaction.execute(
-                "UPDATE app_meta SET data_revision=?1 WHERE id=1 AND data_revision=?2",
-                params![next, current_revision],
-            )?;
-            if changed != 1 {
-                return Err(StorageError::invalid_state("app meta revision changed"));
-            }
-            next
-        } else {
-            current_revision
-        };
-        let status_revision: i64 = transaction.query_row(
-            "SELECT status_revision FROM app_meta WHERE id=1",
-            [],
-            |row| row.get(0),
-        )?;
+        let bridge = source_tx.apply_codex_usage_batch(self, batch)?;
         source_tx
             .commit()
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
-        if canonical_changed && batch.ledger_epoch == active_epoch {
+        if let Some((data_revision, status_revision)) = bridge.publish_revisions {
             self.publish_revisions(data_revision, status_revision);
         }
-        Ok(UsageCommitOutcome {
-            sources_committed: batch.sources.len(),
-            events_inserted: inserted,
-            events_deduplicated: deduplicated,
-            data_revision,
-        })
+        Ok(bridge.outcome)
     }
 
     pub(crate) fn begin_usage_carry(&self, source_file_id: i64, now_ms: i64) -> StorageResult<()> {
@@ -1033,6 +932,122 @@ impl Ledger {
             .map_err(|error| StorageError::invalid_state(error.to_string()))?;
         Ok(deleted)
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct CodexUsageCommitBridgeResult {
+    pub outcome: UsageCommitOutcome,
+    pub publish_revisions: Option<(i64, i64)>,
+}
+
+pub(crate) fn apply_codex_usage_batch(
+    transaction: &Connection,
+    ledger: &Ledger,
+    batch: &UsageCommitBatch,
+) -> StorageResult<CodexUsageCommitBridgeResult> {
+    validate_batch(batch)?;
+    super::metadata::ensure_source_ready(transaction, ledger)?;
+    let epoch = read_epoch(transaction)?;
+    if batch.ledger_epoch != epoch.working_epoch()
+        || batch.usage_parser_version != epoch.working_parser_version()
+        || canonical_algorithm_for(batch.usage_parser_version).is_none()
+    {
+        return Err(StorageError::invalid_state(
+            "usage working epoch or parser changed",
+        ));
+    }
+    validate_group_relationship(transaction, &batch.thread_id, &batch.root_session_id)?;
+    let canonical_before = capture_affected_canonical_visibility(transaction, batch)?;
+    let skills_before = capture_skill_visibility(transaction, batch)?;
+    let has_local_replay = batch.sources.iter().any(|source| source.local_replay);
+
+    let mut inserted = 0usize;
+    let mut deduplicated = 0usize;
+    for source in &batch.sources {
+        validate_source_preconditions(transaction, batch, source)?;
+        if source.local_replay {
+            prepare_local_replay(transaction, batch, source)?;
+        }
+        for (event, occurrence) in source.events.iter().zip(&source.occurrences) {
+            match write_or_compare_event(transaction, batch.ledger_epoch, source, event)? {
+                CanonicalWrite::Inserted => inserted += 1,
+                CanonicalWrite::Duplicate => deduplicated += 1,
+            }
+            write_or_compare_occurrence(transaction, batch.ledger_epoch, source, occurrence)?;
+        }
+        for skill in &source.skill_events {
+            write_or_compare_skill_event(transaction, batch.ledger_epoch, source, skill)?;
+        }
+        for turn in &source.turns {
+            write_turn(
+                transaction,
+                batch.ledger_epoch,
+                source.source_file_id,
+                source.expected_file_generation,
+                &batch.thread_id,
+                turn,
+            )?;
+        }
+        for anomaly in &source.anomalies {
+            write_anomaly(
+                transaction,
+                batch.ledger_epoch,
+                &batch.thread_id,
+                source.source_file_id,
+                source.expected_file_generation,
+                anomaly,
+            )?;
+        }
+        write_source_state(transaction, batch, source)?;
+        write_usage_checkpoint(transaction, batch, source)?;
+        update_build_progress(transaction, epoch.clone(), batch, source)?;
+        verify_source_postconditions(transaction, batch, source)?;
+    }
+    if has_local_replay {
+        cleanup_local_replay_orphans(transaction, batch.ledger_epoch)?;
+    }
+    let token_visibility_changed =
+        affected_canonical_visibility_changed(transaction, batch.ledger_epoch, &canonical_before)?;
+    let skill_visibility_changed =
+        affected_skill_visibility_changed(transaction, batch.ledger_epoch, &skills_before)?;
+    let canonical_changed = token_visibility_changed || skill_visibility_changed;
+
+    let active_epoch = epoch.active_epoch;
+    let current_revision: i64 =
+        transaction.query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+            row.get(0)
+        })?;
+    let data_revision = if canonical_changed && batch.ledger_epoch == active_epoch {
+        let next = current_revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::invalid_state("data revision overflow"))?;
+        let changed = transaction.execute(
+            "UPDATE app_meta SET data_revision=?1 WHERE id=1 AND data_revision=?2",
+            params![next, current_revision],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::invalid_state("app meta revision changed"));
+        }
+        next
+    } else {
+        current_revision
+    };
+    let status_revision: i64 = transaction.query_row(
+        "SELECT status_revision FROM app_meta WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok(CodexUsageCommitBridgeResult {
+        outcome: UsageCommitOutcome {
+            sources_committed: batch.sources.len(),
+            events_inserted: inserted,
+            events_deduplicated: deduplicated,
+            data_revision,
+        },
+        publish_revisions: (canonical_changed && batch.ledger_epoch == active_epoch)
+            .then_some((data_revision, status_revision)),
+    })
 }
 
 fn read_epoch(transaction: &Connection) -> StorageResult<SourceUsageEpochState> {
