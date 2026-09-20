@@ -469,7 +469,6 @@ impl SourceStorage {
     }
 }
 
-
 /// Fixed-Codex private ingestion facade. This is intentionally crate-private:
 /// it may reuse the mature Codex read/private-state pipeline, but it never
 /// exposes the unrestricted Ledger to the Adapter and cannot choose a source.
