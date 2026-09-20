@@ -727,10 +727,6 @@ fn load_exact_state(
     let started = Instant::now();
     let result = usage.load_scan_state_exact(source_ids, USAGE_PARSER_VERSION, expected_epoch);
     report.observe_usage_detail_plan_load(source_ids, started.elapsed());
-    #[cfg(test)]
-    if let Err(error) = &result {
-        eprintln!("USAGE_PLAN_RELOAD_FAILED detail: {error:?}");
-    }
     result.map_err(|_| "USAGE_PLAN_RELOAD_FAILED")
 }
 
@@ -1096,11 +1092,7 @@ fn process_source_batch(
         let guard = chunk.guard.map(|hash| hash.as_bytes().to_vec());
         let disposition = usage
             .process_chunk(pipeline_plan, retained, tail, guard, false, now_ms())
-            .map_err(|error| {
-                #[cfg(test)]
-                eprintln!("USAGE_PIPELINE_FAILED detail: {error:?}");
-                "USAGE_PIPELINE_FAILED"
-            })?;
+            .map_err(|_| "USAGE_PIPELINE_FAILED")?;
         match disposition {
             PipelineDisposition::Commit(dto) => {
                 let metrics = UsageCommitMetrics::from_dto(&dto);
