@@ -3020,6 +3020,22 @@ mod tests {
                 ],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_checkpoints(
+                    source_file_id,consumer_kind,parser_version,committed_offset,guard_hash,
+                    processing_status,last_successful_scan_at_ms,last_error_code
+                 ) VALUES(1,'usage',?1,?2,zeroblob(32),'ready',1,NULL)
+                 ON CONFLICT(source_file_id,consumer_kind) DO UPDATE SET
+                    parser_version=excluded.parser_version,
+                    committed_offset=excluded.committed_offset,
+                    guard_hash=excluded.guard_hash,
+                    processing_status='ready',
+                    last_successful_scan_at_ms=1,
+                    last_error_code=NULL",
+                params![crate::usage::USAGE_PARSER_VERSION, observed_size],
+            )
+            .unwrap();
         drop(connection);
 
         let ledger = Arc::new(
