@@ -3057,13 +3057,31 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         };
+        let finished_scan_id = terminal_scan
+            .last_finished_scan_id
+            .as_deref()
+            .expect("terminal startup scan id");
+        let child_status: (String, Option<String>) = Connection::open(ledger.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT state,error_code FROM source_scan_runs
+                 WHERE scan_id=?1 AND source='codex'",
+                [finished_scan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(
             (
                 terminal_scan.last_finished_scan_result,
                 terminal_scan.last_scan_error_code.clone(),
+                child_status,
             ),
-            (Some(ScanResult::Completed), None),
-            "production startup scan must complete successfully without an error"
+            (
+                Some(ScanResult::Completed),
+                None,
+                ("completed".to_owned(), None),
+            ),
+            "production startup scan and Codex child run must complete successfully"
         );
         coordinator.shutdown().unwrap();
 
