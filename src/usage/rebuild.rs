@@ -214,7 +214,9 @@ impl<'connection> RebuildLedger<'connection> {
             _ => return Err(RebuildError::Invalid("invalid app build pair")),
         }
         let snapshot = load_snapshot(&transaction)?;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(snapshot)
     }
 
@@ -282,7 +284,9 @@ impl<'connection> RebuildLedger<'connection> {
         if committed_offset == progress.last_complete_offset
             && state_matches_progress(&transaction, build_epoch, &progress)?
         {
-            source_tx.commit_legacy()?;
+            source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
             return Ok(ProgressOutcome::AlreadyApplied);
         }
         if checkpoint_guard != progress.expected_guard_hash {
@@ -383,7 +387,9 @@ impl<'connection> RebuildLedger<'connection> {
             return Err(RebuildError::Cas("manifest completion CAS failed"));
         }
         verify_completion_row_for_storage(&transaction, build_epoch, progress.source_file_id)?;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(if exhausted {
             ProgressOutcome::Rebuilt
         } else {
@@ -419,7 +425,9 @@ impl<'connection> RebuildLedger<'connection> {
         if changed != 1 {
             return Err(RebuildError::Cas("source cannot transition to blocked"));
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(())
     }
 
@@ -544,7 +552,9 @@ impl<'connection> RebuildLedger<'connection> {
                 "quarantined session still has build usage rows",
             ));
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(members.len())
     }
 
@@ -657,7 +667,9 @@ impl<'connection> RebuildLedger<'connection> {
         if changed != 1 {
             return Err(RebuildError::Cas("blocked condition is not resolved"));
         }
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(())
     }
 
@@ -728,7 +740,9 @@ impl<'connection> RebuildLedger<'connection> {
             transaction.query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
                 row.get(0)
             })?;
-        source_tx.commit_legacy()?;
+        source_tx
+            .commit()
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
         Ok(ActivationOutcome {
             active_epoch: build_epoch,
             data_revision,
