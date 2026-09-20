@@ -3058,13 +3058,12 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(
-            terminal_scan.last_finished_scan_result,
-            Some(ScanResult::Completed),
-            "production startup scan must complete successfully"
-        );
-        assert_eq!(
-            terminal_scan.last_scan_error_code, None,
-            "production startup scan must not finish with an error"
+            (
+                terminal_scan.last_finished_scan_result,
+                terminal_scan.last_scan_error_code.clone(),
+            ),
+            (Some(ScanResult::Completed), None),
+            "production startup scan must complete successfully without an error"
         );
         coordinator.shutdown().unwrap();
 
