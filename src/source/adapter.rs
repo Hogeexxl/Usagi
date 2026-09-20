@@ -531,7 +531,7 @@ impl SourceWriteConnection<'_> {
         }
     }
 
-    fn connection_mut(&mut self) -> &mut Connection {
+    fn connection_mut(&mut self) -> &Connection {
         match self {
             Self::Locked(connection) => connection,
             Self::Legacy(transaction) => transaction,
@@ -620,7 +620,7 @@ impl<'a> SourceWriteTxn<'a> {
         let connection = self.connection.take().ok_or(rusqlite::Error::InvalidQuery)?;
         match connection {
             SourceWriteConnection::Legacy(transaction) => transaction.commit()?,
-            SourceWriteConnection::Locked(mut connection) => {
+            SourceWriteConnection::Locked(connection) => {
                 connection.execute_batch("COMMIT")?;
             }
         }
@@ -1001,7 +1001,7 @@ impl<'a> SourceWriteTxn<'a> {
     #[allow(dead_code)]
     pub(crate) fn with_private_state<T>(
         &mut self,
-        operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, SourceStorageError>,
+        operation: impl FnOnce(&rusqlite::Connection) -> Result<T, SourceStorageError>,
     ) -> Result<T, SourceStorageError> {
         self.mutate(|transaction| {
             let connection = transaction.connection_mut()?;
@@ -1087,7 +1087,7 @@ impl<'a> SourceWriteTxn<'a> {
             .take()
             .ok_or(SourceStorageError::TransactionClosed)?;
         let commit_result = match connection {
-            SourceWriteConnection::Locked(mut connection) => connection.execute_batch("COMMIT"),
+            SourceWriteConnection::Locked(connection) => connection.execute_batch("COMMIT"),
             SourceWriteConnection::Legacy(transaction) => transaction.commit(),
         };
         commit_result.map_err(|error| {
@@ -1125,7 +1125,7 @@ impl<'a> SourceWriteTxn<'a> {
         result
     }
 
-    fn connection_mut(&mut self) -> Result<&mut Connection, SourceStorageError> {
+    fn connection_mut(&mut self) -> Result<&Connection, SourceStorageError> {
         self.connection
             .as_mut()
             .map(SourceWriteConnection::connection_mut)
