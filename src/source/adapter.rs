@@ -10,7 +10,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    domain::{Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
+    domain::{MetadataThreadCommit, Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
     storage::{Ledger, StorageErrorKind},
     usage::{EventKind, NormalizedTokenUsage},
 };
@@ -256,6 +256,34 @@ impl SourceRunContext {
 
     pub fn source(&self) -> &SourceId {
         &self.source
+    }
+
+    pub(crate) fn apply_codex_metadata_group(
+        &mut self,
+        ledger: &Ledger,
+        group: &MetadataThreadCommit,
+    ) -> crate::storage::Result<bool> {
+        self.apply_codex_storage(|connection| {
+            crate::storage::metadata::apply_codex_metadata_group(connection, ledger, group)
+        })
+    }
+
+    fn apply_codex_storage<T>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
+    ) -> crate::storage::Result<T> {
+        self.require_open()
+            .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
+        let result = {
+            let connection = self
+                .connection_mut()
+                .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
+            operation(connection)
+        };
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
     pub fn scan_id(&self) -> &str {
