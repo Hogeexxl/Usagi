@@ -97,12 +97,7 @@ impl Ledger {
                 "legacy-codex-metadata-commit",
                 &mut connection,
             )?;
-            let transaction = source_tx.legacy_transaction().ok_or_else(|| {
-                StorageError::invalid_state("legacy Codex SourceWriteTxn missing transaction")
-            })?;
-            ensure_source_ready(&transaction, self)?;
-
-            let changed = commit_group(&transaction, group)?;
+            let changed = source_tx.apply_codex_metadata_group(self, group)?;
             if changed {
                 data_changed = true;
             }
