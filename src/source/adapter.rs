@@ -423,6 +423,22 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_rebuild_quarantine_session(
+        &mut self,
+        root_session_id: &str,
+        error_code: &str,
+        now_ms: i64,
+    ) -> Result<usize, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_quarantine_session(
+                connection,
+                root_session_id,
+                error_code,
+                now_ms,
+            )
+        })
+    }
+
     pub(crate) fn with_codex_private_state<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
