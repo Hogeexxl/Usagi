@@ -417,29 +417,14 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         if error_code.is_empty() || now_ms < 0 {
             return Err(RebuildError::Invalid("invalid block details"));
         }
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(block_source)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        let (build_epoch, _) = current_build(&transaction)?;
-        let changed = transaction.execute(
-            "UPDATE usage_build_sources SET completion_status='blocked',
-                    completion_error_code=?1, completed_generation=NULL,
-                    completed_through_offset=NULL, updated_at_ms=?2
-             WHERE build_epoch=?3 AND source_file_id=?4
-               AND completion_status IN ('pending','blocked') AND carry_phase='none'",
-            params![error_code, now_ms, build_epoch, source_file_id],
-        )?;
-        if changed != 1 {
-            return Err(RebuildError::Cas("source cannot transition to blocked"));
-        }
+        source_tx.apply_codex_rebuild_block_source(source_file_id, error_code, now_ms)?;
         source_tx
             .commit()
-            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-        Ok(())
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))
     }
 
     /// Remove every build contribution for one Session Tree and mark all of its
@@ -652,36 +637,14 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
     }
 
     pub fn retry_blocked(&mut self, source_file_id: i64, now_ms: i64) -> Result<(), RebuildError> {
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(retry_blocked)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        let (build_epoch, _) = current_build(&transaction)?;
-        let changed = transaction.execute(
-            "UPDATE usage_build_sources SET completion_status='pending',
-                    completion_error_code=NULL, updated_at_ms=?1
-             WHERE build_epoch=?2 AND source_file_id=?3
-               AND completion_status='blocked' AND carry_phase='none'
-               AND EXISTS (
-                   SELECT 1 FROM source_files sf
-                   WHERE sf.source_file_id=usage_build_sources.source_file_id
-                     AND sf.file_status='present'
-                     AND sf.file_generation=usage_build_sources.expected_file_generation
-                     AND sf.device_id=usage_build_sources.expected_device_id
-                     AND sf.inode=usage_build_sources.expected_inode
-               )",
-            params![now_ms, build_epoch, source_file_id],
-        )?;
-        if changed != 1 {
-            return Err(RebuildError::Cas("blocked condition is not resolved"));
-        }
+        source_tx.apply_codex_rebuild_retry_blocked(source_file_id, now_ms)?;
         source_tx
             .commit()
-            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-        Ok(())
+            .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))
     }
 
     /// Activate only after a complete discovery proof and every manifest row
@@ -691,75 +654,129 @@ pub(crate) fn apply_codex_rebuild_begin_or_resume(
         complete_present_source_ids: &[i64],
     ) -> Result<ActivationOutcome, RebuildError> {
         let present = normalized_ids(complete_present_source_ids)?;
-        let source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
+        let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             concat!("legacy-codex-rebuild:", stringify!(activate)),
             self.connection,
         )?;
-        let transaction = source_tx.legacy_transaction().ok_or(RebuildError::Invalid(
-            "legacy Codex SourceWriteTxn missing transaction",
-        ))?;
-        let (build_epoch, target_parser) = current_build(&transaction)?;
-        verify_complete_present_set(&transaction, build_epoch, &present)?;
-
-        let unfinished: i64 = transaction.query_row(
-            "SELECT count(*) FROM usage_build_sources
-             WHERE build_epoch=?1 AND completion_status NOT IN ('rebuilt','carried','quarantined')",
-            [build_epoch],
-            |row| row.get(0),
-        )?;
-        if unfinished != 0 {
-            return Err(RebuildError::Cas("manifest contains unfinished sources"));
-        }
-        let member_ids = query_ids(
-            &transaction,
-            "SELECT source_file_id FROM usage_build_sources WHERE build_epoch=?1
-             ORDER BY source_file_id",
-            build_epoch,
-        )?;
-        for source_file_id in member_ids {
-            let status: String = transaction.query_row(
-                "SELECT completion_status FROM usage_build_sources
-                 WHERE build_epoch=?1 AND source_file_id=?2",
-                params![build_epoch, source_file_id],
-                |row| row.get(0),
-            )?;
-            if status == "quarantined" {
-                verify_quarantined_source(&transaction, build_epoch, source_file_id)?;
-            } else {
-                verify_completion_row_for_storage(&transaction, build_epoch, source_file_id)?;
-            }
-        }
-        let changed = transaction.execute(
-            "UPDATE source_usage_epochs
-             SET active_epoch=?1, active_parser_version=?2,
-                 build_epoch=NULL, build_parser_version=NULL
-             WHERE source='codex' AND build_epoch=?1 AND build_parser_version=?2",
-            params![build_epoch, target_parser],
-        )?;
-        if changed != 1 {
-            return Err(RebuildError::Cas("build changed before activation"));
-        }
-        transaction.execute(
-            "UPDATE app_meta SET data_revision=data_revision+1 WHERE id=1",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM usage_build_sources WHERE build_epoch=?1",
-            [build_epoch],
-        )?;
-        let data_revision =
-            transaction.query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })?;
+        let outcome = source_tx.apply_codex_rebuild_activate(&present)?;
         source_tx
             .commit()
             .map_err(|_| RebuildError::Invalid("source write transaction commit failed"))?;
-        Ok(ActivationOutcome {
-            active_epoch: build_epoch,
-            data_revision,
-        })
+        Ok(outcome)
     }
 }
+
+pub(crate) fn apply_codex_rebuild_block_source(
+    transaction: &Connection,
+    source_file_id: i64,
+    error_code: &str,
+    now_ms: i64,
+) -> Result<(), RebuildError> {
+    let (build_epoch, _) = current_build(transaction)?;
+    let changed = transaction.execute(
+        "UPDATE usage_build_sources SET completion_status='blocked',
+                completion_error_code=?1, completed_generation=NULL,
+                completed_through_offset=NULL, updated_at_ms=?2
+         WHERE build_epoch=?3 AND source_file_id=?4
+           AND completion_status IN ('pending','blocked') AND carry_phase='none'",
+        params![error_code, now_ms, build_epoch, source_file_id],
+    )?;
+    if changed != 1 {
+        return Err(RebuildError::Cas("source cannot transition to blocked"));
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_codex_rebuild_retry_blocked(
+    transaction: &Connection,
+    source_file_id: i64,
+    now_ms: i64,
+) -> Result<(), RebuildError> {
+    let (build_epoch, _) = current_build(transaction)?;
+    let changed = transaction.execute(
+        "UPDATE usage_build_sources SET completion_status='pending',
+                completion_error_code=NULL, updated_at_ms=?1
+         WHERE build_epoch=?2 AND source_file_id=?3
+           AND completion_status='blocked' AND carry_phase='none'
+           AND EXISTS (
+               SELECT 1 FROM source_files sf
+               WHERE sf.source_file_id=usage_build_sources.source_file_id
+                 AND sf.file_status='present'
+                 AND sf.file_generation=usage_build_sources.expected_file_generation
+                 AND sf.device_id=usage_build_sources.expected_device_id
+                 AND sf.inode=usage_build_sources.expected_inode
+           )",
+        params![now_ms, build_epoch, source_file_id],
+    )?;
+    if changed != 1 {
+        return Err(RebuildError::Cas("blocked condition is not resolved"));
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_codex_rebuild_activate(
+    transaction: &Connection,
+    present: &BTreeSet<i64>,
+) -> Result<ActivationOutcome, RebuildError> {
+    let (build_epoch, target_parser) = current_build(transaction)?;
+    verify_complete_present_set(transaction, build_epoch, present)?;
+
+    let unfinished: i64 = transaction.query_row(
+        "SELECT count(*) FROM usage_build_sources
+         WHERE build_epoch=?1 AND completion_status NOT IN ('rebuilt','carried','quarantined')",
+        [build_epoch],
+        |row| row.get(0),
+    )?;
+    if unfinished != 0 {
+        return Err(RebuildError::Cas("manifest contains unfinished sources"));
+    }
+    let member_ids = query_ids(
+        transaction,
+        "SELECT source_file_id FROM usage_build_sources WHERE build_epoch=?1
+         ORDER BY source_file_id",
+        build_epoch,
+    )?;
+    for source_file_id in member_ids {
+        let status: String = transaction.query_row(
+            "SELECT completion_status FROM usage_build_sources
+             WHERE build_epoch=?1 AND source_file_id=?2",
+            params![build_epoch, source_file_id],
+            |row| row.get(0),
+        )?;
+        if status == "quarantined" {
+            verify_quarantined_source(transaction, build_epoch, source_file_id)?;
+        } else {
+            verify_completion_row_for_storage(transaction, build_epoch, source_file_id)?;
+        }
+    }
+    let changed = transaction.execute(
+        "UPDATE source_usage_epochs
+         SET active_epoch=?1, active_parser_version=?2,
+             build_epoch=NULL, build_parser_version=NULL
+         WHERE source='codex' AND build_epoch=?1 AND build_parser_version=?2",
+        params![build_epoch, target_parser],
+    )?;
+    if changed != 1 {
+        return Err(RebuildError::Cas("build changed before activation"));
+    }
+    transaction.execute(
+        "UPDATE app_meta SET data_revision=data_revision+1 WHERE id=1",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM usage_build_sources WHERE build_epoch=?1",
+        [build_epoch],
+    )?;
+    let data_revision =
+        transaction.query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+            row.get(0)
+        })?;
+    Ok(ActivationOutcome {
+        active_epoch: build_epoch,
+        data_revision,
+    })
+}
+
 
 #[derive(Debug)]
 pub enum RebuildError {
