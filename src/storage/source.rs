@@ -123,6 +123,7 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         let outcome = source_tx.with_codex_private_state(|transaction| {
             apply_codex_source_observations_private(
@@ -198,6 +199,7 @@ impl Ledger {
         let mut source_tx = crate::source::SourceWriteTxn::begin_legacy_codex(
             "legacy-codex-source-state",
             &mut connection,
+            Some(self.revision_publisher()),
         )?;
         let outcome = source_tx.with_codex_private_state(|transaction| {
             apply_codex_checkpoint_rebuild_private(
