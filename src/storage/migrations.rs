@@ -2831,9 +2831,9 @@ mod tests {
     #[test]
     fn m08_populated_v10_survives_migration_and_production_startup_scan() {
         use crate::{
+            domain::ScanResult,
             ingestion::{IngestionConfig, IngestionCoordinator, LegacyCodexSourceAdapter},
             source::SourceRegistry,
-            domain::ScanResult,
             storage::{Ledger, LedgerOptions},
             usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
         };
