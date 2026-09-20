@@ -22,6 +22,7 @@ use tokio::sync::watch;
 pub(crate) mod cost;
 mod lifecycle;
 mod metadata;
+pub(crate) use metadata::apply_codex_metadata_group;
 mod migrations;
 pub(crate) mod source;
 pub(crate) mod usage;
