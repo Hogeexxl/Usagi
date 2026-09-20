@@ -11,6 +11,6 @@ pub use adapter::{
     SourceContextError, SourceRunContext, SourceRunReport, SourceRunResult, SourceRunState,
     SourceStorage, SourceStorageError, SourceWriteTxn, UsageWriteTarget,
 };
-pub(crate) use adapter::{CodexCompatRequest, SourceStorageFactory};
+pub(crate) use adapter::SourceStorageFactory;
 pub use id::{SourceId, SourceIdError};
 pub use registry::{SourceDescriptor, SourceDescriptorError, SourceRegistry, SourceRegistryError};
