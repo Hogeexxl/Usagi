@@ -589,7 +589,7 @@ fn temporary_path(source_file_id: i64, generation: i64) -> String {
     format!("/.usagi-observation-pending/{source_file_id}-{generation}")
 }
 
-fn load_existing_sources(transaction: &Transaction<'_>) -> Result<Vec<ExistingSource>> {
+fn load_existing_sources(transaction: &Connection) -> Result<Vec<ExistingSource>> {
     let mut statement = transaction.prepare(
         "SELECT source_file_id, thread_id, current_path, source_area,
                 device_id, inode, file_generation, observed_size,
@@ -616,7 +616,7 @@ fn load_existing_sources(transaction: &Transaction<'_>) -> Result<Vec<ExistingSo
 }
 
 fn query_source_state(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> Result<Option<SourceFileState>> {
     transaction
@@ -650,7 +650,7 @@ fn query_source_state(
 }
 
 fn query_metadata_checkpoint(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> Result<Option<MetadataCheckpointState>> {
     transaction
@@ -680,7 +680,7 @@ fn query_metadata_checkpoint(
 }
 
 fn query_metadata_fact(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     source_file_id: i64,
 ) -> Result<Option<RolloutMetadataFact>> {
     transaction
@@ -862,7 +862,7 @@ fn mismatch_reason(error: &crate::domain::DomainError) -> SafeFactMismatchReason
     }
 }
 
-fn verify_source_binding(transaction: &Transaction<'_>, fingerprint: &str) -> Result<()> {
+fn verify_source_binding(transaction: &Connection, fingerprint: &str) -> Result<()> {
     let (stored_fingerprint, status): (Option<String>, String) = transaction.query_row(
         "SELECT codex_home_fingerprint, source_binding_status FROM app_meta WHERE id = 1",
         [],
