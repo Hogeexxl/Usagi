@@ -682,7 +682,6 @@ pub(crate) fn apply_codex_rebuild_quarantine_session(
     Ok(members.len())
 }
 
-
 pub(crate) fn apply_codex_replace_build_sources(
     transaction: &Connection,
     parser_version: i64,
