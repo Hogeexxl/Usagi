@@ -401,6 +401,28 @@ pub struct RevisionTuple {
     pub status_revision: i64,
 }
 
+#[derive(Clone)]
+pub(crate) struct RevisionPublisher {
+    sender: watch::Sender<RevisionTuple>,
+}
+
+impl RevisionPublisher {
+    pub(crate) fn publish(&self, data_revision: i64, status_revision: i64) {
+        self.sender.send_if_modified(|current| {
+            let next = RevisionTuple {
+                data_revision: current.data_revision.max(data_revision),
+                status_revision: current.status_revision.max(status_revision),
+            };
+            if *current == next {
+                false
+            } else {
+                *current = next;
+                true
+            }
+        });
+    }
+}
+
 /// The MU SQLite ledger.  Connections and SQL remain private to this module.
 pub struct Ledger {
     db_path: PathBuf,
@@ -634,19 +656,15 @@ impl Ledger {
         *self.revision_sender.borrow()
     }
 
+    pub(crate) fn revision_publisher(&self) -> RevisionPublisher {
+        RevisionPublisher {
+            sender: self.revision_sender.clone(),
+        }
+    }
+
     pub(crate) fn publish_revisions(&self, data_revision: i64, status_revision: i64) {
-        self.revision_sender.send_if_modified(|current| {
-            let next = RevisionTuple {
-                data_revision: current.data_revision.max(data_revision),
-                status_revision: current.status_revision.max(status_revision),
-            };
-            if *current == next {
-                false
-            } else {
-                *current = next;
-                true
-            }
-        });
+        self.revision_publisher()
+            .publish(data_revision, status_revision);
     }
 
     pub(crate) fn publish_scan_state(&self, data_revision: i64, state: &ScanState) {
