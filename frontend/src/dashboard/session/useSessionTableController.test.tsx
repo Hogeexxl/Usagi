@@ -13,7 +13,7 @@ import type {
 } from "../../data/types";
 import { useSessionTableController } from "./useSessionTableController";
 
-const emptyFilters: DashboardFilters = { models: [], projects: [] };
+const emptyFilters: DashboardFilters = { sources: [], models: [], projects: [] };
 const range = (key: DashboardRange = { key: "today" }) => ({ key: key.key, start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" });
 const usage = {
   input_tokens: 1,
@@ -31,6 +31,8 @@ const usage = {
 
 function item(id: string, total = 3): SessionItemDto {
   return {
+    source: "codex",
+    native_session_id: id,
     root_session_id: id,
     title: id,
     project_name: "Usagi",
@@ -48,6 +50,8 @@ function item(id: string, total = 3): SessionItemDto {
 
 function snapshot(count: number, seedCount = 40, key: DashboardRange = { key: "today" }): SessionSnapshotResponse {
   const sort_index: SessionSortIndexItem[] = Array.from({ length: count }, (_, index) => ({
+    source: "codex",
+    native_session_id: `root-${index + 1}`,
     root_session_id: `root-${index + 1}`,
     last_activity_at_ms: count - index,
     project_sort_key: index % 4 === 0 ? null : `/project/${index % 3}`,
@@ -139,7 +143,7 @@ describe("useSessionTableController", () => {
 
     await act(async () => result.current.select_sort("project"));
     expect(result.current.page).toBe(6);
-    rerender({ key: { key: "yesterday" }, selectedFilters: { models: ["gpt-5"], projects: [] } });
+    rerender({ key: { key: "yesterday" }, selectedFilters: { sources: [], models: ["gpt-5"], projects: [] } });
     await waitFor(() => expect(result.current.page).toBe(1));
     expect(result.current.sort_by).toBe("project");
     expect(result.current.filters.models).toEqual(["gpt-5"]);
@@ -148,18 +152,23 @@ describe("useSessionTableController", () => {
   });
 
   it("T-S04-003 covers full-index sorting, fixed pagination windows, null-last ties, and bounded prefetch", async () => {
-    const sortIndex: SessionSortIndexItem[] = Array.from({ length: 200 }, (_, index) => ({
-      root_session_id: index === 0 ? "root-199" : index === 198 ? "root-001" : `root-${String(index + 1).padStart(3, "0")}`,
-      last_activity_at_ms: 200 - index,
-      project_sort_key: index === 198 ? null : index === 199 ? "" : `project-${index % 4}`,
-      model_sort_key: index === 198 ? null : index === 199 ? "" : `model-${index % 3}`,
-      total_tokens: index < 2 ? 200 : 200 - index,
-      combined_total_tokens: index < 2 ? 400 : 400 - index,
-      combined_estimated_cost: index === 198 ? null : index < 2 ? 20 : (200 - index) / 10,
-      cache_hit_rate: index === 198 ? null : (index % 10) / 10,
-      data_status: "complete",
-      error_code: null,
-    }));
+    const sortIndex: SessionSortIndexItem[] = Array.from({ length: 200 }, (_, index) => {
+      const root_session_id = index === 0 ? "root-199" : index === 198 ? "root-001" : `root-${String(index + 1).padStart(3, "0")}`;
+      return {
+        source: "codex",
+        native_session_id: root_session_id,
+        root_session_id,
+        last_activity_at_ms: 200 - index,
+        project_sort_key: index === 198 ? null : index === 199 ? "" : `project-${index % 4}`,
+        model_sort_key: index === 198 ? null : index === 199 ? "" : `model-${index % 3}`,
+        total_tokens: index < 2 ? 200 : 200 - index,
+        combined_total_tokens: index < 2 ? 400 : 400 - index,
+        combined_estimated_cost: index === 198 ? null : index < 2 ? 20 : (200 - index) / 10,
+        cache_hit_rate: index === 198 ? null : (index % 10) / 10,
+        data_status: "complete",
+        error_code: null,
+      };
+    });
     const full: SessionSnapshotResponse = {
       range: range(),
       data_revision: 1,

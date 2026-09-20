@@ -543,12 +543,20 @@ impl<'a> UsageLedger<'a> {
         &self,
         range: TimeRange,
     ) -> Result<UsageSnapshot<ModelUsageRows>, UsageLedgerError> {
+        self.models_snapshot_filtered(range, &UsageFilter::default())
+    }
+
+    pub fn models_snapshot_filtered(
+        &self,
+        range: TimeRange,
+        filter: &UsageFilter,
+    ) -> Result<UsageSnapshot<ModelUsageRows>, UsageLedgerError> {
         let mut connection = self.ledger.connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage::StorageError::sqlite)?;
         let data_revision = snapshot_meta(&transaction)?;
-        let value = AggregateReader::new(&transaction).models(range)?;
+        let value = AggregateReader::new(&transaction).models_filtered(range, filter)?;
         transaction
             .commit()
             .map_err(storage::StorageError::sqlite)?;

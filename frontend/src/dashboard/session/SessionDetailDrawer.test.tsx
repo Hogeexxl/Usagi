@@ -47,11 +47,15 @@ const subagentModelUsage = [
 ];
 
 const detail: SessionDetailResponse = {
+  source: "codex",
+  native_session_id: "root-session-full-id",
   range: { key: "today", start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" },
   data_revision: 3,
   root_session_id: "root-session-full-id",
   last_activity_at_ms: Date.UTC(2026, 7, 12, 8),
   main: {
+    source: "codex",
+    native_session_id: "root-session-full-id",
     title: "A long Session title",
     thread_id: "root-session-full-id",
     root_session_id: "root-session-full-id",
@@ -66,6 +70,8 @@ const detail: SessionDetailResponse = {
   },
   subagents: [
     {
+      source: "codex",
+      native_session_id: "123e4567-e89b-12d3-a456-426614174000",
       thread_id: "123e4567-e89b-12d3-a456-426614174000",
       parent_thread_id: "root-session-full-id",
       root_session_id: "root-session-full-id",
@@ -74,6 +80,8 @@ const detail: SessionDetailResponse = {
       model_usage: subagentModelUsage,
     },
     {
+      source: "codex",
+      native_session_id: "subagent-old-full-id",
       thread_id: "subagent-old-full-id",
       parent_thread_id: "root-session-full-id",
       root_session_id: "root-session-full-id",
@@ -85,6 +93,8 @@ const detail: SessionDetailResponse = {
 };
 
 const row: SessionItemDto = {
+  source: "codex",
+  native_session_id: detail.native_session_id,
   root_session_id: detail.root_session_id,
   title: detail.main.title,
   project_name: "Usagi",

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { appendRangeParams, dashboardQueryKey, usagiClient } from "./usagiClient";
+import { appendRangeParams, canonicalDashboardFilters, dashboardQueryKey, usagiClient } from "./usagiClient";
 import { UsagiClientError, type DashboardFilters } from "./types";
 
-const emptyFilters: DashboardFilters = { models: [], projects: [] };
+const emptyFilters: DashboardFilters = { sources: [], models: [], projects: [] };
 const range = { key: "today", start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" };
 const usage = {
   input_tokens: 10,
@@ -43,6 +43,8 @@ const sessionUsage = {
 };
 
 const sessionItem = (root_session_id = "root-1") => ({
+  source: "codex",
+  native_session_id: root_session_id,
   root_session_id,
   title: "A session",
   project_name: "Usagi",
@@ -166,6 +168,10 @@ describe("usagiClient DTO seam", () => {
       new Response(
         JSON.stringify({
           data_revision: 7,
+          sources: [
+            { source: "codex", display_name: "Codex" },
+            { source: "antigravity", display_name: "Antigravity" },
+          ],
           models: [
             { model: "gpt-5.6-sol", provider: "openai" },
             { model: "gpt-5.6", provider: "route-models" },
@@ -181,6 +187,10 @@ describe("usagiClient DTO seam", () => {
     );
     await expect(usagiClient.filterOptions()).resolves.toEqual({
       data_revision: 7,
+      sources: [
+        { source: "codex", display_name: "Codex" },
+        { source: "antigravity", display_name: "Antigravity" },
+      ],
       models: [
         { model: "gpt-5.6-sol", provider: "openai" },
         { model: "gpt-5.6", provider: "route-models" },
@@ -194,17 +204,25 @@ describe("usagiClient DTO seam", () => {
 
     for (const invalid of [
       { data_revision: 1, models: [], projects: [{ kind: "projectless", project_path: "/fake" }] },
-      { data_revision: 1, models: [], projects: [{ kind: "project", project_name: "Usagi" }] },
-      { data_revision: 1, models: [""], projects: [] },
-      { data_revision: 1, models: [{ model: "gpt-a", provider: "unknown" }], projects: [] },
-      { data_revision: 1, models: [{ model: "gpt-a" }], projects: [] },
-      { data_revision: 1, models: [{ model: "gpt-a", provider: "openai", extra: true }], projects: [] },
+      { data_revision: 1, sources: [], models: [], projects: [{ kind: "projectless", project_path: "/fake" }] },
+      { data_revision: 1, sources: [], models: [], projects: [{ kind: "project", project_name: "Usagi" }] },
+      { data_revision: 1, sources: [], models: [""], projects: [] },
+      { data_revision: 1, sources: [], models: [{ model: "gpt-a", provider: "unknown" }], projects: [] },
+      { data_revision: 1, sources: [], models: [{ model: "gpt-a" }], projects: [] },
+      { data_revision: 1, sources: [], models: [{ model: "gpt-a", provider: "openai", extra: true }], projects: [] },
+      { data_revision: 1, sources: "not-an-array", models: [], projects: [] },
+      { data_revision: 1, sources: [{ source: "" }], models: [], projects: [] },
+      { data_revision: 1, sources: [{ source: "codex" }], models: [], projects: [] },
+      { data_revision: 1, sources: [{ source: "codex", display_name: "Codex", extra: true }], models: [], projects: [] },
+      { data_revision: 1, sources: [{ source: "codex\x00", display_name: "Codex" }], models: [], projects: [] },
+      { data_revision: 1, sources: [{ source: "codex", display_name: "Codex\n" }], models: [], projects: [] },
     ]) {
       fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(invalid), { status: 200 }));
       await expect(usagiClient.filterOptions()).rejects.toBeInstanceOf(UsagiClientError);
     }
 
     const filters: DashboardFilters = {
+      sources: ["codex", "antigravity", "codex"],
       models: ["gpt-b", "gpt-a", "gpt-b"],
       projects: [
         { kind: "unknown" as const },
@@ -216,12 +234,12 @@ describe("usagiClient DTO seam", () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 1, usage }), { status: 200 }));
     await usagiClient.summary({ key: "today" }, filters);
     expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/summary?range=today&model=gpt-a&model=gpt-b&project_path=%2Fa+%26+b&include_projectless=1&include_unknown_project=1",
+      "/api/usage/summary?range=today&source=antigravity&source=codex&model=gpt-a&model=gpt-b&project_path=%2Fa+%26+b&include_projectless=1&include_unknown_project=1",
       expect.objectContaining({ method: "GET" }),
     );
 
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 1, usage }), { status: 200 }));
-    await usagiClient.summary({ key: "today" }, { models: [], projects: [] });
+    await usagiClient.summary({ key: "today" }, { sources: [], models: [], projects: [] });
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/usage/summary?range=today",
       expect.objectContaining({ method: "GET" }),
@@ -388,6 +406,8 @@ describe("usagiClient DTO seam", () => {
   it("T-S04-001 parses snapshot/index, bounded repeated-ID rows, detail fields, and stale revision errors", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const sortIndex = {
+      source: "codex",
+      native_session_id: "root-1",
       root_session_id: "root-1",
       last_activity_at_ms: 1_700_000_000_000,
       project_sort_key: "/work/Usagi",
@@ -423,7 +443,7 @@ describe("usagiClient DTO seam", () => {
     await expect(
       usagiClient.getSessionRows({
         range: { key: "today" },
-        filters: { models: ["gpt-b", "gpt-a", "gpt-b"], projects: [{ kind: "projectless" }] },
+        filters: { sources: [], models: ["gpt-b", "gpt-a", "gpt-b"], projects: [{ kind: "projectless" }] },
         root_session_ids: ["root-1", "root-1"],
         expected_data_revision: 4,
       }),
@@ -437,9 +457,13 @@ describe("usagiClient DTO seam", () => {
       new Response(JSON.stringify({
         range,
         data_revision: 4,
+        source: "codex",
+        native_session_id: "root-1",
         root_session_id: "root-1",
         last_activity_at_ms: 1_700_000_000_000,
         main: {
+          source: "codex",
+          native_session_id: "root-1",
           title: "A session",
           thread_id: "root-1",
           root_session_id: "root-1",
@@ -450,6 +474,8 @@ describe("usagiClient DTO seam", () => {
           inclusive_usage: sessionUsage,
         },
         subagents: [{
+          source: "codex",
+          native_session_id: "child-1",
           thread_id: "child-1",
           parent_thread_id: null,
           root_session_id: "root-1",
@@ -471,9 +497,13 @@ describe("usagiClient DTO seam", () => {
       }), { status: 200 }),
     );
     await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1", expected_data_revision: 4 })).resolves.toMatchObject({
+      source: "codex",
+      native_session_id: "root-1",
       last_activity_at_ms: 1_700_000_000_000,
-      main: { model_usage: [{ model: "gpt-5", reasoning_effort: "high" }], self_usage: sessionUsage, inclusive_usage: sessionUsage },
+      main: { source: "codex", native_session_id: "root-1", model_usage: [{ model: "gpt-5", reasoning_effort: "high" }], self_usage: sessionUsage, inclusive_usage: sessionUsage },
       subagents: [{
+        source: "codex",
+        native_session_id: "child-1",
         parent_thread_id: null,
         model_usage: [{
           model: "o4-mini",
@@ -527,6 +557,8 @@ describe("usagiClient DTO seam", () => {
     }
 
     const sortIndex = {
+      source: "codex",
+      native_session_id: "root-1",
       root_session_id: "root-1",
       last_activity_at_ms: 1_700_000_000_000,
       project_sort_key: "/work/Usagi",
@@ -566,9 +598,13 @@ describe("usagiClient DTO seam", () => {
         JSON.stringify({
           range,
           data_revision: 0,
+          source: "codex",
+          native_session_id: "root-1",
           root_session_id: "root-1",
           last_activity_at_ms: 1_700_000_000_000,
           main: {
+            source: "codex",
+            native_session_id: "root-1",
             title: "A session",
             thread_id: "root-1",
             root_session_id: "root-1",
@@ -579,6 +615,8 @@ describe("usagiClient DTO seam", () => {
             inclusive_usage: detailUsage,
           },
           subagents: [{
+            source: "codex",
+            native_session_id: "child-1",
             thread_id: "child-1",
             parent_thread_id: null,
             root_session_id: "root-1",

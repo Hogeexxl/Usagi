@@ -81,8 +81,14 @@ export type ProjectSelection =
   | { kind: "unknown" };
 
 export type DashboardFilters = {
+  sources: string[];
   models: string[];
   projects: ProjectSelection[];
+};
+
+export type SourceFilterOption = {
+  source: string;
+  display_name: string;
 };
 
 export type ModelFilterProvider = "openai" | "route-models";
@@ -94,6 +100,7 @@ export type ModelFilterOption = {
 
 export type FilterOptionsResponse = {
   data_revision: number;
+  sources: SourceFilterOption[];
   models: ModelFilterOption[];
   projects: ProjectFilterOption[];
 };
@@ -144,6 +151,8 @@ export type SkillsUsageResponse = {
 };
 
 export type SessionItemDto = {
+  source: string;
+  native_session_id: string;
   root_session_id: string;
   title: string | null;
   project_name: string | null;
@@ -170,6 +179,8 @@ export type SessionSortField =
 export type SessionSortOrder = "asc" | "desc";
 
 export type SessionSortIndexItem = {
+  source: string;
+  native_session_id: string;
   root_session_id: string;
   last_activity_at_ms: number;
   project_sort_key: string | null;
@@ -203,6 +214,8 @@ export type MainModelUsageDto = {
 };
 
 export type MainSessionDetailDto = {
+  source: string;
+  native_session_id: string;
   title: string | null;
   thread_id: string;
   root_session_id: string;
@@ -214,6 +227,8 @@ export type MainSessionDetailDto = {
 };
 
 export type SubagentDetailDto = {
+  source: string;
+  native_session_id: string;
   thread_id: string;
   parent_thread_id: string | null;
   root_session_id: string;
@@ -228,6 +243,8 @@ export type SubagentDetailDto = {
 };
 
 export type SessionDetailResponse = {
+  source: string;
+  native_session_id: string;
   range: RangeDto;
   data_revision: number;
   root_session_id: string;

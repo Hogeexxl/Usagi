@@ -26,7 +26,7 @@ mod migrations;
 pub(crate) mod source;
 pub(crate) mod usage;
 
-pub use crate::domain::{AppState, SourceBindingStatus};
+pub use crate::domain::{AppState, CodexScanStatusSnapshot, SourceBindingStatus};
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 

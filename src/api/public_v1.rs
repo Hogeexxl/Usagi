@@ -21,7 +21,8 @@ use serde::Serialize;
 
 use crate::{
     codex::quota::{CodexQuotaResponse, CodexQuotaStatus, CodexQuotaWindow},
-    storage::RevisionTuple,
+    source::SourceId,
+    storage::{CodexScanStatusSnapshot, RevisionTuple},
     usage::{SummaryQuery, aggregate::UsageFilter, ledger::UsageLedger},
 };
 
@@ -97,8 +98,8 @@ struct StatusResponse {
     last_scan_error_code: Option<String>,
 }
 
-impl From<query::StatusResponse> for StatusResponse {
-    fn from(value: query::StatusResponse) -> Self {
+impl From<CodexScanStatusSnapshot> for StatusResponse {
+    fn from(value: CodexScanStatusSnapshot) -> Self {
         Self {
             data_revision: value.data_revision,
             status_revision: value.status_revision,
@@ -115,8 +116,22 @@ impl From<query::StatusResponse> for StatusResponse {
 
 async fn status(State(state): State<ApiState>) -> Result<Json<StatusResponse>, ApiError> {
     let ledger = Arc::clone(&state.context.ledger);
-    let value = run_blocking_query(move || query::status(&ledger, None)).await??;
-    Ok(Json(value.into()))
+    let snapshot = run_blocking_query(move || ledger.codex_scan_status_snapshot())
+        .await?
+        .map_err(query::map_storage_error)?;
+    query::ensure_safe(snapshot.data_revision)?;
+    query::ensure_safe(snapshot.status_revision)?;
+    for value in [
+        snapshot.last_scan_started_at_ms,
+        snapshot.last_scan_completed_at_ms,
+        snapshot.last_scan_failed_at_ms,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        query::ensure_safe(value)?;
+    }
+    Ok(Json(snapshot.into()))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -311,7 +326,10 @@ async fn summary(
         params.to.as_deref(),
     )?;
     let aggregate_range = range.aggregate_range()?;
-    let summary_query = SummaryQuery::new(aggregate_range, UsageFilter::default());
+    let summary_query = SummaryQuery::new(
+        aggregate_range,
+        UsageFilter::default().with_sources(vec![SourceId::CODEX]),
+    );
     let ledger = Arc::clone(&state.context.ledger);
     let snapshot =
         run_blocking_query(move || UsageLedger::new(&ledger).summary_snapshot(summary_query))

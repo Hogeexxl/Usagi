@@ -1,4 +1,4 @@
-import { ChevronRight, Cpu, Folder } from "lucide-react";
+import { ChevronRight, Cpu, Folder, Layers } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { forwardRef, useMemo, useState } from "react";
 
@@ -8,6 +8,7 @@ import type {
   ModelFilterProvider,
   ProjectFilterOption,
   ProjectSelection,
+  SourceFilterOption,
 } from "../data/types";
 import { Button, type ButtonProps } from "../ui/beui/button";
 import { Checkbox } from "../ui/beui/checkbox";
@@ -60,6 +61,18 @@ function modelGroups(options: FilterOptionsResponse | null, selected: readonly s
   });
 }
 
+function sourceSelections(options: FilterOptionsResponse | null, selected: readonly string[]): SourceFilterOption[] {
+  const values: SourceFilterOption[] = [...(options?.sources ?? [])];
+  const present = new Set(values.map((item) => item.source));
+  for (const source of selected) {
+    if (!present.has(source)) {
+      values.push({ source, display_name: source });
+      present.add(source);
+    }
+  }
+  return values;
+}
+
 function projectSelections(options: FilterOptionsResponse | null, selected: readonly ProjectSelection[]): ProjectLike[] {
   const values: ProjectLike[] = [...(options?.projects ?? [])];
   const present = new Set(values.map(projectKey));
@@ -87,11 +100,21 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
     "route-models": true,
   });
   const reduce = useReducedMotion();
+  const showSourceFilter = (options?.sources?.length ?? 0) > 1;
+  const sources = useMemo(() => sourceSelections(options, filters.sources), [options, filters.sources]);
   const groups = useMemo(() => modelGroups(options, filters.models), [options, filters.models]);
   const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
+  const selectedSources = new Set(filters.sources);
   const selectedModels = new Set(filters.models);
   const selectedProjects = new Set(filters.projects.map(projectKey));
 
+  const updateSources = (nextSources: string[]) => onChange({ ...filters, sources: nextSources });
+  const toggleSource = (source: string) =>
+    updateSources(
+      selectedSources.has(source)
+        ? filters.sources.filter((value) => value !== source)
+        : [...filters.sources, source],
+    );
   const updateModels = (nextModels: string[]) => onChange({ ...filters, models: nextModels });
   const toggleModel = (model: string) => updateModels(selectedModels.has(model) ? filters.models.filter((value) => value !== model) : [...filters.models, model]);
   const toggleGroup = (groupModels: readonly string[]) => {
@@ -108,6 +131,34 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {showSourceFilter ? (
+        <MorphPopover>
+          <MorphPopoverTrigger>
+            <FilterTrigger label="来源" count={filters.sources.length} icon={<Layers className="h-4 w-4" />} />
+          </MorphPopoverTrigger>
+          <MorphPopoverContent side="bottom" align="start" className="w-64 p-2">
+            <OptionStatus
+              loading={optionsLoading}
+              stale={optionsStale}
+              error={optionsErrorCode}
+              hasOptions={sources.length > 0}
+              onRetry={onRetryOptions}
+            />
+            {!optionsLoading && sources.length === 0 ? (
+              <div className="px-2 py-3 text-xs text-muted-foreground">暂无来源</div>
+            ) : null}
+            {sources.map((item) => (
+              <div key={item.source} className={rowClass}>
+                <Checkbox
+                  checked={selectedSources.has(item.source)}
+                  onCheckedChange={() => toggleSource(item.source)}
+                  label={item.display_name}
+                />
+              </div>
+            ))}
+          </MorphPopoverContent>
+        </MorphPopover>
+      ) : null}
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="模型" count={filters.models.length} icon={<Cpu className="h-4 w-4" />} /></MorphPopoverTrigger>
         <MorphPopoverContent side="bottom" align="start" className="w-72 p-2">

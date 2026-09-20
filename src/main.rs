@@ -119,7 +119,7 @@ where
     let scanner = IngestionCoordinator::start(
         IngestionConfig::default(),
         Arc::clone(&ledger),
-        source_registry,
+        source_registry.clone(),
     )
     .map_err(|error| format!("could not start Usagi scanner: {error:?}"))?;
     let codex_quota_service = match CodexQuotaService::new_with_diagnostic(
@@ -146,6 +146,7 @@ where
         AppContext {
             ledger,
             scanner,
+            source_registry: source_registry.clone(),
             codex_quota_service: Arc::clone(&codex_quota_service),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),
@@ -160,6 +161,7 @@ where
         AppContext {
             ledger,
             scanner,
+            source_registry,
             codex_quota_service: Arc::clone(&codex_quota_service),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),

@@ -20,8 +20,9 @@ pub use aggregate::{
     AggregateError, AggregateReader, FilterOptions, MAX_SESSION_ROWS, MainModelUsage,
     MainSessionDetail, ModelFilterOption, ModelUsageRow, ModelUsageRows, ProjectFilterOption,
     SessionCursor, SessionDetail, SessionPageRequest, SessionSnapshot, SessionSortField,
-    SessionSortIndexItem, SessionSortOrder, SessionUsagePage, SessionUsageRow, SubagentDetail,
-    SubagentModelUsage, SummaryQuery, TimeRange, TokenTotals, UsageFilter, UsageSummary,
+    SessionSortIndexItem, SessionSortOrder, SessionUsagePage, SessionUsageRow, SourceFilterOption,
+    SubagentDetail, SubagentModelUsage, SummaryQuery, TimeRange, TokenTotals, UsageFilter,
+    UsageSummary,
 };
 pub use pipeline::{
     CheckpointExpectation, ClassifiedOversizedUsageLine, ClassifiedUsageItem, ClassifiedUsageLine,

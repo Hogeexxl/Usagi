@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fmt, path::Path};
 use rusqlite::{Connection, Row, params};
 use rusqlite::{params_from_iter, types::Value};
 
-use crate::cost::ModelRegistry;
+use crate::{cost::ModelRegistry, source::SourceId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeRange {
@@ -28,6 +28,7 @@ impl TimeRange {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UsageFilter {
+    sources: Vec<SourceId>,
     models: Vec<String>,
     project_paths: Vec<String>,
     include_projectless: bool,
@@ -36,21 +37,36 @@ pub struct UsageFilter {
 
 impl UsageFilter {
     pub fn new(
+        mut sources: Vec<SourceId>,
         mut models: Vec<String>,
         mut project_paths: Vec<String>,
         include_projectless: bool,
         include_unknown_project: bool,
     ) -> Self {
+        sources.sort();
+        sources.dedup();
         models.sort();
         models.dedup();
         project_paths.sort();
         project_paths.dedup();
         Self {
+            sources,
             models,
             project_paths,
             include_projectless,
             include_unknown_project,
         }
+    }
+
+    pub fn sources(&self) -> &[SourceId] {
+        &self.sources
+    }
+
+    pub fn with_sources(mut self, mut sources: Vec<SourceId>) -> Self {
+        sources.sort();
+        sources.dedup();
+        self.sources = sources;
+        self
     }
 
     pub fn models(&self) -> &[String] {
@@ -287,6 +303,8 @@ pub struct UsageSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionUsageRow {
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub title: Option<String>,
     pub project_name: Option<String>,
     pub project_path: Option<String>,
@@ -312,6 +330,8 @@ pub struct SessionUsagePage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSortIndexItem {
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub last_activity_at_ms: i64,
     pub project_sort_key: Option<String>,
     pub model_sort_key: Option<String>,
@@ -349,6 +369,8 @@ pub struct SessionSnapshot {
 #[derive(Clone, Debug)]
 struct SessionSortAggregate {
     root_session_id: String,
+    source: String,
+    native_session_id: String,
     last_activity_at_ms: i64,
     project_name: Option<String>,
     project_path: Option<String>,
@@ -361,6 +383,8 @@ impl SessionSortAggregate {
     fn sort_index_item(&self) -> SessionSortIndexItem {
         SessionSortIndexItem {
             root_session_id: self.root_session_id.clone(),
+            source: self.source.clone(),
+            native_session_id: self.native_session_id.clone(),
             last_activity_at_ms: self.last_activity_at_ms,
             project_sort_key: self
                 .project_name
@@ -385,6 +409,8 @@ impl SessionSortAggregate {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionDetail {
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub last_activity_at_ms: i64,
     pub main: MainSessionDetail,
     pub subagents: Vec<SubagentDetail>,
@@ -394,6 +420,8 @@ pub struct SessionDetail {
 pub struct MainSessionDetail {
     pub title: Option<String>,
     pub thread_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub root_session_id: String,
     pub models_used: Vec<String>,
     pub model_usage: Vec<MainModelUsage>,
@@ -412,6 +440,8 @@ pub struct MainModelUsage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubagentDetail {
     pub thread_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub parent_thread_id: Option<String>,
     pub root_session_id: String,
     pub title: Option<String>,
@@ -454,8 +484,15 @@ pub struct ModelFilterOption {
     pub provider: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFilterOption {
+    pub source: String,
+    pub display_name: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FilterOptions {
+    pub sources: Vec<SourceFilterOption>,
     pub models: Vec<ModelFilterOption>,
     pub projects: Vec<ProjectFilterOption>,
 }
@@ -600,7 +637,9 @@ impl<'connection> AggregateReader<'connection> {
                GROUP BY ue.root_session_id
              )
              SELECT roots.root_session_id, roots.last_activity_at_ms,
-                    threads.title, threads.project_name, threads.project_path
+                    threads.title, threads.project_name, threads.project_path,
+                    COALESCE(threads.source, 'codex'),
+                    COALESCE(threads.native_session_id, roots.root_session_id)
              FROM roots LEFT JOIN threads ON threads.thread_id=roots.root_session_id
              WHERE (?3 IS NULL OR roots.last_activity_at_ms<?3
                     OR (roots.last_activity_at_ms=?3 AND roots.root_session_id>?4))
@@ -623,6 +662,8 @@ impl<'connection> AggregateReader<'connection> {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -631,8 +672,15 @@ impl<'connection> AggregateReader<'connection> {
             .map_err(map_sql_error)?;
         let has_next = rows.len() > page.limit;
         let mut output = Vec::with_capacity(page.limit);
-        for (root_session_id, last_activity_at_ms, title, project_name, project_path) in
-            rows.into_iter().take(page.limit)
+        for (
+            root_session_id,
+            last_activity_at_ms,
+            title,
+            project_name,
+            project_path,
+            source,
+            native_session_id,
+        ) in rows.into_iter().take(page.limit)
         {
             let inclusive_usage = self.aggregate_for_root(range, &root_session_id, None)?;
             let self_usage = self.aggregate_for_root(range, &root_session_id, Some(true))?;
@@ -648,6 +696,8 @@ impl<'connection> AggregateReader<'connection> {
             let data_status = status_for_totals(&inclusive_usage);
             output.push(SessionUsageRow {
                 root_session_id,
+                source,
+                native_session_id,
                 title,
                 project_name,
                 project_path,
@@ -683,6 +733,8 @@ impl<'connection> AggregateReader<'connection> {
                     root_session_id.clone(),
                     SessionSortAggregate {
                         root_session_id: root_session_id.clone(),
+                        source: String::new(),
+                        native_session_id: String::new(),
                         last_activity_at_ms: 0,
                         project_name: None,
                         project_path: None,
@@ -709,7 +761,8 @@ impl<'connection> AggregateReader<'connection> {
         values.extend(roots.iter().cloned().map(Value::Text));
 
         let metadata_sql = format!(
-            "SELECT thread_id, project_name, project_path
+            "SELECT thread_id, project_name, project_path,
+                    COALESCE(source, 'codex'), COALESCE(native_session_id, thread_id)
              FROM threads WHERE thread_id IN ({metadata_placeholders})"
         );
         let mut metadata_statement = self
@@ -722,15 +775,19 @@ impl<'connection> AggregateReader<'connection> {
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(map_sql_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_sql_error)?;
-        for (root_session_id, project_name, project_path) in metadata {
+        for (root_session_id, project_name, project_path, source, native_session_id) in metadata {
             if let Some(aggregate) = aggregates.get_mut(&root_session_id) {
                 aggregate.project_name = project_name;
                 aggregate.project_path = project_path;
+                aggregate.source = source;
+                aggregate.native_session_id = native_session_id;
             }
         }
 
@@ -960,7 +1017,8 @@ impl<'connection> AggregateReader<'connection> {
         let mut metadata = self
             .connection
             .prepare(
-                "SELECT thread_id, parent_thread_id, title
+                "SELECT thread_id, parent_thread_id, title,
+                        COALESCE(source, 'codex'), COALESCE(native_session_id, thread_id)
                  FROM threads WHERE root_session_id=?1 OR thread_id=?1",
             )
             .map_err(map_sql_error)?;
@@ -970,6 +1028,8 @@ impl<'connection> AggregateReader<'connection> {
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(map_sql_error)?
@@ -977,7 +1037,9 @@ impl<'connection> AggregateReader<'connection> {
             .map_err(map_sql_error)?;
         let metadata = metadata
             .into_iter()
-            .map(|(thread_id, parent, title)| (thread_id, (parent, title)))
+            .map(|(thread_id, parent, title, source, native_session_id)| {
+                (thread_id, (parent, title, source, native_session_id))
+            })
             .collect::<BTreeMap<_, _>>();
 
         let mut by_thread = BTreeMap::<String, Vec<DetailAggregateRow>>::new();
@@ -1030,10 +1092,14 @@ impl<'connection> AggregateReader<'connection> {
                 usage.add_assign(&block.usage)?;
             }
             inclusive_usage.add_assign(&usage)?;
-            let (parent_thread_id, title) =
-                metadata.get(&thread_id).cloned().unwrap_or((None, None));
+            let (parent_thread_id, title, subagent_source, subagent_native_id) = metadata
+                .get(&thread_id)
+                .cloned()
+                .unwrap_or((None, None, String::new(), thread_id.clone()));
             subagents.push(SubagentDetail {
-                thread_id,
+                thread_id: thread_id.clone(),
+                source: subagent_source,
+                native_session_id: subagent_native_id,
                 parent_thread_id,
                 root_session_id: root_session_id.to_owned(),
                 title,
@@ -1060,16 +1126,22 @@ impl<'connection> AggregateReader<'connection> {
             )
             .max()
             .ok_or(AggregateError::InvariantViolation)?;
-        let (title, _) = metadata
+        let (title, root_source, root_native_session_id) = metadata
             .get(root_session_id)
-            .cloned()
-            .unwrap_or((None, None));
+            .map(|(_parent, title, source, native_id)| {
+                (title.clone(), source.clone(), native_id.clone())
+            })
+            .unwrap_or((None, String::new(), root_session_id.to_owned()));
         Ok(SessionDetail {
             root_session_id: root_session_id.to_owned(),
+            source: root_source.clone(),
+            native_session_id: root_native_session_id.clone(),
             last_activity_at_ms,
             main: MainSessionDetail {
                 title,
                 thread_id: root_session_id.to_owned(),
+                source: root_source,
+                native_session_id: root_native_session_id,
                 root_session_id: root_session_id.to_owned(),
                 models_used: main_models.iter().fold(Vec::new(), |mut models, model| {
                     if !models.iter().any(|existing| existing == &model.model) {
@@ -1088,24 +1160,36 @@ impl<'connection> AggregateReader<'connection> {
     }
 
     pub fn models(&self, range: TimeRange) -> Result<ModelUsageRows, AggregateError> {
+        self.models_filtered(range, &UsageFilter::default())
+    }
+
+    pub fn models_filtered(
+        &self,
+        range: TimeRange,
+        filter: &UsageFilter,
+    ) -> Result<ModelUsageRows, AggregateError> {
         validate_range(range)?;
-        let mut statement = self.connection.prepare(
-            "SELECT model, MIN(occurred_at_ms), MAX(occurred_at_ms), COUNT(DISTINCT root_session_id),
-                    COALESCE(SUM(input_tokens),0), COALESCE(SUM(cached_tokens),0),
-                    SUM(cache_write_tokens), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0),
-                    COALESCE(SUM(CASE WHEN cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
-                    SUM(estimated_cost_nanos_usd),
-                    COALESCE(SUM(CASE WHEN estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
+        let query = SummaryQuery::new(range, filter.clone());
+        let values = summary_values(&query);
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT ue.model, MIN(ue.occurred_at_ms), MAX(ue.occurred_at_ms), COUNT(DISTINCT ue.root_session_id),
+                    COALESCE(SUM(ue.input_tokens),0), COALESCE(SUM(ue.cached_tokens),0),
+                    SUM(ue.cache_write_tokens), COALESCE(SUM(ue.output_tokens),0),
+                    COALESCE(SUM(ue.reasoning_tokens),0), COALESCE(SUM(ue.total_tokens),0),
+                    COALESCE(SUM(CASE WHEN ue.cache_write_tokens IS NULL THEN 1 ELSE 0 END),0),
+                    SUM(ue.estimated_cost_nanos_usd),
+                    COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END),0),
                     COUNT(*)
-             FROM usage_events
+             FROM usage_events ue
              JOIN source_usage_epochs sue
-               ON sue.source=usage_events.source AND sue.active_epoch=usage_events.source_epoch
-             WHERE occurred_at_ms>=?1 AND occurred_at_ms<?2
+               ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+             LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+             WHERE {}
              GROUP BY model ORDER BY model ASC",
-        ).map_err(map_sql_error)?;
+            summary_where_clause(query.filter())
+        )).map_err(map_sql_error)?;
         statement
-            .query_map(params![range.start_ms, range.end_ms], model_row)
+            .query_map(params_from_iter(values.iter()), model_row)
             .map_err(map_sql_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_sql_error)?
@@ -1127,6 +1211,32 @@ impl<'connection> AggregateReader<'connection> {
     }
 
     pub fn filter_options(&self) -> Result<FilterOptions, AggregateError> {
+        let mut sources_statement = self
+            .connection
+            .prepare(
+                "SELECT DISTINCT ue.source
+                 FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source = ue.source
+                  AND sue.active_epoch = ue.source_epoch
+                 ORDER BY ue.source ASC",
+            )
+            .map_err(map_sql_error)?;
+        let sources = sources_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(map_sql_error)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(map_sql_error)?
+            .into_iter()
+            .map(|source| {
+                let display_name = resolve_source_display_name(&source);
+                SourceFilterOption {
+                    source,
+                    display_name,
+                }
+            })
+            .collect();
+
         let mut models_statement = self
             .connection
             .prepare(
@@ -1222,6 +1332,7 @@ impl<'connection> AggregateReader<'connection> {
             options.push(ProjectFilterOption::Unknown);
         }
         Ok(FilterOptions {
+            sources,
             models,
             projects: options,
         })
@@ -1296,6 +1407,20 @@ impl<'connection> AggregateReader<'connection> {
         ];
         let mut values = vec![Value::Integer(range.start_ms), Value::Integer(range.end_ms)];
         let mut next = 3_usize;
+        if !filter.sources.is_empty() {
+            let placeholders = (next..next + filter.sources.len())
+                .map(|value| format!("?{value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            clauses.push(format!("root.source IN ({placeholders})"));
+            values.extend(
+                filter
+                    .sources
+                    .iter()
+                    .map(|source| Value::Text(source.as_str().to_owned())),
+            );
+            next += filter.sources.len();
+        }
         if !filter.models.is_empty() {
             let placeholders = (next..next + filter.models.len())
                 .map(|value| format!("?{value}"))
@@ -1350,18 +1475,20 @@ impl<'connection> AggregateReader<'connection> {
         range: TimeRange,
         root: &str,
     ) -> Result<SessionUsageRow, AggregateError> {
-        let (title, project_name, project_path, last_activity_at_ms) = self
+        let (title, project_name, project_path, last_activity_at_ms, source, native_session_id) = self
             .connection
             .query_row(
                 "SELECT root.title, root.project_name, root.project_path,
-                        MAX(ue.occurred_at_ms)
+                        MAX(ue.occurred_at_ms),
+                        COALESCE(root.source, 'codex'),
+                        COALESCE(root.native_session_id, root.thread_id)
                  FROM threads root
                  JOIN usage_events ue ON ue.root_session_id=root.thread_id
                  JOIN source_usage_epochs sue
                    ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
                  WHERE root.thread_id=?1
                    AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3
-                 GROUP BY root.thread_id, root.title, root.project_name, root.project_path",
+                 GROUP BY root.thread_id, root.title, root.project_name, root.project_path, root.source, root.native_session_id",
                 params![root, range.start_ms, range.end_ms],
                 |row| {
                     Ok((
@@ -1369,6 +1496,8 @@ impl<'connection> AggregateReader<'connection> {
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -1392,6 +1521,8 @@ impl<'connection> AggregateReader<'connection> {
         let data_status = status_for_totals(&inclusive_usage);
         Ok(SessionUsageRow {
             root_session_id: root.to_owned(),
+            source,
+            native_session_id,
             title,
             project_name,
             project_path,
@@ -1433,13 +1564,28 @@ impl<'connection> AggregateReader<'connection> {
             "q.ledger_epoch=?1".to_owned(),
             "q.last_activity_at_ms>=?2".to_owned(),
             "q.last_activity_at_ms<?3".to_owned(),
+            "root.source='codex'".to_owned(),
         ];
         let mut values = vec![
             Value::Integer(epoch),
             Value::Integer(range.start_ms),
             Value::Integer(range.end_ms),
         ];
-        let next = 4_usize;
+        let mut next = 4_usize;
+        if !filter.sources.is_empty() {
+            let placeholders = (next..next + filter.sources.len())
+                .map(|value| format!("?{value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            clauses.push(format!("root.source IN ({placeholders})"));
+            values.extend(
+                filter
+                    .sources
+                    .iter()
+                    .map(|source| Value::Text(source.as_str().to_owned())),
+            );
+            next += filter.sources.len();
+        }
         let mut projects = Vec::new();
         if !filter.project_paths.is_empty() {
             let placeholders = (next..next + filter.project_paths.len())
@@ -1465,7 +1611,9 @@ impl<'connection> AggregateReader<'connection> {
                     root.title,root.project_name,root.project_path,
                     (SELECT COUNT(*) FROM threads child
                      WHERE child.root_session_id=q.root_session_id
-                       AND child.thread_id<>q.root_session_id)
+                       AND child.thread_id<>q.root_session_id),
+                    COALESCE(root.source, 'codex'),
+                    COALESCE(root.native_session_id, q.root_session_id)
              FROM usage_session_quarantine q
              JOIN threads root ON root.thread_id=q.root_session_id
              WHERE {} ORDER BY q.root_session_id",
@@ -1482,6 +1630,8 @@ impl<'connection> AggregateReader<'connection> {
                     project_name: row.get(4)?,
                     project_path: row.get(5)?,
                     subagent_count: row.get(6)?,
+                    source: row.get(7)?,
+                    native_session_id: row.get(8)?,
                 })
             })
             .map_err(map_sql_error)?
@@ -1603,6 +1753,13 @@ fn summary_values(query: &SummaryQuery) -> Vec<Value> {
         Value::Integer(query.range().start_ms),
         Value::Integer(query.range().end_ms),
     ];
+    values.extend(
+        query
+            .filter()
+            .sources
+            .iter()
+            .map(|source| Value::Text(source.as_str().to_owned())),
+    );
     values.extend(query.filter().models.iter().cloned().map(Value::Text));
     values.extend(
         query
@@ -1621,6 +1778,14 @@ fn summary_where_clause(filter: &UsageFilter) -> String {
         "ue.occurred_at_ms<?2".to_owned(),
     ];
     let mut next_placeholder = 3_usize;
+    if !filter.sources.is_empty() {
+        let placeholders = (next_placeholder..next_placeholder + filter.sources.len())
+            .map(|value| format!("?{value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("ue.source IN ({placeholders})"));
+        next_placeholder += filter.sources.len();
+    }
     if !filter.models.is_empty() {
         let placeholders = (next_placeholder..next_placeholder + filter.models.len())
             .map(|value| format!("?{value}"))
@@ -1691,6 +1856,8 @@ fn same_totals(left: &TokenTotals, right: &TokenTotals) -> bool {
 #[derive(Clone, Debug)]
 struct QuarantinedRoot {
     root_session_id: String,
+    source: String,
+    native_session_id: String,
     error_code: String,
     last_activity_at_ms: i64,
     title: Option<String>,
@@ -1703,6 +1870,8 @@ impl QuarantinedRoot {
     fn sort_index_item(&self) -> SessionSortIndexItem {
         SessionSortIndexItem {
             root_session_id: self.root_session_id.clone(),
+            source: self.source.clone(),
+            native_session_id: self.native_session_id.clone(),
             last_activity_at_ms: self.last_activity_at_ms,
             project_sort_key: self
                 .project_name
@@ -1721,6 +1890,8 @@ impl QuarantinedRoot {
     fn session_row(&self) -> SessionUsageRow {
         SessionUsageRow {
             root_session_id: self.root_session_id.clone(),
+            source: self.source.clone(),
+            native_session_id: self.native_session_id.clone(),
             title: self.title.clone(),
             project_name: self.project_name.clone(),
             project_path: self.project_path.clone(),
@@ -1733,6 +1904,16 @@ impl QuarantinedRoot {
             data_status: SessionDataStatus::Error,
             error_code: Some(self.error_code.clone()),
         }
+    }
+}
+
+fn resolve_source_display_name(source: &str) -> String {
+    if source == crate::source::SourceId::CODEX.as_str() {
+        crate::source::SourceDescriptor::codex()
+            .display_name
+            .to_owned()
+    } else {
+        source.to_owned()
     }
 }
 
@@ -2025,6 +2206,9 @@ mod tests {
                 "ALTER TABLE usage_events ADD COLUMN source TEXT;
                  ALTER TABLE usage_events ADD COLUMN source_epoch INTEGER;
                  UPDATE usage_events SET source='codex',source_epoch=ledger_epoch;
+                 ALTER TABLE threads ADD COLUMN source TEXT NOT NULL DEFAULT 'codex';
+                 ALTER TABLE threads ADD COLUMN native_session_id TEXT NOT NULL DEFAULT '';
+                 UPDATE threads SET native_session_id=thread_id WHERE native_session_id='' OR native_session_id IS NULL;
                  CREATE TABLE source_usage_epochs(
                     source TEXT PRIMARY KEY, active_epoch INTEGER NOT NULL,
                     build_epoch INTEGER, active_parser_version INTEGER NOT NULL DEFAULT 0,
@@ -2527,6 +2711,7 @@ mod tests {
         include_unknown_project: bool,
     ) -> UsageSummary {
         let filter = UsageFilter::new(
+            Vec::new(),
             models.iter().map(|value| (*value).to_owned()).collect(),
             project_paths
                 .iter()
@@ -2667,7 +2852,7 @@ mod tests {
         let filtered = reader
             .summary(SummaryQuery::new(
                 TimeRange::new(0, 9).unwrap(),
-                UsageFilter::new(vec!["m-other".into()], vec![], false, false),
+                UsageFilter::new(vec![], vec!["m-other".into()], vec![], false, false),
             ))
             .unwrap();
         let expected = 400.0 / 13.0 / 1_000.0;
@@ -2678,7 +2863,7 @@ mod tests {
         let known_slice = reader
             .summary(SummaryQuery::new(
                 TimeRange::new(0, 4).unwrap(),
-                UsageFilter::new(vec!["m-main".into()], vec![], false, false),
+                UsageFilter::new(vec![], vec!["m-main".into()], vec![], false, false),
             ))
             .unwrap();
         let expected = 600.0 / 39.0 / 1_000.0;
@@ -2700,7 +2885,7 @@ mod tests {
         let known = reader
             .summary(SummaryQuery::new(
                 known_range,
-                UsageFilter::new(vec!["m-main".into()], vec![], false, false),
+                UsageFilter::new(vec![], vec!["m-main".into()], vec![], false, false),
             ))
             .unwrap();
         assert_eq!(known.totals.estimated_cost_nanos_usd, Some(600));
@@ -3612,6 +3797,13 @@ mod tests {
         let options = AggregateReader::new(&transaction).filter_options().unwrap();
         assert_eq!(metadata, (17, 7));
         assert_eq!(
+            options.sources,
+            vec![SourceFilterOption {
+                source: "codex".to_owned(),
+                display_name: "Codex".to_owned(),
+            }]
+        );
+        assert_eq!(
             options.models,
             vec![
                 ModelFilterOption {
@@ -3881,5 +4073,269 @@ mod tests {
                 "query plan omitted active source epoch join: {details:?}"
             );
         }
+    }
+
+    #[test]
+    fn t_q06_filter_options_active_epoch_and_source_fallback() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta (id INTEGER PRIMARY KEY, usage_active_epoch INTEGER NOT NULL DEFAULT 1, data_revision INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE threads (
+                     thread_id TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT 'codex',
+                     native_session_id TEXT NOT NULL DEFAULT '', parent_thread_id TEXT,
+                     root_session_id TEXT, agent_role TEXT NOT NULL DEFAULT 'main',
+                     title TEXT, project_name TEXT, project_path TEXT, project_kind TEXT NOT NULL DEFAULT 'project'
+                 );
+                 CREATE TABLE source_usage_epochs (
+                     source TEXT PRIMARY KEY, active_epoch INTEGER NOT NULL,
+                     build_epoch INTEGER, active_parser_version INTEGER NOT NULL DEFAULT 0,
+                     build_parser_version INTEGER
+                 );
+                 CREATE TABLE usage_events (
+                     ledger_epoch INTEGER NOT NULL, event_id TEXT NOT NULL,
+                     source TEXT NOT NULL, source_epoch INTEGER NOT NULL,
+                     occurred_at_ms INTEGER NOT NULL, thread_id TEXT NOT NULL,
+                     root_session_id TEXT NOT NULL, model TEXT NOT NULL,
+                     input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
+                     cache_write_tokens INTEGER, output_tokens INTEGER NOT NULL,
+                     reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                     reasoning_effort TEXT, estimated_cost_nanos_usd INTEGER,
+                     source_file_id INTEGER, file_generation INTEGER,
+                     source_start_offset INTEGER, source_end_offset INTEGER
+                 );
+                 INSERT INTO app_meta(id, usage_active_epoch, data_revision) VALUES (1, 10, 1);
+                 INSERT INTO source_usage_epochs(source, active_epoch, active_parser_version) VALUES
+                     ('codex', 10, 0),
+                     ('legacy-source', 5, 0),
+                     ('inactive_source', 2, 0);
+                 -- Event for codex in active epoch (10)
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (10,'e1','codex',10,100,'root','root','m',10,0,10,0,20);
+                 -- Event for legacy-source (unregistered in Registry) in active epoch (5)
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (5,'e2','legacy-source',5,100,'root','root','m',10,0,10,0,20);
+                 -- Event for inactive_source with mismatched source_epoch (1 vs active 2)
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (1,'e4','inactive_source',1,100,'root','root','m',10,0,10,0,20);
+                 -- Event for unknown source not in source_usage_epochs at all
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (1,'e5','unregistered_epochless',1,100,'root','root','m',10,0,10,0,20);
+                 -- Thread existing with source 'thread_only_source' but zero events in usage_events
+                 INSERT INTO threads(thread_id,source,native_session_id,root_session_id,agent_role,project_kind)
+                     VALUES ('t_only','thread_only_source','t_only','t_only','main','project');"
+            )
+            .unwrap();
+
+        let reader = AggregateReader::new(&connection);
+        let options = reader.filter_options().unwrap();
+
+        assert_eq!(
+            options.sources,
+            vec![
+                SourceFilterOption {
+                    source: "codex".to_string(),
+                    display_name: "Codex".to_string(),
+                },
+                SourceFilterOption {
+                    source: "legacy-source".to_string(),
+                    display_name: "legacy-source".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn t_q07_session_source_and_native_session_id_identity_fields() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta (id INTEGER PRIMARY KEY, usage_active_epoch INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE threads (
+                     thread_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                     native_session_id TEXT NOT NULL, parent_thread_id TEXT,
+                     root_session_id TEXT NOT NULL, agent_role TEXT NOT NULL DEFAULT 'main',
+                     title TEXT, project_name TEXT, project_path TEXT, project_kind TEXT NOT NULL DEFAULT 'project'
+                 );
+                 CREATE TABLE source_usage_epochs (
+                     source TEXT PRIMARY KEY, active_epoch INTEGER NOT NULL,
+                     build_epoch INTEGER, active_parser_version INTEGER NOT NULL DEFAULT 0,
+                     build_parser_version INTEGER
+                 );
+                 CREATE TABLE usage_events (
+                     ledger_epoch INTEGER NOT NULL, event_id TEXT NOT NULL,
+                     source TEXT NOT NULL, source_epoch INTEGER NOT NULL,
+                     occurred_at_ms INTEGER NOT NULL, thread_id TEXT NOT NULL,
+                     root_session_id TEXT NOT NULL, model TEXT NOT NULL,
+                     input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
+                     cache_write_tokens INTEGER, output_tokens INTEGER NOT NULL,
+                     reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                     reasoning_effort TEXT, estimated_cost_nanos_usd INTEGER,
+                     source_file_id INTEGER, file_generation INTEGER,
+                     source_start_offset INTEGER, source_end_offset INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
+                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
+                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO app_meta(id, usage_active_epoch) VALUES (1, 1);
+                 INSERT INTO source_usage_epochs(source, active_epoch, active_parser_version) VALUES
+                     ('codex', 1, 0),
+                     ('claude_code', 1, 0);
+                 -- Root 1: codex source, root session id = 'root-1', native = 'native-root-1'
+                 INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,title,project_kind)
+                     VALUES ('root-1','codex','native-root-1',NULL,'root-1','main','Main Thread 1','project');
+                 -- Subagent of Root 1: same or different thread with its own native_session_id
+                 INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,title,project_kind)
+                     VALUES ('child-1','codex','native-child-1','root-1','root-1','subagent','Child Thread 1','project');
+                 -- Root 2: claude_code source, root session id = 'root-2', native = 'native-root-2'
+                 INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,title,project_kind)
+                     VALUES ('root-2','claude_code','native-root-2',NULL,'root-2','main','Main Thread 2','project');
+                 -- Quarantined Root 3: codex source, native = 'native-root-3'
+                 INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,title,project_kind)
+                     VALUES ('root-3','codex','native-root-3',NULL,'root-3','main','Main Thread 3','project');
+                 INSERT INTO usage_session_quarantine(ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,first_seen_at_ms,updated_at_ms)
+                     VALUES (1,'root-3','ERR_FORMAT',500,100,500);
+
+                 -- Events for Root 1 and child 1
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (1,'e1','codex',1,100,'root-1','root-1','gpt-4',10,0,10,0,20),
+                            (1,'e2','codex',1,200,'child-1','root-1','gpt-4',15,0,15,0,30);
+                 -- Events for Root 2
+                 INSERT INTO usage_events(ledger_epoch,event_id,source,source_epoch,occurred_at_ms,thread_id,root_session_id,model,input_tokens,cached_tokens,output_tokens,reasoning_tokens,total_tokens)
+                     VALUES (1,'e3','claude_code',1,300,'root-2','root-2','claude-3',50,0,50,0,100);"
+            )
+            .unwrap();
+
+        let reader = AggregateReader::new(&connection);
+        let range = TimeRange::new(0, 1000).unwrap();
+
+        // 1. SessionUsageRow has source & native_session_id
+        let page = reader.sessions(range, SessionPageRequest::new(10)).unwrap();
+        let r1 = page
+            .rows
+            .iter()
+            .find(|r| r.root_session_id == "root-1")
+            .unwrap();
+        assert_eq!(r1.source, "codex");
+        assert_eq!(r1.native_session_id, "native-root-1");
+
+        let r2 = page
+            .rows
+            .iter()
+            .find(|r| r.root_session_id == "root-2")
+            .unwrap();
+        assert_eq!(r2.source, "claude_code");
+        assert_eq!(r2.native_session_id, "native-root-2");
+
+        // 2. SessionSortIndexItem and SessionSnapshot rows have source & native_session_id
+        let snapshot = reader
+            .session_snapshot(
+                range,
+                &UsageFilter::default(),
+                SessionSortField::LastActivity,
+                SessionSortOrder::Desc,
+            )
+            .unwrap();
+        let idx1 = snapshot
+            .sort_index
+            .iter()
+            .find(|i| i.root_session_id == "root-1")
+            .unwrap();
+        assert_eq!(idx1.source, "codex");
+        assert_eq!(idx1.native_session_id, "native-root-1");
+
+        let idx3 = snapshot
+            .sort_index
+            .iter()
+            .find(|i| i.root_session_id == "root-3")
+            .unwrap();
+        assert_eq!(idx3.source, "codex");
+        assert_eq!(idx3.native_session_id, "native-root-3");
+
+        // Quarantined session row in snapshot.rows has source & native_session_id
+        let r3 = snapshot
+            .rows
+            .iter()
+            .find(|r| r.root_session_id == "root-3")
+            .unwrap();
+        assert_eq!(r3.source, "codex");
+        assert_eq!(r3.native_session_id, "native-root-3");
+        assert_eq!(r3.data_status, SessionDataStatus::Error);
+
+        // Also queryable via session_rows() directly
+        let query_rows = reader
+            .session_rows(range, &UsageFilter::default(), &["root-3".to_string()])
+            .unwrap();
+        assert_eq!(query_rows.len(), 1);
+        assert_eq!(query_rows[0].source, "codex");
+        assert_eq!(query_rows[0].native_session_id, "native-root-3");
+        assert_eq!(query_rows[0].data_status, SessionDataStatus::Error);
+
+        // 3. SessionDetail has source & native_session_id, MainSessionDetail and SubagentDetail have theirs
+        let detail = reader
+            .session_detail(range, &UsageFilter::default(), "root-1")
+            .unwrap();
+        assert_eq!(detail.source, "codex");
+        assert_eq!(detail.native_session_id, "native-root-1");
+        assert_eq!(detail.main.source, "codex");
+        assert_eq!(detail.main.native_session_id, "native-root-1");
+        assert_eq!(detail.subagents.len(), 1);
+        assert_eq!(detail.subagents[0].source, "codex");
+        assert_eq!(detail.subagents[0].native_session_id, "native-child-1");
+
+        // 4. Source filtering on sessions
+        let codex_only = reader
+            .session_snapshot(
+                range,
+                &UsageFilter::default().with_sources(vec![SourceId::CODEX]),
+                SessionSortField::LastActivity,
+                SessionSortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(codex_only.sort_index.len(), 2);
+        assert_eq!(codex_only.sort_index[0].root_session_id, "root-1");
+
+        let claude_only = reader
+            .session_snapshot(
+                range,
+                &UsageFilter::default().with_sources(vec![SourceId::new("claude_code").unwrap()]),
+                SessionSortField::LastActivity,
+                SessionSortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(claude_only.sort_index.len(), 1);
+        assert!(
+            claude_only
+                .sort_index
+                .iter()
+                .any(|i| i.root_session_id == "root-2")
+        );
+    }
+
+    #[test]
+    fn t_q08_session_detail_root_title_preserves_identity_metadata() {
+        let connection = fixture();
+        connection
+            .execute(
+                "UPDATE threads SET native_session_id='native-root-a' WHERE thread_id='root-a'",
+                [],
+            )
+            .unwrap();
+
+        let detail = AggregateReader::new(&connection)
+            .session_detail(
+                TimeRange::new(0, 400).unwrap(),
+                &UsageFilter::default(),
+                "root-a",
+            )
+            .unwrap();
+
+        assert_eq!(detail.main.title.as_deref(), Some("Root A"));
+        assert_eq!(detail.source, "codex");
+        assert_eq!(detail.native_session_id, "native-root-a");
+        assert_eq!(detail.main.source, "codex");
+        assert_eq!(detail.main.native_session_id, "native-root-a");
     }
 }

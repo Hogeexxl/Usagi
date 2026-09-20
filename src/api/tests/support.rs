@@ -39,7 +39,7 @@ impl TempRoot {
         Self(path)
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -106,7 +106,7 @@ impl ApiFixture {
         let scanner = IngestionCoordinator::start(
             IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
             Arc::clone(&ledger),
-            registry,
+            registry.clone(),
         )
         .unwrap();
         wait_scan(&ledger);
@@ -117,6 +117,7 @@ impl ApiFixture {
             AppContext {
                 ledger: Arc::clone(&ledger),
                 scanner: scanner.clone(),
+                source_registry: registry,
                 codex_quota_service,
                 update_service,
                 browser_opener,

@@ -20,6 +20,7 @@ import {
   type TargetScanDto,
   type DashboardFilters,
   type FilterOptionsResponse,
+  type SourceFilterOption,
   type ModelFilterOption,
   type ModelFilterProvider,
   type ProjectFilterOption,
@@ -275,18 +276,36 @@ function parseModelFilterOption(value: unknown): ModelFilterOption {
   return { model, provider: provider as ModelFilterProvider };
 }
 
-function parseFilterOptions(value: unknown): FilterOptionsResponse {
+function parseSourceFilterOption(value: unknown): SourceFilterOption {
   const record = requiredRecord(value);
-  if (!hasOnlyKeys(record, ["data_revision", "models", "projects"])) {
+  if (!hasOnlyKeys(record, ["source", "display_name"])) {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
+  const source = requiredString(record, "source");
+  if ([...source].some((character) => character.charCodeAt(0) < 32)) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const displayName = requiredString(record, "display_name");
+  if ([...displayName].some((character) => character.charCodeAt(0) < 32)) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  return { source, display_name: displayName };
+}
+
+function parseFilterOptions(value: unknown): FilterOptionsResponse {
+  const record = requiredRecord(value);
+  if (!hasOnlyKeys(record, ["data_revision", "sources", "models", "projects"])) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const sourcesValue = record.sources;
   const modelsValue = record.models;
   const projectsValue = record.projects;
-  if (!Array.isArray(modelsValue) || !Array.isArray(projectsValue)) {
+  if (!Array.isArray(sourcesValue) || !Array.isArray(modelsValue) || !Array.isArray(projectsValue)) {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   return {
     data_revision: requiredSafeInteger(record, "data_revision"),
+    sources: sourcesValue.map(parseSourceFilterOption),
     models: modelsValue.map(parseModelFilterOption),
     projects: projectsValue.map(parseProjectFilterOption),
   };
@@ -311,6 +330,8 @@ function parseSessionItem(value: unknown): SessionItemDto {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   return {
+    source: requiredString(record, "source"),
+    native_session_id: requiredString(record, "native_session_id"),
     root_session_id: requiredString(record, "root_session_id"),
     title: nullableString(record, "title"),
     project_name: nullableString(record, "project_name"),
@@ -341,6 +362,8 @@ function parseSessionSortIndex(value: unknown): SessionSnapshotResponse["sort_in
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   return {
+    source: requiredString(record, "source"),
+    native_session_id: requiredString(record, "native_session_id"),
     root_session_id: requiredString(record, "root_session_id"),
     last_activity_at_ms: requiredSafeInteger(record, "last_activity_at_ms"),
     project_sort_key: nullableString(record, "project_sort_key"),
@@ -425,11 +448,15 @@ function parseSessionDetail(value: unknown): SessionDetailResponse {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   return {
+    source: requiredString(record, "source"),
+    native_session_id: requiredString(record, "native_session_id"),
     range: parseRange(record.range),
     data_revision: requiredSafeInteger(record, "data_revision"),
     root_session_id: requiredString(record, "root_session_id"),
     last_activity_at_ms: requiredSafeInteger(record, "last_activity_at_ms"),
     main: {
+      source: requiredString(mainRecord, "source"),
+      native_session_id: requiredString(mainRecord, "native_session_id"),
       title: nullableString(mainRecord, "title"),
       thread_id: requiredString(mainRecord, "thread_id"),
       root_session_id: requiredString(mainRecord, "root_session_id"),
@@ -446,6 +473,8 @@ function parseSessionDetail(value: unknown): SessionDetailResponse {
         throw new UsagiClientError("HTTP_ERROR", 200);
       }
       return {
+        source: requiredString(subagent, "source"),
+        native_session_id: requiredString(subagent, "native_session_id"),
         thread_id: requiredString(subagent, "thread_id"),
         parent_thread_id: nullableString(subagent, "parent_thread_id"),
         root_session_id: requiredString(subagent, "root_session_id"),
@@ -829,6 +858,7 @@ function canonicalProjectSelections(projects: readonly ProjectSelection[]): {
 export function canonicalDashboardFilters(filters: DashboardFilters): DashboardFilters {
   const projects = canonicalProjectSelections(filters.projects);
   return {
+    sources: sortedUnique(filters.sources ?? []),
     models: sortedUnique(filters.models),
     projects: [
       ...projects.projectPaths.map((project_path) => ({ kind: "project" as const, project_path })),
@@ -850,7 +880,7 @@ export function dashboardRangesEqual(left: DashboardRange, right: DashboardRange
 
 export function dashboardQueryKey(range: DashboardRange, filters: DashboardFilters): string {
   const canonical = canonicalDashboardFilters(filters);
-  return JSON.stringify([range, canonical.models, canonical.projects]);
+  return JSON.stringify([range, canonical.sources, canonical.models, canonical.projects]);
 }
 
 export function appendRangeParams(params: URLSearchParams, range: DashboardRange): URLSearchParams {
@@ -868,6 +898,7 @@ export function appendRangeParams(params: URLSearchParams, range: DashboardRange
 function sessionParams(range: DashboardRange, filters: DashboardFilters): URLSearchParams {
   const canonical = canonicalDashboardFilters(filters);
   const params = appendRangeParams(new URLSearchParams(), range);
+  for (const source of canonical.sources) params.append("source", source);
   for (const model of canonical.models) params.append("model", model);
   for (const project of canonical.projects) {
     if (project.kind === "project") params.append("project_path", project.project_path);

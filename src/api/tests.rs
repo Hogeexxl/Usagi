@@ -579,8 +579,13 @@ async fn t_s06_002_http_compatibility_and_filter_boundary_matrix() {
     let options: Value =
         serde_json::from_slice(&to_bytes(options.into_body(), 64 * 1024).await.unwrap()).unwrap();
     assert!(options["data_revision"].is_i64());
+    assert!(options["sources"].is_array());
     assert!(options["models"].is_array());
     assert!(options["projects"].is_array());
+    for source in options["sources"].as_array().unwrap() {
+        assert!(source["source"].is_string());
+        assert!(source["display_name"].is_string());
+    }
     for model in options["models"].as_array().unwrap() {
         assert!(model["model"].is_string());
         assert!(matches!(
@@ -615,6 +620,14 @@ async fn t_s06_002_http_compatibility_and_filter_boundary_matrix() {
         .await;
     let sessions: Value =
         serde_json::from_slice(&to_bytes(sessions.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    for item in sessions["items"].as_array().unwrap() {
+        assert!(item["source"].is_string());
+        assert!(item["native_session_id"].is_string());
+    }
+    for item in sessions["sort_index"].as_array().unwrap() {
+        assert!(item["source"].is_string());
+        assert!(item["native_session_id"].is_string());
+    }
     let sessions_with_filter = fixture
         .call(
             Method::GET,
@@ -773,6 +786,150 @@ async fn t_public_api_v1_revision_and_status_expose_only_public_contract() {
 }
 
 #[tokio::test]
+async fn t_internal_status_projects_current_source_children_in_stable_order() {
+    let fixture = support::ApiFixture::new("internal-status-sources");
+    let sources = vec!["zeta".to_owned(), "codex".to_owned(), "alpha".to_owned()];
+    fixture
+        .ledger
+        .mark_scan_started_with_sources(
+            crate::domain::ScanStartEvent::new(
+                "internal-status-scan",
+                crate::domain::ScanTrigger::Manual,
+                10_000,
+            )
+            .unwrap(),
+            &sources,
+        )
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("internal-status-scan", "alpha", 10_001)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_completed("internal-status-scan", "alpha", 10_002)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("internal-status-scan", "codex", 10_003)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_failed("internal-status-scan", "codex", 10_004, "CODEX_FAILED")
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("internal-status-scan", "zeta", 10_005)
+        .unwrap();
+
+    let response = fixture.call(Method::GET, "/api/status", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await["sources"],
+        json!([
+            {"source": "alpha", "state": "completed", "error_code": null},
+            {"source": "codex", "state": "failed", "error_code": "CODEX_FAILED"},
+            {"source": "zeta", "state": "running", "error_code": null},
+        ])
+    );
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_status_multi_source_isolation() {
+    let fixture = support::ApiFixture::new("public-v1-multisource");
+    let sources = vec!["codex".to_owned(), "fake".to_owned()];
+
+    let base_t = fixture
+        .ledger
+        .codex_scan_status_snapshot()
+        .unwrap()
+        .last_scan_started_at_ms
+        .unwrap_or(0)
+        + 10_000;
+
+    fixture
+        .ledger
+        .mark_scan_started_with_sources(
+            crate::domain::ScanStartEvent::new(
+                "scan-multi",
+                crate::domain::ScanTrigger::Manual,
+                base_t,
+            )
+            .unwrap(),
+            &sources,
+        )
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("scan-multi", "codex", base_t + 5)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_completed("scan-multi", "codex", base_t + 10)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_started("scan-multi", "fake", base_t + 15)
+        .unwrap();
+    fixture
+        .ledger
+        .mark_source_scan_failed("scan-multi", "fake", base_t + 20, "FAKE_FAILED")
+        .unwrap();
+    fixture
+        .ledger
+        .mark_scan_completed(
+            crate::domain::ScanCompletedEvent::new("scan-multi", base_t + 25).unwrap(),
+        )
+        .unwrap();
+
+    let status = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = json_body(status).await;
+
+    // Spec §12.2.4: Codex completed early; global failed due to fake; Public v1 must see idle + completed!
+    assert_eq!(status["scan_state"], "idle");
+    assert_eq!(status["last_finished_scan_result"], "completed");
+    assert_eq!(status["last_scan_completed_at_ms"], base_t + 10);
+    assert!(status["last_scan_error_code"].is_null());
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_status_codex_skipped_returns_error() {
+    let fixture = support::ApiFixture::new("public-v1-skipped");
+    let sources = vec!["codex".to_owned()];
+
+    fixture
+        .ledger
+        .mark_scan_started_with_sources(
+            crate::domain::ScanStartEvent::new(
+                "scan-skip",
+                crate::domain::ScanTrigger::Manual,
+                100,
+            )
+            .unwrap(),
+            &sources,
+        )
+        .unwrap();
+
+    let db_path = fixture._root.path().join("mu.sqlite3");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE source_scan_runs SET state='skipped', finished_at_ms=110 WHERE scan_id='scan-skip' AND source='codex'",
+        [],
+    )
+    .unwrap();
+
+    let status = fixture.call(Method::GET, "/api/v1/status", &[]).await;
+    assert_eq!(status.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn t_public_api_v1_quota_redacts_account_and_internal_fields() {
     let provider = quota_fixture_provider();
     let service = CodexQuotaService::with_provider_and_clock(
@@ -910,6 +1067,154 @@ async fn t_public_api_v1_events_is_sse_and_keeps_existing_local_security() {
     assert!(rendered.contains("event: revision"));
     assert!(rendered.contains("data_revision"));
     assert!(rendered.contains("status_revision"));
+
+    fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn t_public_api_v1_summary_isolates_codex_and_session_dtos_carry_source_identity() {
+    let fixture = support::ApiFixture::new("public-v1-isolation-and-session-dtos");
+    let db_path = fixture._root.path().join("mu.sqlite3");
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_usage_epochs(source, active_epoch, active_parser_version)
+                 VALUES ('fake-source', 1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id, source, native_session_id, parent_thread_id, root_session_id,
+                    agent_role, title, project_name, project_path, project_kind, metadata_model,
+                    created_at_ms, updated_at_ms, archived, metadata_quality_status, metadata_resolved_at_ms
+                 ) VALUES ('fake-root', 'fake-source', 'native-root-1', NULL, 'fake-root',
+                           'main', 'Fake Root Title', NULL, NULL, 'unknown', NULL, ?1, ?1, 0, 'complete', ?1)",
+                [now_ms],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id, source, native_session_id, parent_thread_id, root_session_id,
+                    agent_role, title, project_name, project_path, project_kind, metadata_model,
+                    created_at_ms, updated_at_ms, archived, metadata_quality_status, metadata_resolved_at_ms
+                 ) VALUES ('fake-child', 'fake-source', 'native-child-1', 'fake-root', 'fake-root',
+                           'subagent', 'Fake Child Title', NULL, NULL, 'unknown', NULL, ?1, ?1, 0, 'complete', ?1)",
+                [now_ms],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    source, source_epoch, event_id, event_kind, occurred_at_ms,
+                    thread_id, root_session_id, turn_key, model, reasoning_effort,
+                    estimated_cost_nanos_usd, input_tokens, cached_tokens, cache_write_tokens,
+                    output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms
+                 ) VALUES ('fake-source', 1, 'fake-event-1', 'normal', ?1,
+                           'fake-root', 'fake-root', NULL, 'fake-model', NULL,
+                           10_000_000_000, 500, 100, 0, 500, 0, 1000, 'complete', ?1)",
+                [now_ms],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    source, source_epoch, event_id, event_kind, occurred_at_ms,
+                    thread_id, root_session_id, turn_key, model, reasoning_effort,
+                    estimated_cost_nanos_usd, input_tokens, cached_tokens, cache_write_tokens,
+                    output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms
+                 ) VALUES ('fake-source', 1, 'fake-event-2', 'normal', ?1,
+                           'fake-child', 'fake-root', NULL, 'fake-model', NULL,
+                           5_000_000_000, 200, 50, 0, 200, 0, 400, 'complete', ?1)",
+                [now_ms],
+            )
+            .unwrap();
+    }
+
+    // Spec §12.1, §25 Q04: Public API v1 /v1/usage/summary returns ONLY Codex data
+    let response = fixture
+        .call(Method::GET, "/api/v1/usage/summary?range=year", &[])
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let public_summary = json_body(response).await;
+    assert_eq!(public_summary["usage"]["total_tokens"], 0);
+    assert_eq!(public_summary["usage"]["session_count"], 0);
+
+    // Meanwhile, internal summary without source filter includes all sources
+    let internal_response = fixture
+        .call(Method::GET, "/api/usage/summary?range=year", &[])
+        .await;
+    assert_eq!(internal_response.status(), StatusCode::OK);
+    let internal_summary = json_body(internal_response).await;
+    assert_eq!(internal_summary["usage"]["total_tokens"], 1400);
+
+    // Spec §10.2, §25 Q06: Filter options includes fake-source with fallback display_name
+    let options_response = fixture
+        .call(Method::GET, "/api/usage/filter-options", &[])
+        .await;
+    assert_eq!(options_response.status(), StatusCode::OK);
+    let options = json_body(options_response).await;
+    let sources = options["sources"].as_array().unwrap();
+    assert!(
+        sources
+            .iter()
+            .any(|s| s["source"] == "fake-source" && s["display_name"] == "fake-source")
+    );
+
+    // Spec §10.3, §25 Q07: Session list / detail DTOs carry source and native_session_id
+    let sessions_response = fixture
+        .call(Method::GET, "/api/usage/sessions?range=year", &[])
+        .await;
+    assert_eq!(sessions_response.status(), StatusCode::OK);
+    let sessions = json_body(sessions_response).await;
+    let fake_session = sessions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["root_session_id"] == "fake-root")
+        .expect("fake-root session in items");
+    assert_eq!(fake_session["source"], "fake-source");
+    assert_eq!(fake_session["native_session_id"], "native-root-1");
+
+    let fake_index = sessions["sort_index"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["root_session_id"] == "fake-root")
+        .expect("fake-root session in sort_index");
+    assert_eq!(fake_index["source"], "fake-source");
+    assert_eq!(fake_index["native_session_id"], "native-root-1");
+
+    let detail_response = fixture
+        .call(
+            Method::GET,
+            "/api/usage/sessions/fake-root/detail?range=year",
+            &[],
+        )
+        .await;
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail = json_body(detail_response).await;
+    assert_eq!(detail["source"], "fake-source");
+    assert_eq!(detail["native_session_id"], "native-root-1");
+    assert_eq!(detail["main"]["source"], "fake-source");
+    assert_eq!(detail["main"]["native_session_id"], "native-root-1");
+    let fake_child = detail["subagents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["thread_id"] == "fake-child")
+        .expect("fake-child in subagents");
+    assert_eq!(fake_child["source"], "fake-source");
+    assert_eq!(fake_child["native_session_id"], "native-child-1");
 
     fixture.scanner.shutdown().unwrap();
 }

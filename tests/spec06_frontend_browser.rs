@@ -135,6 +135,7 @@ async fn serve_fixture(
             AppContext {
                 ledger: Arc::clone(&ledger),
                 scanner: scanner.clone(),
+                source_registry: SourceRegistry::new(),
                 codex_quota_service: CodexQuotaService::unavailable(ledger.codex_home()),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),

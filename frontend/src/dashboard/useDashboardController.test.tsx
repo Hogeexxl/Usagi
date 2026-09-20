@@ -62,7 +62,7 @@ function fakeEvents() {
 
 function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
-    filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
+    filterOptions: vi.fn(async () => ({ data_revision: 1, sources: [], models: [], projects: [] })),
     codexQuota: vi.fn(async () => ({
       status: "unavailable" as const,
       account_email: null,
@@ -110,7 +110,7 @@ describe("useDashboardController", () => {
     const { result, unmount } = renderHook(() => useDashboardController({ client, eventSourceFactory: () => source }));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
 
-    const modelFilters: DashboardFilters = { models: ["gpt-a"], projects: [] };
+    const modelFilters: DashboardFilters = { sources: [], models: ["gpt-a"], projects: [] };
     await act(async () => result.current.select_filters(modelFilters));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(20));
     expect(result.current.range).toEqual({ key: "today" });
@@ -123,7 +123,7 @@ describe("useDashboardController", () => {
     expect(result.current.filters).toEqual(modelFilters);
     expect(result.current.range).toEqual({ key: "yesterday" });
 
-    await act(async () => result.current.select_filters({ models: [], projects: [{ kind: "projectless" }] }));
+    await act(async () => result.current.select_filters({ sources: [], models: [], projects: [{ kind: "projectless" }] }));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(30));
     expect(result.current.range).toEqual({ key: "yesterday" });
     expect(result.current.projectFilterActive).toBe(true);
@@ -133,7 +133,7 @@ describe("useDashboardController", () => {
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(40));
     expect(result.current.range).toEqual({ key: "yesterday" });
     expect(result.current.anyFilterActive).toBe(false);
-    expect(client.summary).toHaveBeenLastCalledWith({ key: "yesterday" }, { models: [], projects: [] }, expect.any(AbortSignal));
+    expect(client.summary).toHaveBeenLastCalledWith({ key: "yesterday" }, { sources: [], models: [], projects: [] }, expect.any(AbortSignal));
 
     unmount();
     const raceSource = fakeEvents();
@@ -159,7 +159,7 @@ describe("useDashboardController", () => {
     summaryRequests[0].resolve(summary({ key: "today" }, 1, 10));
     await waitFor(() => expect(raceHook.result.current.metrics?.input_tokens).toBe(10));
 
-    await act(async () => raceHook.result.current.select_filters({ models: ["gpt-a"], projects: [] }));
+    await act(async () => raceHook.result.current.select_filters({ sources: [], models: ["gpt-a"], projects: [] }));
     await waitFor(() => expect(summaryRequests).toHaveLength(2));
     expect(summaryRequests[0].signal?.aborted).toBe(true);
 
@@ -173,7 +173,7 @@ describe("useDashboardController", () => {
     raceSource.onmessage?.({ data: JSON.stringify({ data_revision: 2, status_revision: 1 }) } as MessageEvent<string>);
     await waitFor(() => expect(summaryRequests).toHaveLength(4));
     expect(summaryRequests[3].range).toEqual({ key: "yesterday" });
-    expect(summaryRequests[3].filters).toEqual({ models: ["gpt-a"], projects: [] });
+    expect(summaryRequests[3].filters).toEqual({ sources: [], models: ["gpt-a"], projects: [] });
     summaryRequests[3].resolve(summary({ key: "yesterday" }, 2, 40));
     await waitFor(() => expect(raceHook.result.current.metrics?.input_tokens).toBe(40));
     expect(raceClient.getSessionSnapshot).not.toHaveBeenCalled();
@@ -188,8 +188,8 @@ describe("useDashboardController", () => {
         optionCalls += 1;
         if (optionCalls === 2) throw new Error("options unavailable");
         return optionCalls === 1
-          ? { data_revision: 1, models: [{ model: "gpt-a", provider: "openai" as const }], projects: [{ kind: "projectless" as const }] }
-          : { data_revision: 2, models: [], projects: [] };
+          ? { data_revision: 1, sources: [], models: [{ model: "gpt-a", provider: "openai" as const }], projects: [{ kind: "projectless" as const }] }
+          : { data_revision: 2, sources: [], models: [], projects: [] };
       }),
       refresh: vi.fn(async () => ({ http_status: 202 as const, disposition: "started" as const, scan_id: "scan-options", status_revision: 2 })),
       getStatus: vi.fn(async (target) =>
@@ -213,27 +213,28 @@ describe("useDashboardController", () => {
     expect(optionCalls).toBe(1);
 
     await act(async () => result.current.select_range({ key: "7d" }));
-    await act(async () => result.current.select_filters({ models: ["gpt-a"], projects: [{ kind: "projectless" }] }));
+    await act(async () => result.current.select_filters({ sources: [], models: ["gpt-a"], projects: [{ kind: "projectless" }] }));
     await act(async () => result.current.clear_filters());
     expect(optionCalls).toBe(1);
 
-    await act(async () => result.current.select_filters({ models: ["gpt-a"], projects: [{ kind: "projectless" }] }));
+    await act(async () => result.current.select_filters({ sources: [], models: ["gpt-a"], projects: [{ kind: "projectless" }] }));
 
     source.onmessage?.({ data: JSON.stringify({ data_revision: 2, status_revision: 1 }) } as MessageEvent<string>);
     await act(async () => result.current.request_refresh());
     await waitFor(() => expect(result.current.refresh_state).toBe("idle"));
     expect(optionCalls).toBe(2);
-    expect(result.current.filters).toEqual({ models: ["gpt-a"], projects: [{ kind: "projectless" }] });
+    expect(result.current.filters).toEqual({ sources: [], models: ["gpt-a"], projects: [{ kind: "projectless" }] });
     expect(result.current.filter_options).toEqual({
       data_revision: 1,
+      sources: [],
       models: [{ model: "gpt-a", provider: "openai" }],
       projects: [{ kind: "projectless" }],
     });
     expect(result.current.filter_options_stale).toBe(true);
     await act(async () => result.current.retry_filter_options());
     expect(optionCalls).toBe(3);
-    await waitFor(() => expect(result.current.filter_options).toEqual({ data_revision: 2, models: [], projects: [] }));
-    expect(result.current.filters).toEqual({ models: ["gpt-a"], projects: [{ kind: "projectless" }] });
+    await waitFor(() => expect(result.current.filter_options).toEqual({ data_revision: 2, sources: [], models: [], projects: [] }));
+    expect(result.current.filters).toEqual({ sources: [], models: ["gpt-a"], projects: [{ kind: "projectless" }] });
   });
 
   it("loads today in parallel and isolates snapshots when ranges change", async () => {
@@ -241,27 +242,27 @@ describe("useDashboardController", () => {
     const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
     expect(result.current.range).toEqual({ key: "today" });
-    expect(client.summary).toHaveBeenCalledWith({ key: "today" }, { models: [], projects: [] }, expect.any(AbortSignal));
+    expect(client.summary).toHaveBeenCalledWith({ key: "today" }, { sources: [], models: [], projects: [] }, expect.any(AbortSignal));
     expect(client.getStatus).toHaveBeenCalled();
     expect(client.getRevision).toHaveBeenCalled();
 
     await act(async () => result.current.select_range({ key: "yesterday" }));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
     expect(result.current.range).toEqual({ key: "yesterday" });
-    expect(client.summary).toHaveBeenCalledWith({ key: "yesterday" }, { models: [], projects: [] }, expect.any(AbortSignal));
+    expect(client.summary).toHaveBeenCalledWith({ key: "yesterday" }, { sources: [], models: [], projects: [] }, expect.any(AbortSignal));
   });
 
   it("T-022-A6 sends complete custom ranges while retaining active filters", async () => {
     const client = clientWith();
     const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
     await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
-    await act(async () => result.current.select_filters({ models: ["gpt-5"], projects: [] }));
-    await waitFor(() => expect(client.summary).toHaveBeenLastCalledWith({ key: "today" }, { models: ["gpt-5"], projects: [] }, expect.any(AbortSignal)));
+    await act(async () => result.current.select_filters({ sources: [], models: ["gpt-5"], projects: [] }));
+    await waitFor(() => expect(client.summary).toHaveBeenLastCalledWith({ key: "today" }, { sources: [], models: ["gpt-5"], projects: [] }, expect.any(AbortSignal)));
 
     const custom = { key: "custom" as const, from: "2026-08-01", to: "2026-08-03" };
     await act(async () => result.current.select_range(custom));
     await waitFor(() => expect(result.current.range).toEqual(custom));
-    expect(client.summary).toHaveBeenLastCalledWith(custom, { models: ["gpt-5"], projects: [] }, expect.any(AbortSignal));
+    expect(client.summary).toHaveBeenLastCalledWith(custom, { sources: [], models: ["gpt-5"], projects: [] }, expect.any(AbortSignal));
   });
 
   it("does not let a late old range response overwrite the current range", async () => {
@@ -816,5 +817,37 @@ describe("useDashboardController", () => {
     } else {
       expect(client.refresh).not.toHaveBeenCalled();
     }
+  });
+
+  it("tracks sourceFilterActive and resets sources when clear_filters is called", async () => {
+    const client = clientWith({
+      summary: vi.fn(async (range, filters) => {
+        const input = filters.sources.length > 0 ? 50 : 10;
+        return summary(range, 1, input);
+      }),
+    });
+    const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
+    await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
+    expect(result.current.sourceFilterActive).toBe(false);
+    expect(result.current.anyFilterActive).toBe(false);
+
+    await act(async () =>
+      result.current.select_filters({ sources: ["antigravity"], models: [], projects: [] }),
+    );
+    await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(50));
+    expect(result.current.sourceFilterActive).toBe(true);
+    expect(result.current.anyFilterActive).toBe(true);
+    expect(result.current.filters.sources).toEqual(["antigravity"]);
+
+    await act(async () => result.current.clear_filters());
+    await waitFor(() => expect(result.current.metrics?.input_tokens).toBe(10));
+    expect(result.current.sourceFilterActive).toBe(false);
+    expect(result.current.anyFilterActive).toBe(false);
+    expect(result.current.filters).toEqual({ sources: [], models: [], projects: [] });
+    expect(client.summary).toHaveBeenLastCalledWith(
+      { key: "today" },
+      { sources: [], models: [], projects: [] },
+      expect.any(AbortSignal),
+    );
   });
 });

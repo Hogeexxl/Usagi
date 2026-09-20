@@ -532,6 +532,85 @@ impl_string_enum!(
     StartFailed => "start_failed"
 );
 
+/// Durable state of one source child in `source_scan_runs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceScanState {
+    Queued,
+    Running,
+    Completed,
+    Skipped,
+    Failed,
+}
+
+impl SourceScanState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl_string_enum!(
+    SourceScanState,
+    "source_scan_state",
+    Queued => "queued",
+    Running => "running",
+    Completed => "completed",
+    Skipped => "skipped",
+    Failed => "failed"
+);
+
+/// Read-only projection of one source child for the internal status API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceScanStatus {
+    pub source: String,
+    pub state: SourceScanState,
+    pub error_code: Option<String>,
+}
+
+impl SourceScanStatus {
+    pub fn new(
+        source: impl Into<String>,
+        state: SourceScanState,
+        error_code: Option<String>,
+    ) -> Result<Self, DomainError> {
+        let value = Self {
+            source: source.into(),
+            state,
+            error_code,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        non_empty(&self.source, "source")?;
+        match (self.state, self.error_code.is_some()) {
+            (SourceScanState::Failed, true)
+            | (SourceScanState::Queued, false)
+            | (SourceScanState::Running, false)
+            | (SourceScanState::Completed, false)
+            | (SourceScanState::Skipped, false) => {}
+            (SourceScanState::Failed, false) => {
+                return Err(DomainError::InvariantViolation {
+                    invariant: "failed source scan requires an error code",
+                });
+            }
+            (_, true) => {
+                return Err(DomainError::InvariantViolation {
+                    invariant: "non-failed source scan cannot have an error code",
+                });
+            }
+        }
+        validate_optional_code(&self.error_code, "source_scan_error_code")?;
+        Ok(())
+    }
+}
+
 /// Last-finished projection in `app_meta`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScanResult {
@@ -2343,17 +2422,38 @@ impl Deref for AppState {
 pub struct ScanStatusSnapshot {
     pub app_state: AppState,
     pub target_scan: Option<ScanRun>,
+    pub sources: Vec<SourceScanStatus>,
 }
 
 impl ScanStatusSnapshot {
     pub fn new(app_state: AppState, target_scan: Option<ScanRun>) -> Result<Self, DomainError> {
+        Self::new_with_sources(app_state, target_scan, Vec::new())
+    }
+
+    pub fn new_with_sources(
+        app_state: AppState,
+        target_scan: Option<ScanRun>,
+        mut sources: Vec<SourceScanStatus>,
+    ) -> Result<Self, DomainError> {
         app_state.validate()?;
         if let Some(scan) = target_scan.as_ref() {
             scan.validate()?;
         }
+        sources.sort_by(|left, right| left.source.cmp(&right.source));
+        let mut previous_source = None;
+        for source in &sources {
+            source.validate()?;
+            if previous_source.is_some_and(|previous| previous >= source.source.as_str()) {
+                return Err(DomainError::InvariantViolation {
+                    invariant: "source scan statuses must be sorted and unique",
+                });
+            }
+            previous_source = Some(source.source.as_str());
+        }
         Ok(Self {
             app_state,
             target_scan,
+            sources,
         })
     }
 
@@ -2361,6 +2461,16 @@ impl ScanStatusSnapshot {
         self.app_state.validate()?;
         if let Some(scan) = self.target_scan.as_ref() {
             scan.validate()?;
+        }
+        let mut previous_source = None;
+        for source in &self.sources {
+            source.validate()?;
+            if previous_source.is_some_and(|previous| previous >= source.source.as_str()) {
+                return Err(DomainError::InvariantViolation {
+                    invariant: "source scan statuses must be sorted and unique",
+                });
+            }
+            previous_source = Some(source.source.as_str());
         }
         Ok(())
     }
@@ -2371,6 +2481,61 @@ impl Deref for ScanStatusSnapshot {
 
     fn deref(&self) -> &Self::Target {
         &self.app_state
+    }
+}
+
+/// Spec 01 Phase 4: Codex-visible status snapshot for Public API v1 (§12.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexScanStatusSnapshot {
+    pub data_revision: i64,
+    pub status_revision: i64,
+    pub scan_state: String,
+    pub source_binding_status: String,
+    pub last_finished_scan_result: Option<String>,
+    pub last_scan_started_at_ms: Option<i64>,
+    pub last_scan_completed_at_ms: Option<i64>,
+    pub last_scan_failed_at_ms: Option<i64>,
+    pub last_scan_error_code: Option<String>,
+}
+
+impl CodexScanStatusSnapshot {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        non_negative(self.data_revision, "data_revision")?;
+        non_negative(self.status_revision, "status_revision")?;
+        match self.scan_state.as_str() {
+            "running" | "idle" | "failed" => {}
+            other => {
+                return Err(DomainError::invalid(
+                    "scan_state",
+                    format!("must be running, idle, or failed; got {other:?}"),
+                ));
+            }
+        }
+        match self.source_binding_status.as_str() {
+            "unbound" | "ready" | "source_changed" => {}
+            other => {
+                return Err(DomainError::invalid(
+                    "source_binding_status",
+                    format!("unknown binding status {other:?}"),
+                ));
+            }
+        }
+        if let Some(result) = self.last_finished_scan_result.as_deref() {
+            match result {
+                "completed" | "failed" => {}
+                other => {
+                    return Err(DomainError::invalid(
+                        "last_finished_scan_result",
+                        format!("must be completed or failed; got {other:?}"),
+                    ));
+                }
+            }
+        }
+        optional_non_negative(self.last_scan_started_at_ms, "last_scan_started_at_ms")?;
+        optional_non_negative(self.last_scan_completed_at_ms, "last_scan_completed_at_ms")?;
+        optional_non_negative(self.last_scan_failed_at_ms, "last_scan_failed_at_ms")?;
+        validate_optional_code(&self.last_scan_error_code, "last_scan_error_code")?;
+        Ok(())
     }
 }
 

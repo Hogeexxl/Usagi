@@ -27,6 +27,7 @@ use crate::{
     platform::browser::BrowserOpener,
     range::{RangeKey, resolve_day_buckets, resolve_system_custom_range, resolve_system_range},
     scanner::{CommitFailureKind, ScanHandle, ScanShutdownError},
+    source::{SourceId, SourceRegistry},
     storage::{Ledger, RevisionTuple},
     update::{ReleaseInfo, UpdateService, UpdateSnapshot},
     usage::{SummaryQuery, ledger::UsageLedger},
@@ -50,6 +51,7 @@ const REFRESH_HEADER: &str = "x-usagi-request";
 pub struct AppContext {
     pub ledger: Arc<Ledger>,
     pub scanner: ScanHandle,
+    pub source_registry: SourceRegistry,
     pub codex_quota_service: Arc<CodexQuotaService>,
     pub update_service: Arc<UpdateService>,
     pub browser_opener: Arc<dyn BrowserOpener>,
@@ -259,11 +261,6 @@ async fn status(
     Ok(Json(value))
 }
 
-#[derive(Deserialize)]
-struct RangeParams {
-    range: Option<String>,
-}
-
 async fn summary(
     State(state): State<ApiState>,
     RawQuery(raw_query): RawQuery,
@@ -365,15 +362,21 @@ async fn session_detail(
 
 async fn models(
     State(state): State<ApiState>,
-    Query(params): Query<RangeParams>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<query::ModelsResponse>, ApiError> {
-    let range = resolve_system_range(RangeKey::parse(params.range.as_deref())?)?;
+    let params = query::parse_summary_params(raw_query.as_deref())?;
+    let range = resolve_request_range(
+        params.range.as_deref(),
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )?;
     let aggregate_range = range.aggregate_range()?;
     let ledger = Arc::clone(&state.context.ledger);
-    let snapshot =
-        run_blocking_query(move || UsageLedger::new(&ledger).models_snapshot(aggregate_range))
-            .await?
-            .map_err(query::map_usage_ledger_error)?;
+    let snapshot = run_blocking_query(move || {
+        UsageLedger::new(&ledger).models_snapshot_filtered(aggregate_range, &params.filter)
+    })
+    .await?
+    .map_err(query::map_usage_ledger_error)?;
     Ok(Json(query::models_response(&range, snapshot)?))
 }
 
@@ -460,7 +463,15 @@ async fn filter_options(
     let snapshot = run_blocking_query(move || UsageLedger::new(&ledger).filter_options_snapshot())
         .await?
         .map_err(query::map_usage_ledger_error)?;
-    Ok(Json(query::filter_options_response(snapshot)?))
+    let mut response = query::filter_options_response(snapshot)?;
+    for option in &mut response.sources {
+        if let Ok(source) = SourceId::new(option.source.clone())
+            && let Some(descriptor) = state.context.source_registry.get(&source)
+        {
+            option.display_name = descriptor.descriptor().display_name.to_owned();
+        }
+    }
+    Ok(Json(response))
 }
 
 /// The S8 update API DTO is intentionally kept separate from the richer

@@ -9,6 +9,7 @@ import { FilterControls } from "./FilterControls";
 
 const modelOptions: FilterOptionsResponse = {
   data_revision: 1,
+  sources: [],
   models: [
     { model: "gpt-4o", provider: "openai" },
     { model: "gpt-4o-mini", provider: "openai" },
@@ -22,6 +23,7 @@ const modelOptions: FilterOptionsResponse = {
 
 const projectOptions: FilterOptionsResponse = {
   data_revision: 1,
+  sources: [],
   models: [],
   projects: [
     { kind: "project", project_name: "Workspace", project_path: "/workspace" },
@@ -30,7 +32,7 @@ const projectOptions: FilterOptionsResponse = {
   ],
 };
 
-const emptyFilters: DashboardFilters = { models: [], projects: [] };
+const emptyFilters: DashboardFilters = { sources: [], models: [], projects: [] };
 
 type RenderOverrides = {
   filters?: DashboardFilters;
@@ -74,7 +76,7 @@ describe("FilterControls", () => {
   });
 
   it("uses the primary one-item trigger when one model is selected", () => {
-    renderControls({ filters: { models: ["claude-3"], projects: [] } });
+    renderControls({ filters: { sources: [], models: ["claude-3"], projects: [] } });
     const trigger = screen.getByRole("button", { name: "模型筛选，已选1项" });
     expect(trigger).toHaveTextContent("模型 · 1 项");
     expect(trigger).toHaveClass("bg-primary");
@@ -88,7 +90,7 @@ describe("FilterControls", () => {
 
     fireEvent.click(checkbox);
 
-    expect(onChange).toHaveBeenCalledWith({ models: ["claude-3"], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ sources: [], models: ["claude-3"], projects: [] });
   });
 
   it("toggles an ordinary model when its label text is clicked", async () => {
@@ -98,7 +100,7 @@ describe("FilterControls", () => {
 
     fireEvent.click(within(dialog).getByText("claude-3"));
 
-    expect(onChange).toHaveBeenCalledWith({ models: ["claude-3"], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ sources: [], models: ["claude-3"], projects: [] });
   });
 
   it.each([
@@ -106,7 +108,7 @@ describe("FilterControls", () => {
     { name: "partial", selected: ["gpt-4o"], ariaChecked: "mixed" },
     { name: "N/N", selected: ["gpt-4o", "gpt-4o-mini", "codex-auto-review"], ariaChecked: "true" },
   ])("exposes OpenAI $name state", async ({ selected, ariaChecked }) => {
-    renderControls({ filters: { models: selected, projects: [] } });
+    renderControls({ filters: { sources: [], models: selected, projects: [] } });
     const triggerName = selected.length
       ? `模型筛选，已选${selected.length}项`
       : "模型筛选，全部";
@@ -151,7 +153,7 @@ describe("FilterControls", () => {
   it("keeps a selected orphan model cancellable in the Route-models fallback group", async () => {
     const onChange = vi.fn();
     renderControls({
-      filters: { models: ["orphan-rollout"], projects: [] },
+      filters: { sources: [], models: ["orphan-rollout"], projects: [] },
       onChange,
     });
     const dialog = await openPopover("模型筛选，已选1项");
@@ -160,7 +162,7 @@ describe("FilterControls", () => {
     expect(within(dialog).getByRole("button", { name: "Route-models" })).toBeInTheDocument();
     fireEvent.click(orphan);
 
-    expect(onChange).toHaveBeenCalledWith({ models: [], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ sources: [], models: [], projects: [] });
   });
 
   it("selects normal, projectless, and unknown projects using their labels", async () => {
@@ -170,18 +172,21 @@ describe("FilterControls", () => {
 
     fireEvent.click(within(dialog).getByText("Workspace"));
     expect(onChange).toHaveBeenLastCalledWith({
+      sources: [],
       models: [],
       projects: [{ kind: "project", project_path: "/workspace" }],
     });
 
     fireEvent.click(within(dialog).getByText("无项目会话"));
     expect(onChange).toHaveBeenLastCalledWith({
+      sources: [],
       models: [],
       projects: [{ kind: "projectless" }],
     });
 
     fireEvent.click(within(dialog).getByText("未识别项目"));
     expect(onChange).toHaveBeenLastCalledWith({
+      sources: [],
       models: [],
       projects: [{ kind: "unknown" }],
     });
@@ -189,7 +194,7 @@ describe("FilterControls", () => {
 
   it("shows the selected project count and primary trigger semantics", () => {
     renderControls({
-      filters: { models: [], projects: [{ kind: "project", project_path: "/workspace" }] },
+      filters: { sources: [], models: [], projects: [{ kind: "project", project_path: "/workspace" }] },
       options: projectOptions,
       anyFilterActive: true,
     });
@@ -242,7 +247,7 @@ describe("FilterControls", () => {
     const onClear = vi.fn();
     const onChange = vi.fn();
     renderControls({
-      filters: { models: ["claude-3"], projects: [{ kind: "projectless" }] },
+      filters: { sources: [], models: ["claude-3"], projects: [{ kind: "projectless" }] },
       anyFilterActive: true,
       onClear,
       onChange,
@@ -252,5 +257,100 @@ describe("FilterControls", () => {
 
     expect(onClear).toHaveBeenCalledTimes(1);
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("hides the source filter button when options are null, empty, or have only 1 source", () => {
+    // null options
+    const firstRender = renderControls({ options: null });
+    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    firstRender.unmount();
+
+    // 0 sources
+    const secondRender = renderControls({ options: { data_revision: 1, sources: [], models: [], projects: [] } });
+    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    secondRender.unmount();
+
+    // 1 source
+    const thirdRender = renderControls({
+      options: {
+        data_revision: 1,
+        sources: [{ source: "codex", display_name: "Codex" }],
+        models: [],
+        projects: [],
+      },
+    });
+    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    thirdRender.unmount();
+  });
+
+  it("shows the source filter button when sources > 1, opens popover, and toggles selection", async () => {
+    const onChange = vi.fn();
+    const multiSourceOptions: FilterOptionsResponse = {
+      data_revision: 1,
+      sources: [
+        { source: "codex", display_name: "Codex" },
+        { source: "antigravity", display_name: "Antigravity" },
+      ],
+      models: [],
+      projects: [],
+    };
+
+    renderControls({
+      options: multiSourceOptions,
+      filters: { sources: [], models: [], projects: [] },
+      onChange,
+    });
+
+    const trigger = screen.getByRole("button", { name: "来源筛选，全部" });
+    expect(trigger).toBeInTheDocument();
+    expect(trigger).toHaveTextContent("来源 · 全部");
+
+    const dialog = await openPopover("来源筛选，全部");
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText("Codex")).toBeInTheDocument();
+    expect(within(dialog).getByText("Antigravity")).toBeInTheDocument();
+
+    const antigravityCheckbox = within(dialog).getByRole("checkbox", { name: "Antigravity" });
+    fireEvent.click(antigravityCheckbox);
+
+    expect(onChange).toHaveBeenCalledWith({
+      sources: ["antigravity"],
+      models: [],
+      projects: [],
+    });
+  });
+
+  it("displays and allows toggling orphan selected sources when sources > 1", async () => {
+    const onChange = vi.fn();
+    const multiSourceOptions: FilterOptionsResponse = {
+      data_revision: 1,
+      sources: [
+        { source: "codex", display_name: "Codex" },
+        { source: "antigravity", display_name: "Antigravity" },
+      ],
+      models: [],
+      projects: [],
+    };
+
+    renderControls({
+      options: multiSourceOptions,
+      filters: { sources: ["orphan-source"], models: [], projects: [] },
+      onChange,
+    });
+
+    const trigger = screen.getByRole("button", { name: "来源筛选，已选1项" });
+    expect(trigger).toHaveTextContent("来源 · 1 项");
+
+    const dialog = await openPopover("来源筛选，已选1项");
+    const orphanCheckbox = within(dialog).getByRole("checkbox", { name: "orphan-source" });
+    expect(orphanCheckbox).toBeInTheDocument();
+    expect(orphanCheckbox).toBeChecked();
+
+    fireEvent.click(orphanCheckbox);
+    expect(onChange).toHaveBeenCalledWith({
+      sources: [],
+      models: [],
+      projects: [],
+    });
   });
 });

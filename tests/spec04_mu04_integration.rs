@@ -122,6 +122,7 @@ impl Fixture {
             AppContext {
                 ledger,
                 scanner,
+                source_registry: SourceRegistry::new(),
                 codex_quota_service,
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),

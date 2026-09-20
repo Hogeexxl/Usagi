@@ -6,8 +6,10 @@ import { createRevisionFeed, type RevisionEventSource } from "../../data/revisio
 import { UsagiClientError, type DashboardFilters, type DashboardRange, type SessionDetailResponse, type SessionItemDto } from "../../data/types";
 import { useSessionDetailController } from "./useSessionDetailController";
 
-const filters: DashboardFilters = { models: [], projects: [] };
+const filters: DashboardFilters = { sources: [], models: [], projects: [] };
 const row: SessionItemDto = {
+  source: "codex",
+  native_session_id: "root-1",
   root_session_id: "root-1",
   title: "Root",
   project_name: "Usagi",
@@ -62,11 +64,15 @@ function detail(revision: number, total = revision, rootSessionId = "root-1"): S
   const usage = { ...row.self_usage!, total_tokens: total };
   const secondModelUsage = { ...usage, total_tokens: total + 1 };
   return {
+    source: "codex",
+    native_session_id: rootSessionId,
     range: { key: "today", start_ms: 1, end_ms: 3, timezone: "Asia/Shanghai" },
     data_revision: revision,
     root_session_id: rootSessionId,
     last_activity_at_ms: 200,
     main: {
+      source: "codex",
+      native_session_id: rootSessionId,
       title: "Root",
       thread_id: rootSessionId,
       root_session_id: rootSessionId,
@@ -121,6 +127,7 @@ describe("useSessionDetailController", () => {
     const client = clientWith();
     const { feed, source } = sourceAndFeed(client);
     const baseFilters: DashboardFilters = {
+      sources: [],
       models: ["model-b", "model-a", "model-b"],
       projects: [
         { kind: "unknown" },
@@ -132,6 +139,7 @@ describe("useSessionDetailController", () => {
       ],
     };
     const equivalentFilters: DashboardFilters = {
+      sources: [],
       models: ["model-a", "model-b", "model-a"],
       projects: [
         { kind: "project", project_path: "/a" },
@@ -153,6 +161,7 @@ describe("useSessionDetailController", () => {
     expect(client.getSessionDetail).toHaveBeenLastCalledWith(expect.objectContaining({
       range: { key: "today" },
       filters: {
+        sources: [],
         models: ["model-a", "model-b"],
         projects: [
           { kind: "project", project_path: "/a" },
@@ -184,13 +193,13 @@ describe("useSessionDetailController", () => {
 
     await act(async () => result.current.close_detail());
     activeRange = { key: "today" };
-    activeFilters = { models: ["model-a"], projects: [] };
+    activeFilters = { sources: [], models: ["model-a"], projects: [] };
     rerender();
     await act(async () => result.current.open_detail(row));
     await waitFor(() => expect(client.getSessionDetail).toHaveBeenCalledTimes(3));
     expect(client.getSessionDetail).toHaveBeenLastCalledWith(expect.objectContaining({
       range: { key: "today" },
-      filters: { models: ["model-a"], projects: [] },
+      filters: { sources: [], models: ["model-a"], projects: [] },
       root_session_id: "root-1",
     }));
 

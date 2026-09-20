@@ -10,8 +10,11 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    domain::{AppState, FollowupState, ScanRun, ScanStatusSnapshot, SourceBindingStatus},
+    domain::{
+        AppState, FollowupState, ScanRun, ScanStatusSnapshot, SourceBindingStatus, SourceScanStatus,
+    },
     range::ResolvedRange,
+    source::SourceId,
     storage::{Ledger, StorageErrorKind},
     usage::{
         aggregate::{
@@ -175,6 +178,8 @@ pub struct SummaryParams {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SessionUsageDto {
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub title: Option<String>,
     pub project_name: Option<String>,
     pub project_path: Option<String>,
@@ -200,6 +205,8 @@ pub struct SessionsResponse {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SessionSortIndexDto {
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub last_activity_at_ms: i64,
     pub project_sort_key: Option<String>,
     pub model_sort_key: Option<String>,
@@ -223,6 +230,8 @@ pub struct SessionDetailResponse {
     pub range: RangeDto,
     pub data_revision: i64,
     pub root_session_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub last_activity_at_ms: i64,
     pub main: MainSessionDetailDto,
     pub subagents: Vec<SubagentDetailDto>,
@@ -232,6 +241,8 @@ pub struct SessionDetailResponse {
 pub struct MainSessionDetailDto {
     pub title: Option<String>,
     pub thread_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub root_session_id: String,
     pub models_used: Vec<String>,
     pub model_usage: Vec<MainModelUsageDto>,
@@ -250,6 +261,8 @@ pub struct MainModelUsageDto {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SubagentDetailDto {
     pub thread_id: String,
+    pub source: String,
+    pub native_session_id: String,
     pub parent_thread_id: Option<String>,
     pub root_session_id: String,
     pub title: Option<String>,
@@ -354,8 +367,15 @@ pub enum ProjectFilterOptionDto {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SourceFilterOptionDto {
+    pub source: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FilterOptionsResponse {
     pub data_revision: i64,
+    pub sources: Vec<SourceFilterOptionDto>,
     pub models: Vec<ModelFilterOptionDto>,
     pub projects: Vec<ProjectFilterOptionDto>,
 }
@@ -391,6 +411,13 @@ pub struct TargetScanDto {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SourceScanStatusDto {
+    pub source: String,
+    pub state: String,
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StatusResponse {
     pub data_revision: i64,
     pub status_revision: i64,
@@ -405,12 +432,14 @@ pub struct StatusResponse {
     pub last_scan_failed_at_ms: Option<i64>,
     pub last_scan_error_code: Option<String>,
     pub source_binding_status: String,
+    pub sources: Vec<SourceScanStatusDto>,
 }
 
 pub fn parse_summary_params(raw_query: Option<&str>) -> Result<SummaryParams, ApiError> {
     let mut range = None;
     let mut from = None;
     let mut to = None;
+    let mut sources = Vec::new();
     let mut models = Vec::new();
     let mut project_paths = Vec::new();
     let mut include_projectless = false;
@@ -435,6 +464,10 @@ pub fn parse_summary_params(raw_query: Option<&str>) -> Result<SummaryParams, Ap
                 if to.replace(value.into_owned()).is_some() {
                     return Err(ApiError::InvalidRange);
                 }
+            }
+            "source" => {
+                let source = validate_filter_value(value.into_owned())?;
+                sources.push(SourceId::new(source).map_err(|_| ApiError::InvalidFilter)?);
             }
             "model" => models.push(validate_filter_value(value.into_owned())?),
             "project_path" => {
@@ -463,6 +496,7 @@ pub fn parse_summary_params(raw_query: Option<&str>) -> Result<SummaryParams, Ap
         from,
         to,
         filter: UsageFilter::new(
+            sources,
             models,
             project_paths,
             include_projectless,
@@ -808,6 +842,15 @@ pub fn filter_options_response(
     snapshot: UsageSnapshot<FilterOptions>,
 ) -> Result<FilterOptionsResponse, ApiError> {
     ensure_safe(snapshot.data_revision)?;
+    let sources = snapshot
+        .value
+        .sources
+        .into_iter()
+        .map(|source| SourceFilterOptionDto {
+            source: source.source,
+            display_name: source.display_name,
+        })
+        .collect();
     let models = snapshot
         .value
         .models
@@ -825,6 +868,7 @@ pub fn filter_options_response(
         .collect();
     Ok(FilterOptionsResponse {
         data_revision: snapshot.data_revision,
+        sources,
         models,
         projects,
     })
@@ -884,6 +928,8 @@ fn map_session(row: SessionUsageRow) -> Result<SessionUsageDto, ApiError> {
     ensure_safe(row.subagent_count)?;
     Ok(SessionUsageDto {
         root_session_id: row.root_session_id,
+        source: row.source,
+        native_session_id: row.native_session_id,
         title: row.title,
         project_name: row.project_name,
         project_path: row.project_path,
@@ -925,6 +971,8 @@ fn map_sort_index(row: SessionSortIndexItem) -> Result<SessionSortIndexDto, ApiE
     }
     Ok(SessionSortIndexDto {
         root_session_id: row.root_session_id,
+        source: row.source,
+        native_session_id: row.native_session_id,
         last_activity_at_ms: row.last_activity_at_ms,
         project_sort_key: row.project_sort_key,
         model_sort_key: row.model_sort_key,
@@ -976,6 +1024,8 @@ fn map_detail(
                 .collect::<Result<Vec<_>, ApiError>>()?;
             Ok(SubagentDetailDto {
                 thread_id: subagent.thread_id,
+                source: subagent.source,
+                native_session_id: subagent.native_session_id,
                 parent_thread_id: subagent.parent_thread_id,
                 root_session_id: subagent.root_session_id,
                 title: subagent.title,
@@ -988,10 +1038,14 @@ fn map_detail(
         range: RangeDto::from(range),
         data_revision,
         root_session_id: detail.root_session_id,
+        source: detail.source,
+        native_session_id: detail.native_session_id,
         last_activity_at_ms: detail.last_activity_at_ms,
         main: MainSessionDetailDto {
             title: main.title,
             thread_id: main.thread_id,
+            source: main.source,
+            native_session_id: main.native_session_id,
             root_session_id: main.root_session_id,
             models_used: main.models_used,
             model_usage: main_models,
@@ -1091,7 +1145,7 @@ fn map_totals(totals: TokenTotals) -> Result<TokenUsageDto, ApiError> {
     })
 }
 
-fn ensure_safe(value: i64) -> Result<(), ApiError> {
+pub(crate) fn ensure_safe(value: i64) -> Result<(), ApiError> {
     (0..=JSON_SAFE_INTEGER_MAX)
         .contains(&value)
         .then_some(())
@@ -1126,6 +1180,11 @@ pub fn status(ledger: &Ledger, target_scan_id: Option<&str>) -> Result<StatusRes
 }
 
 pub fn status_from_snapshot(snapshot: ScanStatusSnapshot) -> Result<StatusResponse, ApiError> {
+    let sources = snapshot
+        .sources
+        .into_iter()
+        .map(map_source_scan_status)
+        .collect::<Result<Vec<_>, _>>()?;
     let AppState {
         data_revision,
         scan: state,
@@ -1187,6 +1246,16 @@ pub fn status_from_snapshot(snapshot: ScanStatusSnapshot) -> Result<StatusRespon
             SourceBindingStatus::SourceChanged => "source_changed",
         }
         .to_owned(),
+        sources,
+    })
+}
+
+fn map_source_scan_status(source: SourceScanStatus) -> Result<SourceScanStatusDto, ApiError> {
+    source.validate().map_err(|_| ApiError::QueryFailed)?;
+    Ok(SourceScanStatusDto {
+        source: source.source,
+        state: source.state.as_str().to_owned(),
+        error_code: source.error_code,
     })
 }
 
@@ -1227,7 +1296,7 @@ fn map_aggregate_error(error: AggregateError) -> ApiError {
     }
 }
 
-fn map_storage_error(error: crate::storage::StorageError) -> ApiError {
+pub(crate) fn map_storage_error(error: crate::storage::StorageError) -> ApiError {
     match error.kind() {
         StorageErrorKind::DatabaseBusy => ApiError::DatabaseBusy,
         _ => ApiError::QueryFailed,
@@ -1280,6 +1349,12 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(parsed.range.as_deref(), Some("year"));
+        let parsed_sources =
+            parse_summary_params(Some("range=year&source=fake&source=codex&source=fake")).unwrap();
+        assert_eq!(
+            parsed_sources.filter.sources(),
+            &[SourceId::CODEX, SourceId::new("fake").unwrap()]
+        );
         assert_eq!(
             parsed.filter.models(),
             &["gpt,a".to_owned(), "gpt,b".to_owned()]
@@ -1306,6 +1381,10 @@ mod tests {
 
         for raw_query in [
             "range=year&model=",
+            "range=year&source=",
+            "range=year&source=Codex",
+            "range=year&source=1fake",
+            "range=year&source=fake%00source",
             "range=year&project_path=",
             "range=year&model=bad%00model",
             "range=year&project_path=%2Ftmp%2Fbad%0Apath",
@@ -1400,6 +1479,8 @@ mod tests {
                 data_revision: 9,
                 rows: vec![SessionUsageRow {
                     root_session_id: "root-a".into(),
+                    source: "codex".into(),
+                    native_session_id: "root-a".into(),
                     title: None,
                     project_name: None,
                     project_path: None,
@@ -1414,6 +1495,8 @@ mod tests {
                 }],
                 sort_index: vec![SessionSortIndexItem {
                     root_session_id: "root-a".into(),
+                    source: "codex".into(),
+                    native_session_id: "root-a".into(),
                     last_activity_at_ms: 20,
                     project_sort_key: None,
                     model_sort_key: Some("unknown".into()),
@@ -1427,6 +1510,10 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(response.items[0].source, "codex");
+        assert_eq!(response.items[0].native_session_id, "root-a");
+        assert_eq!(response.sort_index[0].source, "codex");
+        assert_eq!(response.sort_index[0].native_session_id, "root-a");
         assert_eq!(
             response.items[0]
                 .inclusive_usage
@@ -1597,8 +1684,12 @@ mod tests {
                 data_revision: 9,
                 value: SessionDetail {
                     root_session_id: "root".into(),
+                    source: "codex".into(),
+                    native_session_id: "root".into(),
                     last_activity_at_ms: 20,
                     main: crate::usage::aggregate::MainSessionDetail {
+                        source: "codex".into(),
+                        native_session_id: "root".into(),
                         title: Some("Root".into()),
                         thread_id: "root".into(),
                         root_session_id: "root".into(),
@@ -1609,6 +1700,8 @@ mod tests {
                         inclusive_usage: usage.clone(),
                     },
                     subagents: vec![crate::usage::aggregate::SubagentDetail {
+                        source: "codex".into(),
+                        native_session_id: "child".into(),
                         thread_id: "child".into(),
                         parent_thread_id: Some("root".into()),
                         root_session_id: "root".into(),
@@ -1625,11 +1718,17 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(response.source, "codex");
+        assert_eq!(response.native_session_id, "root");
+        assert_eq!(response.main.source, "codex");
+        assert_eq!(response.main.native_session_id, "root");
         let subagent = serde_json::to_value(&response.subagents[0]).unwrap();
         assert_eq!(
             subagent,
             serde_json::json!({
                 "thread_id": "child",
+                "source": "codex",
+                "native_session_id": "child",
                 "parent_thread_id": "root",
                 "root_session_id": "root",
                 "title": "Child",
@@ -1654,6 +1753,47 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[test]
+    fn t_filter_options_response_maps_sources_models_and_projects() {
+        let snapshot = UsageSnapshot {
+            data_revision: 5,
+            value: FilterOptions {
+                sources: vec![
+                    crate::usage::aggregate::SourceFilterOption {
+                        source: "codex".into(),
+                        display_name: "Codex".into(),
+                    },
+                    crate::usage::aggregate::SourceFilterOption {
+                        source: "legacy-source".into(),
+                        display_name: "legacy-source".into(),
+                    },
+                ],
+                models: vec![crate::usage::aggregate::ModelFilterOption {
+                    model: "gpt-5".into(),
+                    provider: "openai".into(),
+                }],
+                projects: vec![ProjectFilterOption::Projectless],
+            },
+        };
+        let response = filter_options_response(snapshot).unwrap();
+        assert_eq!(response.data_revision, 5);
+        assert_eq!(
+            response.sources,
+            vec![
+                SourceFilterOptionDto {
+                    source: "codex".into(),
+                    display_name: "Codex".into(),
+                },
+                SourceFilterOptionDto {
+                    source: "legacy-source".into(),
+                    display_name: "legacy-source".into(),
+                },
+            ]
+        );
+        assert_eq!(response.models.len(), 1);
+        assert_eq!(response.projects.len(), 1);
     }
 
     #[test]

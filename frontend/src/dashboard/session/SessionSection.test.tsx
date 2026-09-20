@@ -50,6 +50,8 @@ const usage: UsageDto = {
 };
 
 const item: SessionItemDto = {
+  source: "codex",
+  native_session_id: "root-1",
   root_session_id: "root-1",
   title: null,
   project_name: "Usagi",
@@ -71,7 +73,7 @@ function view(overrides: Partial<SessionTableViewModel> = {}): SessionTableViewM
     timezone: "Asia/Shanghai",
     load_state: "ready",
     page_state: "idle",
-    filters: { models: [], projects: [] },
+    filters: { sources: [], models: [], projects: [] },
     page: 1,
     total_items: 1,
     total_pages: 1,

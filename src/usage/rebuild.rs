@@ -2089,7 +2089,9 @@ mod tests {
                       active_parser_version=NEW.usage_parser_version,
                       build_parser_version=NEW.usage_build_parser_version
                     WHERE source='codex';
-                 END;",
+                 END;
+                 ALTER TABLE threads ADD COLUMN source TEXT NOT NULL DEFAULT 'codex';
+                 ALTER TABLE threads ADD COLUMN native_session_id TEXT NOT NULL DEFAULT '';",
             )
             .unwrap();
         connection

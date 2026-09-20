@@ -964,6 +964,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
         AppContext {
             ledger: Arc::clone(&ledger),
             scanner: scanner.clone(),
+            source_registry: SourceRegistry::new(),
             codex_quota_service,
             update_service: UpdateService::unavailable(),
             browser_opener: Arc::new(SystemBrowser),

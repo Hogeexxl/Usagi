@@ -123,6 +123,19 @@ fn scoped_where(
         format!("{event_alias}.occurred_at_ms>=?1"),
         format!("{event_alias}.occurred_at_ms<?2"),
     ];
+    if !filter.sources().is_empty() {
+        let mut placeholders = Vec::new();
+        for source in filter.sources() {
+            values.push(Value::Text(source.as_str().to_owned()));
+            placeholders.push(format!("?{}", values.len()));
+        }
+        let source_col = if event_alias == "se" {
+            format!("{root_alias}.source")
+        } else {
+            format!("{event_alias}.source")
+        };
+        clauses.push(format!("{source_col} IN ({})", placeholders.join(",")));
+    }
     if !filter.models().is_empty() {
         let mut placeholders = Vec::new();
         for model in filter.models() {
@@ -394,6 +407,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use crate::source::SourceId;
     use crate::storage::LedgerOptions;
 
     use super::*;
@@ -433,5 +447,80 @@ mod tests {
             drop(ledger);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn t_s07_003_skills_usage_source_filter() {
+        let (ledger, root) = ledger_with_active_parser(11);
+        let connection = ledger.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id,source,native_session_id,root_session_id,agent_role,
+                    project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                 ) VALUES ('thread-codex','codex','thread-codex','thread-codex','main','project',0,'complete',0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO source_files(
+                    source_file_id,thread_id,current_path,source_area,
+                    device_id,inode,file_generation,observed_size,observed_mtime_ns,
+                    file_status,last_seen_at_ms
+                 ) VALUES (1,'thread-codex','/path','sessions',1,1,1,100,0,'present',0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO skill_usage_events(
+                    ledger_epoch,source_file_id,file_generation,source_start_offset,
+                    source_end_offset,occurred_at_ms,thread_id,root_session_id,model,
+                    skill_name,created_at_ms
+                 ) VALUES (1,1,1,0,10,100,'thread-codex','thread-codex','gpt-4','test-skill',100)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let days = vec![ResolvedDay {
+            date: "2026-01-01".into(),
+            start_ms: 0,
+            end_ms: 200,
+        }];
+
+        // 1. All sources (empty filter)
+        let snapshot_all = skills_usage_snapshot(&ledger, &days, &UsageFilter::default()).unwrap();
+        assert_eq!(snapshot_all.value.days[0].skills.len(), 1);
+        assert_eq!(
+            snapshot_all.value.days[0].skills[0].skill_name,
+            "test-skill"
+        );
+
+        // 2. Matching source ('codex')
+        let snapshot_codex = skills_usage_snapshot(
+            &ledger,
+            &days,
+            &UsageFilter::default().with_sources(vec![SourceId::CODEX]),
+        )
+        .unwrap();
+        assert_eq!(snapshot_codex.value.days[0].skills.len(), 1);
+        assert_eq!(
+            snapshot_codex.value.days[0].skills[0].skill_name,
+            "test-skill"
+        );
+
+        // 3. Mismatched source ('claude_code') -> returns empty
+        let snapshot_claude = skills_usage_snapshot(
+            &ledger,
+            &days,
+            &UsageFilter::default().with_sources(vec![SourceId::new("claude_code").unwrap()]),
+        )
+        .unwrap();
+        assert_eq!(snapshot_claude.value.days[0].skills.len(), 0);
+
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
     }
 }

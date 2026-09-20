@@ -88,7 +88,7 @@ const offsetHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.proto
 
 function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
-    filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
+    filterOptions: vi.fn(async () => ({ data_revision: 1, sources: [], models: [], projects: [] })),
     summary: vi.fn(async (range) => (range.key === "today" ? summary("today") : summary("yesterday"))),
     modelDistribution: vi.fn(async (range) => ({
       range: { key: range.key, start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" },
@@ -365,6 +365,8 @@ describe("DashboardPage v0.2.1", () => {
 
   it("loads the Session detail Drawer only after a row is selected", async () => {
     const sessionRow = {
+      source: "codex",
+      native_session_id: "root-1",
       root_session_id: "root-1",
       title: "Session 1",
       project_name: null,
@@ -383,6 +385,8 @@ describe("DashboardPage v0.2.1", () => {
         ...sessionSnapshot,
         total_items: 1,
         sort_index: [{
+          source: "codex",
+          native_session_id: sessionRow.native_session_id,
           root_session_id: sessionRow.root_session_id,
           last_activity_at_ms: sessionRow.last_activity_at_ms,
           project_sort_key: null,

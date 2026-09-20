@@ -40,6 +40,7 @@ export type DashboardViewModel = {
   filter_options_loading: boolean;
   filter_options_stale: boolean;
   filter_options_error_code?: string;
+  sourceFilterActive: boolean;
   modelFilterActive: boolean;
   projectFilterActive: boolean;
   anyFilterActive: boolean;
@@ -116,7 +117,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   }
   const [state, setState] = useState<InternalState>({
     range: { key: "today" },
-    filters: { models: [], projects: [] },
+    filters: { sources: [], models: [], projects: [] },
     snapshot: null,
     last_scan_completed_at_ms: null,
     load_state: "initial",
@@ -546,7 +547,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   );
 
   const clearFilters = useCallback(() => {
-    selectFilters({ models: [], projects: [] });
+    selectFilters({ sources: [], models: [], projects: [] });
   }, [selectFilters]);
 
   const retryFilterOptions = useCallback(() => {
@@ -652,8 +653,10 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   }, []);
 
   const current = state.snapshot;
+  const sourceFilterActive = state.filters.sources.length > 0;
   const modelFilterActive = state.filters.models.length > 0;
   const projectFilterActive = state.filters.projects.length > 0;
+  const anyFilterActive = sourceFilterActive || modelFilterActive || projectFilterActive;
   return {
     range: state.range,
     filters: state.filters,
@@ -664,9 +667,10 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     filter_options_loading: state.filter_options_loading,
     filter_options_stale: state.filter_options_stale,
     filter_options_error_code: state.filter_options_error_code,
+    sourceFilterActive,
     modelFilterActive,
     projectFilterActive,
-    anyFilterActive: modelFilterActive || projectFilterActive,
+    anyFilterActive,
     load_state: state.load_state,
     refresh_state: state.refresh_state,
     error_code: state.error_code,
