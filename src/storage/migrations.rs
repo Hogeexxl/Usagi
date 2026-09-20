@@ -170,8 +170,10 @@ pub fn migrate(conn: &mut Connection, current_version: u32) -> Result<u32> {
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        path::{Path, PathBuf},
+        sync::Arc,
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::{Connection, params};
@@ -213,6 +215,33 @@ mod tests {
     impl Drop for TestDatabase {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new(label: &str) -> Self {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "usagi-{label}-{}-{suffix}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
@@ -349,6 +378,30 @@ mod tests {
             .pragma_update(None, "user_version", 10_i64)
             .unwrap();
         connection
+    }
+
+
+    fn file_v10_connection_with_rows() -> (TestDatabase, Connection) {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "usagi_t_s01_upgrade_startup_{}_{}.sqlite",
+            std::process::id(),
+            suffix
+        ));
+        let _ = fs::remove_file(&path);
+        let connection = v10_connection_with_rows();
+        connection
+            .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        drop(connection);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        (TestDatabase(path), connection)
     }
 
     fn v10_connection_with_thread_hierarchy() -> Connection {
@@ -2777,4 +2830,241 @@ mod tests {
             assert_m07_damage_rejected(label, table, needle, replacement);
         }
     }
+
+    #[test]
+    fn m08_populated_v10_survives_migration_and_production_startup_scan() {
+        use crate::{
+            ingestion::{IngestionConfig, IngestionCoordinator, LegacyCodexSourceAdapter},
+            source::SourceRegistry,
+            storage::{Ledger, LedgerOptions},
+            usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
+        };
+
+        let root = TestRoot::new("spec01-upgrade-startup");
+        let codex_home = root.path().join("codex");
+        let sessions = codex_home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(codex_home.join("archived_sessions")).unwrap();
+
+        let rollout_path = sessions.join("rollout-root.jsonl");
+        let records = [
+            serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-08-08T01:02:03Z",
+                "payload": {
+                    "id": "root",
+                    "timestamp": "2026-08-08T01:02:03Z",
+                    "cwd": "/tmp/usagi-upgrade-startup",
+                    "agent_role": "main"
+                }
+            }),
+            serde_json::json!({
+                "type": "turn_context",
+                "timestamp": "2026-08-08T01:02:04Z",
+                "payload": {
+                    "turn_id": "00000000-0000-4000-8000-000000000010",
+                    "cwd": "/tmp/usagi-upgrade-startup",
+                    "model": "gpt"
+                }
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-08T01:02:05Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "cache_write_input_tokens": 5,
+                            "output_tokens": 10,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 110
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 50,
+                            "cached_input_tokens": 10,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 5,
+                            "reasoning_output_tokens": 1,
+                            "total_tokens": 55
+                        }
+                    }
+                }
+            }),
+        ];
+        let mut rollout_bytes = Vec::new();
+        for record in records {
+            rollout_bytes.extend(serde_json::to_vec(&record).unwrap());
+            rollout_bytes.push(b'\n');
+        }
+        fs::write(&rollout_path, &rollout_bytes).unwrap();
+
+        let state = Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+        state
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT NOT NULL,
+                    rollout_path TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER,
+                    archived INTEGER,
+                    cwd TEXT,
+                    title TEXT,
+                    name TEXT,
+                    model TEXT,
+                    agent_role TEXT
+                );
+                CREATE TABLE thread_spawn_edges (
+                    parent_thread_id TEXT NOT NULL,
+                    child_thread_id TEXT NOT NULL,
+                    status TEXT,
+                    observed_at_ms INTEGER
+                );",
+            )
+            .unwrap();
+        state
+            .execute(
+                "INSERT INTO threads(
+                    id,rollout_path,created_at_ms,updated_at_ms,archived,cwd,title,name,model,agent_role
+                 ) VALUES('root',?1,1700000000000,1700000000100,0,
+                          '/tmp/usagi-upgrade-startup','Root',NULL,'gpt','main')",
+                [rollout_path.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(state);
+        fs::write(
+            codex_home.join("session_index.jsonl"),
+            b"{\"id\":\"root\",\"thread_name\":\"Root\",\"updated_at\":\"2026-08-08T01:02:05Z\"}\n",
+        )
+        .unwrap();
+        fs::write(codex_home.join(".codex-global-state.json"), b"{}").unwrap();
+
+        let (database, connection) = file_v10_connection_with_rows();
+        let rollout_file = fs::File::open(&rollout_path).unwrap();
+        let metadata = crate::platform::file_identity::metadata_from_file(&rollout_file).unwrap();
+        let (device_id, inode) = metadata.identity.storage_slots().unwrap();
+        let observed_size = i64::try_from(metadata.size).unwrap();
+
+        connection
+            .execute(
+                "UPDATE app_meta
+                 SET usage_active_epoch=1,usage_build_epoch=NULL,
+                     usage_parser_version=?1,usage_build_parser_version=NULL
+                 WHERE id=1",
+                [crate::usage::USAGE_PARSER_VERSION],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE source_files
+                 SET current_path=?1,device_id=?2,inode=?3,observed_size=?4,
+                     observed_mtime_ns=?5,file_status='present'
+                 WHERE source_file_id=1",
+                params![
+                    rollout_path.to_str().unwrap(),
+                    device_id,
+                    inode,
+                    observed_size,
+                    metadata.mtime_ns
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE threads SET current_rollout_path=?1 WHERE thread_id='root'",
+                [rollout_path.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE usage_source_states
+                 SET device_id=?1,inode=?2,usage_parser_version=?3,
+                     canonical_algorithm_version=?4,resolved_through_offset=?5,
+                     observed_raw_size=?5,raw_tail_status='none',raw_tail_start_offset=NULL
+                 WHERE ledger_epoch=1 AND source_file_id=1",
+                params![
+                    device_id,
+                    inode,
+                    crate::usage::USAGE_PARSER_VERSION,
+                    crate::usage::USAGE_CANONICAL_ALGORITHM_VERSION,
+                    observed_size
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let ledger = Arc::new(
+            Ledger::open(LedgerOptions::new(database.0.clone(), codex_home.clone())).unwrap(),
+        );
+        assert_eq!(ledger.schema_version().unwrap(), 11);
+
+        let range = TimeRange::new(0, i64::MAX).unwrap();
+        let usage = UsageLedger::new(&ledger);
+        let before = usage.summary(SummaryQuery::new(range, UsageFilter::default())).unwrap();
+        assert!(
+            before.totals.total_tokens > 0,
+            "migrated v10 usage must be visible before startup scan"
+        );
+        let before_sessions = usage
+            .sessions(range, SessionPageRequest::new(10))
+            .unwrap();
+        assert!(
+            before_sessions.rows.iter().any(|row| row.root_session_id == "root"),
+            "migrated v10 session must be visible before startup scan"
+        );
+
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(LegacyCodexSourceAdapter::from_home(codex_home.clone()))
+            .unwrap();
+        let coordinator =
+            IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
+                .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let scan = ledger.app_state().unwrap().scan;
+            if scan.active_scan_id.is_none() && scan.last_finished_scan_id.is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for production startup scan"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        coordinator.shutdown().unwrap();
+
+        let after = usage.summary(SummaryQuery::new(range, UsageFilter::default())).unwrap();
+        assert!(
+            after.totals.total_tokens > 0,
+            "production startup must not activate an empty Codex dataset"
+        );
+        let after_sessions = usage
+            .sessions(range, SessionPageRequest::new(10))
+            .unwrap();
+        assert!(
+            after_sessions.rows.iter().any(|row| row.root_session_id == "root"),
+            "production startup must preserve a visible migrated Codex session"
+        );
+
+        let visible_events: i64 = Connection::open(ledger.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM usage_events ue
+                 JOIN source_usage_epochs sue
+                   ON sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                 WHERE ue.source='codex'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            visible_events > 0,
+            "active Codex epoch must still contain canonical usage after startup"
+        );
+    }
+
 }
