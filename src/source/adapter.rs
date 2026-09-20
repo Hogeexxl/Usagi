@@ -384,6 +384,45 @@ impl SourceRunContext {
         })
     }
 
+    pub(crate) fn apply_codex_rebuild_block_source(
+        &mut self,
+        source_file_id: i64,
+        error_code: &str,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_block_source(
+                connection,
+                source_file_id,
+                error_code,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_retry_blocked(
+        &mut self,
+        source_file_id: i64,
+        now_ms: i64,
+    ) -> Result<(), crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_retry_blocked(
+                connection,
+                source_file_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(crate) fn apply_codex_rebuild_activate(
+        &mut self,
+        present: &std::collections::BTreeSet<i64>,
+    ) -> Result<crate::usage::rebuild::ActivationOutcome, crate::usage::rebuild::RebuildError> {
+        self.apply_codex_rebuild(|connection| {
+            crate::usage::rebuild::apply_codex_rebuild_activate(connection, present)
+        })
+    }
+
     pub(crate) fn with_codex_private_state<T>(
         &mut self,
         operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
