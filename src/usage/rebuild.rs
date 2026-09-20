@@ -2173,6 +2173,40 @@ mod tests {
                 "../storage/schema/0009_skill_usage_events.sql"
             ))
             .unwrap();
+        // The compact fixture intentionally skips the full session-resilience
+        // migration, but rebuild activation visibility includes Codex
+        // quarantine state. Keep the required sidecar tables faithful to the
+        // production schema instead of teaching production code to tolerate a
+        // missing table.
+        connection
+            .execute_batch(
+                "CREATE TABLE usage_session_quarantine (
+                    ledger_epoch INTEGER NOT NULL CHECK (ledger_epoch > 0),
+                    root_session_id TEXT NOT NULL CHECK (length(root_session_id) > 0),
+                    primary_error_code TEXT NOT NULL CHECK (length(primary_error_code) > 0),
+                    last_activity_at_ms INTEGER NOT NULL CHECK (last_activity_at_ms >= 0),
+                    first_seen_at_ms INTEGER NOT NULL CHECK (first_seen_at_ms >= 0),
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+                    PRIMARY KEY (ledger_epoch, root_session_id),
+                    FOREIGN KEY (root_session_id) REFERENCES threads(thread_id)
+                 );
+                 CREATE TABLE usage_session_quarantine_sources (
+                    ledger_epoch INTEGER NOT NULL CHECK (ledger_epoch > 0),
+                    root_session_id TEXT NOT NULL CHECK (length(root_session_id) > 0),
+                    source_file_id INTEGER NOT NULL CHECK (source_file_id > 0),
+                    file_generation INTEGER NOT NULL CHECK (file_generation > 0),
+                    device_id INTEGER NOT NULL CHECK (device_id >= 0),
+                    inode INTEGER NOT NULL CHECK (inode >= 0),
+                    observed_size INTEGER NOT NULL CHECK (observed_size >= 0),
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+                    PRIMARY KEY (ledger_epoch, root_session_id, source_file_id),
+                    FOREIGN KEY (ledger_epoch, root_session_id)
+                        REFERENCES usage_session_quarantine(ledger_epoch, root_session_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (source_file_id) REFERENCES source_files(source_file_id)
+                 );",
+            )
+            .unwrap();
         // Promote the compact fixture to the v11 source-aware canonical
         // columns. The real migration performs this transformation before
         // runtime code executes; this local fixture keeps legacy insert
