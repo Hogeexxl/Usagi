@@ -328,17 +328,6 @@ pub struct SourceStorage {
     ledger: Option<Arc<Ledger>>,
 }
 
-/// The fixed Codex compatibility request.  It carries only source data and
-/// cancellation state; the storage bridge retains the Ledger and invokes the
-/// mature v10 worker internally.
-pub(crate) struct CodexCompatRequest<'a> {
-    pub(crate) codex_home: &'a Path,
-    pub(crate) state_index_path: &'a Path,
-    pub(crate) session_index_path: &'a Path,
-    pub(crate) global_state_path: &'a Path,
-    pub(crate) cancellation: &'a AtomicBool,
-}
-
 impl fmt::Debug for SourceStorage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -430,31 +419,6 @@ impl SourceStorage {
         Ok(())
     }
 
-    /// Run the fixed v10 Codex worker without presenting a false single
-    /// transaction boundary. The mature worker owns its existing commit
-    /// sequence; this facade only enforces source binding and keeps the
-    /// Ledger inside the storage boundary.
-    pub(crate) fn run_codex_compat(
-        &self,
-        request: CodexCompatRequest<'_>,
-    ) -> Result<(), SourceStorageError> {
-        self.ensure_codex_home(request.codex_home)?;
-        if self.ledger.is_none() {
-            return Err(SourceStorageError::NotImplemented);
-        }
-        let worker = crate::scanner::MetadataWorker::for_codex_compat(
-            request.codex_home,
-            crate::scanner::CodexMetadata::with_paths(
-                request.state_index_path,
-                request.session_index_path,
-                request.global_state_path,
-            ),
-        );
-        worker
-            .run_round_with_source_storage(self, request.cancellation)
-            .map_err(SourceStorageError::CompatibilityOperationFailed)
-    }
-
     pub fn load_usage_epoch(&self) -> Result<Option<SourceUsageEpochState>, SourceStorageError> {
         let Some(ledger) = self.ledger.as_ref() else {
             return Err(SourceStorageError::NotImplemented);
@@ -513,9 +477,10 @@ impl SourceStorage {
 }
 
 impl crate::scanner::MetadataWorker {
-    /// Execute the existing v10 pipeline from the storage boundary. The
-    /// adapter-facing path receives only this opaque storage capability; the
-    /// Ledger never crosses back into scanner/adapter code.
+    /// Execute the transitional Codex algorithms from the source-bound
+    /// storage capability. Reads still reuse the mature Ledger projections,
+    /// while every durable Codex mutation is now committed by SourceWriteTxn;
+    /// there is no second legacy BEGIN IMMEDIATE/COMMIT seam.
     pub(crate) fn run_round_with_source_storage(
         &self,
         storage: &SourceStorage,
