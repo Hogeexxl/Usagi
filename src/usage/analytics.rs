@@ -1,16 +1,13 @@
-use rusqlite::{TransactionBehavior, params_from_iter, types::Value};
+//! Source-neutral model and project usage distributions.
+
+use rusqlite::{params_from_iter, types::Value};
 
 use crate::{
-    range::ResolvedDay,
     storage::{Ledger, StorageError},
+    usage::ledger::UsageLedgerError,
 };
 
-use super::{
-    aggregate::{AggregateError, TimeRange, UsageFilter},
-    ledger::UsageLedgerError,
-};
-
-pub const SKILL_USAGE_PARSER_VERSION: i64 = 11;
+use super::aggregate::{AggregateError, TimeRange, UsageFilter};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistributionCostStatus {
@@ -59,57 +56,23 @@ pub struct ProjectDistributionRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkillCount {
-    pub skill_name: String,
-    pub count: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkillDayUsage {
-    pub date: String,
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub total: i64,
-    pub skills: Vec<SkillCount>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkillsUsage {
-    pub ready: bool,
-    pub days: Vec<SkillDayUsage>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalyticsSnapshot<T> {
     pub data_revision: i64,
     pub value: T,
 }
 
-fn snapshot_meta(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(i64, i64, i64), UsageLedgerError> {
-    let values = transaction
-        .query_row(
-            "SELECT app.data_revision,sue.active_epoch,sue.active_parser_version
-             FROM app_meta app
-             JOIN source_usage_epochs sue ON sue.source='codex'
-             WHERE app.id=1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
+fn snapshot_meta(connection: &rusqlite::Connection) -> Result<i64, UsageLedgerError> {
+    let value = connection
+        .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .map_err(StorageError::sqlite)?;
-    if values.0 < 0 || values.1 < 0 || values.2 < 0 {
+    if value < 0 {
         return Err(UsageLedgerError::Invalid(
             "invalid analytics snapshot metadata",
         ));
     }
-    Ok(values)
+    Ok(value)
 }
 
 fn scoped_where(
@@ -253,40 +216,37 @@ pub fn model_distribution_snapshot(
     range: TimeRange,
     filter: &UsageFilter,
 ) -> Result<AnalyticsSnapshot<Vec<ModelDistributionRow>>, UsageLedgerError> {
-    let mut connection = ledger.connection()?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(StorageError::sqlite)?;
-    let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
-    let (sql, values) = model_distribution_query(range, filter);
-    let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
-    let rows = statement
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(StorageError::sqlite)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(StorageError::sqlite)?;
-    let value = rows
-        .into_iter()
-        .map(|(model, tokens, cost, unknown, count)| {
-            Ok(ModelDistributionRow {
-                model,
-                usage: distribution_usage(tokens, cost, unknown, count)?,
+    ledger.with_read_transaction(|transaction| {
+        let data_revision = snapshot_meta(transaction)?;
+        let (sql, values) = model_distribution_query(range, filter);
+        let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
+        let rows = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
             })
+            .map_err(StorageError::sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StorageError::sqlite)?;
+        let value = rows
+            .into_iter()
+            .map(|(model, tokens, cost, unknown, count)| {
+                Ok(ModelDistributionRow {
+                    model,
+                    usage: distribution_usage(tokens, cost, unknown, count)?,
+                })
+            })
+            .collect::<Result<Vec<_>, UsageLedgerError>>()?;
+        drop(statement);
+        Ok(AnalyticsSnapshot {
+            data_revision,
+            value,
         })
-        .collect::<Result<Vec<_>, UsageLedgerError>>()?;
-    drop(statement);
-    transaction.commit().map_err(StorageError::sqlite)?;
-    Ok(AnalyticsSnapshot {
-        data_revision,
-        value,
     })
 }
 
@@ -295,250 +255,48 @@ pub fn project_distribution_snapshot(
     range: TimeRange,
     filter: &UsageFilter,
 ) -> Result<AnalyticsSnapshot<Vec<ProjectDistributionRow>>, UsageLedgerError> {
-    let mut connection = ledger.connection()?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(StorageError::sqlite)?;
-    let (data_revision, _active_epoch, _) = snapshot_meta(&transaction)?;
-    let (sql, values) = project_distribution_query(range, filter);
-    let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
-    let rows = statement
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-            ))
-        })
-        .map_err(StorageError::sqlite)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(StorageError::sqlite)?;
-    let value = rows
-        .into_iter()
-        .map(|(kind, name, path, tokens, cost, unknown, count)| {
-            let identity = match (kind.as_str(), name, path) {
-                ("project", Some(project_name), Some(project_path)) => {
-                    ProjectDistributionIdentity::Project {
-                        project_name,
-                        project_path,
-                    }
-                }
-                ("projectless", _, _) => ProjectDistributionIdentity::Projectless,
-                _ => ProjectDistributionIdentity::Unknown,
-            };
-            Ok(ProjectDistributionRow {
-                identity,
-                usage: distribution_usage(tokens, cost, unknown, count)?,
-            })
-        })
-        .collect::<Result<Vec<_>, UsageLedgerError>>()?;
-    drop(statement);
-    transaction.commit().map_err(StorageError::sqlite)?;
-    Ok(AnalyticsSnapshot {
-        data_revision,
-        value,
-    })
-}
-
-pub fn skills_usage_snapshot(
-    ledger: &Ledger,
-    days: &[ResolvedDay],
-    filter: &UsageFilter,
-) -> Result<AnalyticsSnapshot<SkillsUsage>, UsageLedgerError> {
-    let mut connection = ledger.connection()?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(StorageError::sqlite)?;
-    let (data_revision, active_epoch, active_parser) = snapshot_meta(&transaction)?;
-    let ready = active_epoch > 0 && active_parser >= SKILL_USAGE_PARSER_VERSION;
-    let mut output = Vec::with_capacity(days.len());
-    for day in days {
-        let range = TimeRange::new(day.start_ms, day.end_ms)?;
-        let (where_clause, values) = scoped_where("se", "root", range, filter);
-        let mut skills = if ready {
-            let sql = format!(
-                "SELECT se.skill_name,COUNT(*) FROM source_usage_epochs sue
-                 CROSS JOIN skill_usage_events se
-                 LEFT JOIN threads root ON root.thread_id=se.root_session_id
-                 WHERE sue.source='codex' AND sue.active_epoch=se.ledger_epoch
-                   AND {where_clause} GROUP BY se.skill_name
-                 ORDER BY COUNT(*) DESC,se.skill_name ASC"
-            );
-            let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
-            statement
-                .query_map(params_from_iter(values.iter()), |row| {
-                    Ok(SkillCount {
-                        skill_name: row.get(0)?,
-                        count: row.get(1)?,
-                    })
-                })
-                .map_err(StorageError::sqlite)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(StorageError::sqlite)?
-        } else {
-            Vec::new()
-        };
-        skills.sort_by(|left, right| {
-            right
-                .count
-                .cmp(&left.count)
-                .then_with(|| left.skill_name.cmp(&right.skill_name))
-        });
-        let total = skills.iter().try_fold(0_i64, |sum, row| {
-            if row.count < 0 {
-                return Err(UsageLedgerError::Aggregate(
-                    AggregateError::InvariantViolation,
-                ));
-            }
-            sum.checked_add(row.count)
-                .ok_or(UsageLedgerError::Aggregate(
-                    AggregateError::ArithmeticOverflow,
+    ledger.with_read_transaction(|transaction| {
+        let data_revision = snapshot_meta(transaction)?;
+        let (sql, values) = project_distribution_query(range, filter);
+        let mut statement = transaction.prepare(&sql).map_err(StorageError::sqlite)?;
+        let rows = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
-        })?;
-        output.push(SkillDayUsage {
-            date: day.date.clone(),
-            start_ms: day.start_ms,
-            end_ms: day.end_ms,
-            total,
-            skills,
-        });
-    }
-    transaction.commit().map_err(StorageError::sqlite)?;
-    Ok(AnalyticsSnapshot {
-        data_revision,
-        value: SkillsUsage {
-            ready,
-            days: output,
-        },
+            })
+            .map_err(StorageError::sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StorageError::sqlite)?;
+        let value = rows
+            .into_iter()
+            .map(|(kind, name, path, tokens, cost, unknown, count)| {
+                let identity = match (kind.as_str(), name, path) {
+                    ("project", Some(project_name), Some(project_path)) => {
+                        ProjectDistributionIdentity::Project {
+                            project_name,
+                            project_path,
+                        }
+                    }
+                    ("projectless", _, _) => ProjectDistributionIdentity::Projectless,
+                    _ => ProjectDistributionIdentity::Unknown,
+                };
+                Ok(ProjectDistributionRow {
+                    identity,
+                    usage: distribution_usage(tokens, cost, unknown, count)?,
+                })
+            })
+            .collect::<Result<Vec<_>, UsageLedgerError>>()?;
+        drop(statement);
+        Ok(AnalyticsSnapshot {
+            data_revision,
+            value,
+        })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use crate::source::SourceId;
-    use crate::storage::LedgerOptions;
-
-    use super::*;
-
-    fn ledger_with_active_parser(parser_version: i64) -> (Ledger, PathBuf) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("usagi-s07-analytics-{unique}"));
-        fs::create_dir_all(&root).unwrap();
-        let ledger = Ledger::open(LedgerOptions::new(
-            root.join("mu.sqlite3"),
-            root.join("codex"),
-        ))
-        .unwrap();
-        ledger
-            .connection()
-            .unwrap()
-            .execute(
-                "UPDATE source_usage_epochs
-                 SET active_epoch=1,active_parser_version=?1
-                 WHERE source='codex'",
-                [parser_version],
-            )
-            .unwrap();
-        (ledger, root)
-    }
-
-    #[test]
-    fn t_s07_002_skills_ready_requires_parser_v11() {
-        assert_eq!(SKILL_USAGE_PARSER_VERSION, 11);
-        for (parser_version, expected_ready) in [(10, false), (11, true)] {
-            let (ledger, root) = ledger_with_active_parser(parser_version);
-            let snapshot = skills_usage_snapshot(&ledger, &[], &UsageFilter::default()).unwrap();
-            assert_eq!(snapshot.value.ready, expected_ready);
-            drop(ledger);
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn t_s07_003_skills_usage_source_filter() {
-        let (ledger, root) = ledger_with_active_parser(11);
-        let connection = ledger.connection().unwrap();
-        connection
-            .execute(
-                "INSERT INTO threads(
-                    thread_id,source,native_session_id,root_session_id,agent_role,
-                    project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
-                 ) VALUES ('thread-codex','codex','thread-codex','thread-codex','main','project',0,'complete',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO source_files(
-                    source_file_id,thread_id,current_path,source_area,
-                    device_id,inode,file_generation,observed_size,observed_mtime_ns,
-                    file_status,last_seen_at_ms
-                 ) VALUES (1,'thread-codex','/path','sessions',1,1,1,100,0,'present',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO skill_usage_events(
-                    ledger_epoch,source_file_id,file_generation,source_start_offset,
-                    source_end_offset,occurred_at_ms,thread_id,root_session_id,model,
-                    skill_name,created_at_ms
-                 ) VALUES (1,1,1,0,10,100,'thread-codex','thread-codex','gpt-4','test-skill',100)",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-
-        let days = vec![ResolvedDay {
-            date: "2026-01-01".into(),
-            start_ms: 0,
-            end_ms: 200,
-        }];
-
-        // 1. All sources (empty filter)
-        let snapshot_all = skills_usage_snapshot(&ledger, &days, &UsageFilter::default()).unwrap();
-        assert_eq!(snapshot_all.value.days[0].skills.len(), 1);
-        assert_eq!(
-            snapshot_all.value.days[0].skills[0].skill_name,
-            "test-skill"
-        );
-
-        // 2. Matching source ('codex')
-        let snapshot_codex = skills_usage_snapshot(
-            &ledger,
-            &days,
-            &UsageFilter::default().with_sources(vec![SourceId::CODEX]),
-        )
-        .unwrap();
-        assert_eq!(snapshot_codex.value.days[0].skills.len(), 1);
-        assert_eq!(
-            snapshot_codex.value.days[0].skills[0].skill_name,
-            "test-skill"
-        );
-
-        // 3. Mismatched source ('claude_code') -> returns empty
-        let snapshot_claude = skills_usage_snapshot(
-            &ledger,
-            &days,
-            &UsageFilter::default().with_sources(vec![SourceId::new("claude_code").unwrap()]),
-        )
-        .unwrap();
-        assert_eq!(snapshot_claude.value.days[0].skills.len(), 0);
-
-        drop(ledger);
-        fs::remove_dir_all(root).unwrap();
-    }
 }

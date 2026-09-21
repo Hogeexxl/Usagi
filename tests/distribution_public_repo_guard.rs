@@ -24,6 +24,7 @@ fn tracked_paths(root: &Path) -> Vec<PathBuf> {
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| root.join(String::from_utf8_lossy(path).as_ref()))
+        .filter(|path| path.exists())
         .collect()
 }
 

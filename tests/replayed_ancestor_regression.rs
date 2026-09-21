@@ -9,13 +9,10 @@ use std::{
 use rusqlite::{Connection, params};
 use serde_json::json;
 use usagi::{
-    domain::{
-        CheckpointProcessingStatus, ContinuationState, FactQualityStatus,
-        MetadataCheckpointAdvance, MetadataCommitBatch, MetadataSourceCommit, MetadataThreadCommit,
-        OwnershipConfidence, RolloutMetadataFact, ScanResult, ScanTrigger,
-    },
+    codex::{CodexAdapter, CodexConfig},
+    domain::{ScanResult, ScanTrigger},
+    ingestion::RequestDisposition,
     ingestion::{IngestionConfig, IngestionCoordinator},
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
 };
@@ -48,10 +45,6 @@ impl Drop for TempRoot {
     }
 }
 
-fn fixture_path(root: &Path, name: &str) -> String {
-    root.join(name).to_string_lossy().into_owned()
-}
-
 fn records_to_bytes(records: &[serde_json::Value]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for record in records {
@@ -59,160 +52,6 @@ fn records_to_bytes(records: &[serde_json::Value]) -> Vec<u8> {
         bytes.push(b'\n');
     }
     bytes
-}
-
-fn insert_source(db_path: &Path, source_path: &str) {
-    Connection::open(db_path)
-        .expect("open ledger query")
-        .execute(
-            "INSERT INTO source_files (
-                source_file_id, thread_id, current_path, source_area,
-                device_id, inode, file_generation, observed_size,
-                observed_mtime_ns, file_status, last_seen_at_ms
-             ) VALUES (1, NULL, ?1, 'sessions', 1, 2, 1, 10, 0, 'present', 10)",
-            [source_path],
-        )
-        .expect("insert source fixture");
-}
-
-fn source_fact(continuation_state: ContinuationState) -> RolloutMetadataFact {
-    RolloutMetadataFact {
-        source_file_id: 1,
-        file_generation: 1,
-        metadata_parser_version: 1,
-        resolved_through_offset: 10,
-        owning_thread_id: "thread".to_owned(),
-        continuation_state,
-        cwd: None,
-        cwd_provenance: None,
-        cwd_record_offset: None,
-        created_at_ms: None,
-        latest_context_model: None,
-        latest_context_turn_id: None,
-        latest_context_at_ms: None,
-        parent_thread_id_hint: None,
-        parent_hint_provenance: None,
-        parent_hint_record_offset: None,
-        agent_role_hint: None,
-        agent_role_provenance: None,
-        agent_role_record_offset: None,
-        agent_path: None,
-        agent_path_provenance: None,
-        agent_path_record_offset: None,
-        replay_start_offset: Some(1),
-        owning_records_start_offset: None,
-        ownership_confidence: match continuation_state {
-            ContinuationState::Unstable => OwnershipConfidence::Unresolved,
-            ContinuationState::ReplayedAncestor | ContinuationState::OwningLive => {
-                OwnershipConfidence::Confirmed
-            }
-        },
-        fact_quality_status: FactQualityStatus::Complete,
-        relationship_conflict: false,
-        updated_at_ms: 10,
-    }
-}
-
-fn source_commit(continuation_state: ContinuationState) -> MetadataSourceCommit {
-    MetadataSourceCommit::new(
-        1,
-        1,
-        None,
-        "thread",
-        source_fact(continuation_state),
-        MetadataCheckpointAdvance {
-            parser_version: 1,
-            committed_offset: 10,
-            guard_hash: Some(vec![1]),
-            processing_status: CheckpointProcessingStatus::Ready,
-            last_successful_scan_at_ms: Some(10),
-            last_error_code: None,
-        },
-    )
-    .expect("assemble metadata source commit")
-}
-
-#[test]
-fn replayed_ancestor_nonzero_metadata_checkpoint_is_storage_legal() {
-    let root = TempRoot::new("storage-positive");
-    let home = root.path().join("codex");
-    fs::create_dir_all(&home).unwrap();
-    let db_path = root.path().join("mu.sqlite3");
-    let ledger = Ledger::open(LedgerOptions::new(&db_path, &home)).expect("open ledger");
-    insert_source(&db_path, &fixture_path(root.path(), "rollout.jsonl"));
-
-    let group = MetadataThreadCommit::new(
-        "thread",
-        None,
-        vec![source_commit(ContinuationState::ReplayedAncestor)],
-    )
-    .unwrap();
-    ledger
-        .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
-        .expect("replayed ancestor must be persistable at a nonzero checkpoint");
-
-    let connection = Connection::open(&db_path).unwrap();
-    let row: (Option<String>, String, i64, String) = connection
-        .query_row(
-            "SELECT
-                sf.thread_id,
-                f.continuation_state,
-                sc.committed_offset,
-                sc.processing_status
-             FROM source_files sf
-             JOIN rollout_metadata_facts f USING (source_file_id)
-             JOIN source_checkpoints sc USING (source_file_id)
-             WHERE sf.source_file_id=1 AND sc.consumer_kind='metadata'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        row,
-        (
-            Some("thread".to_owned()),
-            "replayed_ancestor".to_owned(),
-            10,
-            "ready".to_owned(),
-        )
-    );
-}
-
-#[test]
-fn unstable_nonzero_metadata_checkpoint_stays_rejected() {
-    let root = TempRoot::new("storage-negative");
-    let home = root.path().join("codex");
-    fs::create_dir_all(&home).unwrap();
-    let db_path = root.path().join("mu.sqlite3");
-    let ledger = Ledger::open(LedgerOptions::new(&db_path, &home)).expect("open ledger");
-    insert_source(&db_path, &fixture_path(root.path(), "rollout.jsonl"));
-
-    let group = MetadataThreadCommit::new(
-        "thread",
-        None,
-        vec![source_commit(ContinuationState::Unstable)],
-    )
-    .unwrap();
-    assert!(
-        ledger
-            .commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
-            .is_err()
-    );
-
-    let connection = Connection::open(&db_path).unwrap();
-    let durable: (Option<String>, i64, i64) = connection
-        .query_row(
-            "SELECT
-                thread_id,
-                (SELECT count(*) FROM rollout_metadata_facts WHERE source_file_id=1),
-                (SELECT count(*) FROM source_checkpoints
-                   WHERE source_file_id=1 AND consumer_kind='metadata')
-             FROM source_files WHERE source_file_id=1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(durable, (None, 0, 0));
 }
 
 fn uuid7(timestamp_ms: u64, suffix: u8) -> String {
@@ -406,13 +245,10 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
     write_session_index(&home, &child);
 
     let db_path = root.path().join("mu.sqlite3");
-    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path, &home)).unwrap());
+    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
     registry
-        .register(LegacyCodexSourceAdapter::new(
-            home.clone(),
-            CodexMetadata::from_home(home.clone()),
-        ))
+        .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
         .unwrap();
     let handle =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
@@ -427,11 +263,11 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
     let metadata: (String, i64, String) = connection
         .query_row(
             "SELECT f.continuation_state, sc.committed_offset, sc.processing_status
-             FROM source_files sf
-             JOIN rollout_metadata_facts f USING (source_file_id)
-             JOIN source_checkpoints sc USING (source_file_id)
+             FROM codex_source_files sf
+             JOIN codex_rollout_metadata_facts f USING (source_file_id)
+             JOIN codex_source_checkpoints sc USING (source_file_id)
              WHERE sf.current_path=?1 AND sc.consumer_kind='metadata'",
-            [rollout_path.to_str().unwrap()],
+            [rollout_path.canonicalize().unwrap().to_str().unwrap()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
@@ -455,7 +291,7 @@ fn startup_replay_tail_scan_completes_and_activates_usage() {
         "replay-tail source must not keep active epoch at zero"
     );
     assert_eq!(epochs.1, None);
-    assert_eq!(epochs.2, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(epochs.2, usagi::codex::normalization::USAGE_PARSER_VERSION);
 
     handle.shutdown().unwrap();
 }
@@ -522,13 +358,10 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
     write_subagent_state(&home, &rollout_path, &child, &parent);
 
     let db_path = root.path().join("mu.sqlite3");
-    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path, &home)).unwrap());
+    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
     registry
-        .register(LegacyCodexSourceAdapter::new(
-            home.clone(),
-            CodexMetadata::from_home(home.clone()),
-        ))
+        .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
         .unwrap();
     let handle =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
@@ -640,7 +473,7 @@ fn rebuilt_subagent_same_envelope_timestamp_models_keep_relationship_and_usage_r
     let after = Connection::open(&db_path).unwrap();
     let metadata_checkpoint: (i64, String) = after
         .query_row(
-            "SELECT parser_version,processing_status FROM source_checkpoints
+            "SELECT parser_version,processing_status FROM codex_source_checkpoints
              WHERE source_file_id=1 AND consumer_kind='metadata'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),

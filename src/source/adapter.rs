@@ -1,33 +1,29 @@
-//! Source adapter and source-bound storage contracts.
+//! Source-neutral adapter context and source-bound canonical transaction.
+//!
+//! A source adapter receives a `SourceRunContext`; all durable writes then
+//! flow through the source-fixed `SourceStorage`/`SourceWriteTxn` seam.  The
+//! Codex implementation uses the private-state callback exposed here, while
+//! canonical tables, usage epochs, and revisions remain owned by this module.
 
 use std::{
     fmt,
-    path::Path,
     sync::{Arc, MutexGuard, atomic::AtomicBool},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    domain::{
-        MetadataThreadCommit, Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState,
-    },
-    storage::{Ledger, RevisionPublisher, StorageErrorKind},
-    usage::{EventKind, NormalizedTokenUsage},
+    domain::{Patch, ResolvedThreadPatch, SessionIdentity, SourceUsageEpochState},
+    storage::{Ledger, RevisionPublisher, StorageError, StorageErrorKind},
+    usage::{NormalizedTokenUsage, event::EventKind},
 };
 
 use super::{SourceDescriptor, SourceId};
 
-/// Whether an adapter can run for the current invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdapterAvailability {
     Available,
-    /// The source is known but has no usable installation/configuration for
-    /// this invocation.  The coordinator may represent this as a skipped
-    /// source run.
     Unavailable(String),
-    /// A concise spelling for sources which are not installed.
     NotInstalled,
 }
 
@@ -41,8 +37,6 @@ impl AdapterAvailability {
     }
 }
 
-/// Adapter-level failure.  Source-specific diagnostics remain owned by the
-/// adapter; the coordinator can map this to a stable source-run error code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceAdapterError {
     code: &'static str,
@@ -78,12 +72,8 @@ impl fmt::Display for SourceAdapterError {
 
 impl std::error::Error for SourceAdapterError {}
 
-/// Result returned by one source adapter scan.
 pub type SourceRunResult = Result<(), SourceAdapterError>;
 
-/// Durable outcome/diagnostic for one source invocation. Reports are kept in
-/// memory by the ingestion handle during Phase 2; v11 will persist child
-/// lifecycle rows separately.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceRunReport {
     pub scan_id: String,
@@ -151,17 +141,13 @@ impl SourceRunState {
     }
 }
 
-/// The minimum adapter interface.  A source is fixed by the descriptor and
-/// cannot be selected by a scan operation or a canonical write DTO.
 pub trait SourceAdapter: Send + Sync + 'static {
     fn descriptor(&self) -> &SourceDescriptor;
-
     fn availability(&self) -> Result<AdapterAvailability, SourceAdapterError>;
-
     fn run_scan(&self, context: &SourceRunContext, cancellation: &AtomicBool) -> SourceRunResult;
 }
 
-impl<T> SourceAdapter for std::sync::Arc<T>
+impl<T> SourceAdapter for Arc<T>
 where
     T: SourceAdapter + ?Sized,
 {
@@ -178,7 +164,6 @@ where
     }
 }
 
-/// Error returned while constructing a source run context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceContextError {
     EmptyScanId,
@@ -206,7 +191,6 @@ impl fmt::Display for SourceContextError {
 
 impl std::error::Error for SourceContextError {}
 
-/// Core-created context passed to one adapter invocation.
 #[derive(Clone, Debug)]
 pub struct SourceRunContext {
     scan_id: String,
@@ -214,13 +198,7 @@ pub struct SourceRunContext {
     storage: SourceStorage,
 }
 
-#[allow(dead_code)]
 impl SourceRunContext {
-    /// Construct a context for a source already selected by the registry.
-    ///
-    /// The constructor is crate-private so adapters cannot manufacture a
-    /// context for an arbitrary source.  The coordinator passes the
-    /// descriptor belonging to the registered adapter instead.
     pub(crate) fn new(
         scan_id: impl Into<String>,
         descriptor: &SourceDescriptor,
@@ -269,46 +247,29 @@ impl SourceRunContext {
     }
 }
 
-/// Errors from the source-bound storage seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceStorageError {
-    /// The source storage runtime is unavailable for this capability.
     NotImplemented,
     TransactionClosed,
-    /// A mutation failed earlier in this transaction.  The transaction is
-    /// deliberately poisoned so a caller cannot ignore the error and commit
-    /// a partial canonical/private-state batch.
     TransactionPoisoned,
     SourceMismatch,
-    /// A v10 storage failure, retaining the storage category so adapters can
-    /// preserve the original failure semantics at their boundary.
     Storage(StorageErrorKind),
-    /// The v10 schema has no equivalent operation for this mutation yet.
     UnsupportedOperation(&'static str),
-    /// The mature Codex compatibility worker reported its concrete failure;
-    /// this is intentionally not treated as a successful transaction.
-    CompatibilityOperationFailed(&'static str),
     InvalidRequest(String),
 }
 
 impl fmt::Display for SourceStorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotImplemented => formatter.write_str("source storage runtime is not available"),
+            Self::NotImplemented => formatter.write_str("source storage is unavailable"),
             Self::TransactionClosed => formatter.write_str("source write transaction is closed"),
             Self::TransactionPoisoned => {
                 formatter.write_str("source write transaction is poisoned")
             }
-            Self::SourceMismatch => formatter.write_str("source-bound storage invariant violated"),
-            Self::Storage(kind) => write!(formatter, "v10 storage operation failed: {kind:?}"),
+            Self::SourceMismatch => formatter.write_str("source-bound storage mismatch"),
+            Self::Storage(kind) => write!(formatter, "storage operation failed: {kind:?}"),
             Self::UnsupportedOperation(operation) => {
-                write!(
-                    formatter,
-                    "v10 compatibility operation is unavailable: {operation}"
-                )
-            }
-            Self::CompatibilityOperationFailed(code) => {
-                write!(formatter, "Codex compatibility operation failed: {code}")
+                write!(formatter, "unsupported source operation: {operation}")
             }
             Self::InvalidRequest(message) => formatter.write_str(message),
         }
@@ -317,13 +278,7 @@ impl fmt::Display for SourceStorageError {
 
 impl std::error::Error for SourceStorageError {}
 
-/// Source-bound storage capability exposed to adapters.
-///
-/// The optional ledger is a deliberately small v10 compatibility bridge.  It
-/// lets the coordinator construct a capability tied to the existing database
-/// without exposing unrestricted SQL or source selection to an adapter.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct SourceStorage {
     scan_id: String,
     source: SourceId,
@@ -336,14 +291,10 @@ impl fmt::Debug for SourceStorage {
             .debug_struct("SourceStorage")
             .field("scan_id", &self.scan_id)
             .field("source", &self.source)
-            .field("has_v10_bridge", &self.ledger.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// Core-owned factory that binds the same storage capability shape to every
-/// registry descriptor. The descriptor supplies identity; adapters cannot
-/// choose a different source or backend.
 #[derive(Clone)]
 pub(crate) struct SourceStorageFactory {
     ledger: Arc<Ledger>,
@@ -368,7 +319,6 @@ impl SourceStorageFactory {
     }
 }
 
-#[allow(dead_code)]
 impl SourceStorage {
     pub(crate) fn new(scan_id: impl Into<String>, source: SourceId) -> Self {
         Self {
@@ -398,29 +348,8 @@ impl SourceStorage {
         &self.source
     }
 
-    /// Create the fixed-Codex private ingestion facade allowed by Spec 01.
-    /// The facade never exposes the underlying Ledger and cannot select an
-    /// arbitrary canonical source.
-    pub(crate) fn legacy_codex_ingestion(
-        &self,
-    ) -> Result<LegacyCodexIngestionStorage<'_>, SourceStorageError> {
-        if self.source != SourceId::CODEX {
-            return Err(SourceStorageError::SourceMismatch);
-        }
-        let ledger = self
-            .ledger
-            .as_deref()
-            .ok_or(SourceStorageError::NotImplemented)?;
-        Ok(LegacyCodexIngestionStorage { ledger })
-    }
-
     pub fn load_usage_epoch(&self) -> Result<Option<SourceUsageEpochState>, SourceStorageError> {
-        let Some(ledger) = self.ledger.as_ref() else {
-            return Err(SourceStorageError::NotImplemented);
-        };
-        let connection = ledger
-            .connection()
-            .map_err(|error| SourceStorageError::Storage(error.kind()))?;
+        let connection = self.connection()?;
         let row = connection
             .query_row(
                 "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
@@ -436,9 +365,7 @@ impl SourceStorage {
                 },
             )
             .optional()
-            .map_err(|error| {
-                SourceStorageError::Storage(crate::storage::StorageError::sqlite(error).kind())
-            })?;
+            .map_err(map_sql_error)?;
         row.map(|(active, build, parser, build_parser)| {
             SourceUsageEpochState::new(self.source.clone(), active, build, parser, build_parser)
                 .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))
@@ -446,71 +373,103 @@ impl SourceStorage {
         .transpose()
     }
 
-    /// Begin the source-bound write seam. The returned transaction owns the
-    /// SQLite `BEGIN IMMEDIATE` boundary; all mutation methods remain bound to
-    /// this storage's source until `commit` (or rollback on drop).
     pub fn begin_write_txn(&self) -> Result<SourceWriteTxn<'_>, SourceStorageError> {
-        let Some(ledger) = self.ledger.as_ref() else {
-            return Err(SourceStorageError::NotImplemented);
-        };
-        let guard = ledger
-            .connection()
-            .map_err(|error| SourceStorageError::Storage(error.kind()))?;
-        guard.execute_batch("BEGIN IMMEDIATE").map_err(|error| {
-            SourceStorageError::Storage(crate::storage::StorageError::sqlite(error).kind())
-        })?;
+        let mut connection = self.connection()?;
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(map_sql_error)?;
         Ok(SourceWriteTxn {
             scan_id: self.scan_id.clone(),
             source: self.source.clone(),
-            connection: Some(SourceWriteConnection::Locked(guard)),
-            revision_publisher: Some(ledger.revision_publisher()),
+            connection: Some(SourceWriteConnection::Locked(connection)),
+            revision_publisher: self
+                .ledger
+                .as_ref()
+                .map(|ledger| ledger.revision_publisher()),
             committed: false,
             poisoned: false,
-            data_changed: false,
+            data_revision_bumped: false,
+            status_revision_bumped: false,
         })
+    }
+
+    pub(crate) fn with_private_read<T, E>(
+        &self,
+        operation: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<SourceStorageError>,
+    {
+        let connection = self.connection().map_err(E::from)?;
+        let mut guard = QueryOnlyGuard::new(&connection).map_err(E::from)?;
+        let result = operation(&connection);
+        let restore = guard.restore();
+        match restore {
+            Ok(()) => result,
+            Err(error) => Err(E::from(error)),
+        }
+    }
+
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>, SourceStorageError> {
+        self.ledger
+            .as_ref()
+            .ok_or(SourceStorageError::NotImplemented)?
+            .connection()
+            .map_err(|error| SourceStorageError::Storage(error.kind()))
     }
 }
 
-/// Fixed-Codex private ingestion facade. This is intentionally crate-private:
-/// it may reuse the mature Codex read/private-state pipeline, but it never
-/// exposes the unrestricted Ledger to the Adapter and cannot choose a source.
-/// Every durable mutation reached through that pipeline is still committed by
-/// a source-fixed SourceWriteTxn.
-pub(crate) struct LegacyCodexIngestionStorage<'a> {
-    ledger: &'a Ledger,
+/// Guard that makes a read closure physically read-only.  Normal return paths
+/// call `restore`; Drop is only a best-effort panic/unwind fallback.
+struct QueryOnlyGuard<'a> {
+    connection: &'a Connection,
+    previous: bool,
+    armed: bool,
 }
 
-impl LegacyCodexIngestionStorage<'_> {
-    pub(crate) fn ensure_codex_home(&self, codex_home: &Path) -> Result<(), SourceStorageError> {
-        self.ledger
-            .ensure_source_ready()
-            .map_err(|error| SourceStorageError::Storage(error.kind()))?;
-        if Ledger::codex_home_fingerprint(codex_home)
-            != self.ledger.expected_codex_home_fingerprint()
-        {
-            return Err(SourceStorageError::Storage(StorageErrorKind::SourceChanged));
+impl<'a> QueryOnlyGuard<'a> {
+    fn new(connection: &'a Connection) -> Result<Self, SourceStorageError> {
+        let previous: i64 = connection
+            .pragma_query_value(None, "query_only", |row| row.get(0))
+            .map_err(map_sql_error)?;
+        connection
+            .pragma_update(None, "query_only", true)
+            .map_err(map_sql_error)?;
+        Ok(Self {
+            connection,
+            previous: previous != 0,
+            armed: true,
+        })
+    }
+
+    fn restore(&mut self) -> Result<(), SourceStorageError> {
+        if self.armed {
+            self.connection
+                .pragma_update(None, "query_only", self.previous)
+                .map_err(map_sql_error)?;
+            self.armed = false;
         }
         Ok(())
     }
+}
 
-    pub(crate) fn run_round(
-        &self,
-        worker: &crate::scanner::MetadataWorker,
-        cancellation: &AtomicBool,
-    ) -> Result<(), &'static str> {
-        worker.run_round_with_legacy_codex_storage(self.ledger, cancellation)
+impl Drop for QueryOnlyGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed && std::thread::panicking() {
+            let _ = self
+                .connection
+                .pragma_update(None, "query_only", self.previous);
+            self.armed = false;
+        }
     }
 }
 
-/// Whether canonical usage is written to the active or shadow-build epoch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UsageWriteTarget {
-    Active,
-    Build,
+pub(crate) enum CanonicalWriteOutcome {
+    Inserted,
+    Duplicate,
 }
 
-/// Canonical usage write DTO.  Physical provenance and source/epoch selection
-/// deliberately do not appear here; those are owned by the bound transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalUsageEventWrite {
     pub event_id: String,
@@ -523,20 +482,31 @@ pub struct CanonicalUsageEventWrite {
     pub reasoning_effort: Option<String>,
     pub estimated_cost_nanos_usd: Option<i64>,
     pub usage: NormalizedTokenUsage,
+    pub created_at_ms: i64,
 }
 
-/// Source-bound transaction.  All mutation methods live here; the source is
-/// captured when the transaction is created and is not accepted by any method.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionMutationOutcome {
+    pub visible_changed: bool,
+    pub previous_root_session_id: Option<String>,
+    pub next_root_session_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UsageActivationOutcome {
+    pub active_epoch: i64,
+    pub data_revision: i64,
+    pub visible_changed: bool,
+}
+
 enum SourceWriteConnection<'a> {
     Locked(MutexGuard<'a, Connection>),
-    Legacy(Transaction<'a>),
 }
 
 impl SourceWriteConnection<'_> {
-    fn connection_mut(&mut self) -> &Connection {
+    fn connection(&self) -> &Connection {
         match self {
             Self::Locked(connection) => connection,
-            Self::Legacy(transaction) => transaction,
         }
     }
 }
@@ -548,7 +518,8 @@ pub struct SourceWriteTxn<'a> {
     revision_publisher: Option<RevisionPublisher>,
     committed: bool,
     poisoned: bool,
-    data_changed: bool,
+    data_revision_bumped: bool,
+    status_revision_bumped: bool,
 }
 
 impl fmt::Debug for SourceWriteTxn<'_> {
@@ -558,326 +529,49 @@ impl fmt::Debug for SourceWriteTxn<'_> {
             .field("scan_id", &self.scan_id)
             .field("source", &self.source)
             .field("committed", &self.committed)
+            .field("poisoned", &self.poisoned)
             .finish()
     }
 }
 
-impl SourceWriteTxn<'static> {
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn new(scan_id: impl Into<String>, source: SourceId) -> Self {
-        Self {
-            scan_id: scan_id.into(),
-            source,
-            connection: None,
-            revision_publisher: None,
-            committed: false,
-            poisoned: false,
-            data_changed: false,
-        }
-    }
-}
-
-impl<'a> SourceWriteTxn<'a> {
-    /// Transitional Codex-only constructor used while the mature scanner
-    /// algorithms are retained. The transaction remains source-bound and
-    /// exposes only typed Codex bridges; durable commit and revision
-    /// publication are both owned by SourceWriteTxn::commit().
-    pub(crate) fn begin_legacy_codex(
-        scan_id: impl Into<String>,
-        connection: &'a mut Connection,
-        revision_publisher: Option<RevisionPublisher>,
-    ) -> rusqlite::Result<Self> {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        Ok(Self {
-            scan_id: scan_id.into(),
-            source: SourceId::CODEX,
-            connection: Some(SourceWriteConnection::Legacy(transaction)),
-            revision_publisher,
-            committed: false,
-            poisoned: false,
-            data_changed: false,
-        })
-    }
-
-    pub(crate) fn apply_codex_metadata_group(
-        &mut self,
-        ledger: &Ledger,
-        group: &MetadataThreadCommit,
-    ) -> crate::storage::Result<bool> {
-        let changed = self.apply_codex_storage(|connection| {
-            crate::storage::apply_codex_metadata_group(connection, ledger, group)
-        })?;
-        if changed {
-            self.data_changed = true;
-        }
-        Ok(changed)
-    }
-
-    pub(crate) fn apply_codex_usage_batch(
-        &mut self,
-        ledger: &Ledger,
-        batch: &crate::storage::usage::UsageCommitBatch,
-    ) -> crate::storage::Result<crate::storage::usage::CodexUsageCommitBridgeResult> {
-        let result = self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_usage_batch(connection, ledger, batch)
-        })?;
-        if result.visible_changed {
-            self.data_changed = true;
-        }
-        Ok(result)
-    }
-
-    pub(crate) fn apply_codex_begin_usage_carry(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<()> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_begin_usage_carry(connection, source_file_id, now_ms)
-        })
-    }
-
-    pub(crate) fn apply_codex_resume_usage_carry(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<crate::storage::usage::CarryStepOutcome> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_resume_usage_carry(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_complete_usage_build_source(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> crate::storage::Result<()> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_complete_usage_build_source(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_cleanup_inactive_usage(
-        &mut self,
-        max_rows: usize,
-    ) -> crate::storage::Result<usize> {
-        self.apply_codex_storage(|connection| {
-            crate::storage::usage::apply_codex_cleanup_inactive_usage(connection, max_rows)
-        })
-    }
-
-    fn apply_codex_storage<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
-    ) -> crate::storage::Result<T> {
-        self.require_open()
-            .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
-        let result = {
-            let connection = self
-                .connection_mut()
-                .map_err(|error| crate::storage::StorageError::invalid_state(error.to_string()))?;
-            operation(connection)
-        };
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
-    fn apply_codex_rebuild<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> Result<T, crate::usage::rebuild::RebuildError>,
-    ) -> Result<T, crate::usage::rebuild::RebuildError> {
-        self.require_open().map_err(|_| {
-            crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
-        })?;
-        let result = {
-            let connection = self.connection_mut().map_err(|_| {
-                crate::usage::rebuild::RebuildError::Invalid("source write transaction unavailable")
-            })?;
-            operation(connection)
-        };
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
-    pub(crate) fn apply_codex_rebuild_begin_or_resume(
-        &mut self,
-        target_parser_version: i64,
-        present: &std::collections::BTreeSet<i64>,
-        now_ms: i64,
-    ) -> Result<crate::usage::rebuild::BuildSnapshot, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_begin_or_resume(
-                connection,
-                target_parser_version,
-                present,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_block_source(
-        &mut self,
-        source_file_id: i64,
-        error_code: &str,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_block_source(
-                connection,
-                source_file_id,
-                error_code,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_retry_blocked(
-        &mut self,
-        source_file_id: i64,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_retry_blocked(
-                connection,
-                source_file_id,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_activate(
-        &mut self,
-        present: &std::collections::BTreeSet<i64>,
-    ) -> Result<crate::usage::rebuild::ActivationOutcome, crate::usage::rebuild::RebuildError> {
-        let outcome = self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_activate(connection, present)
-        })?;
-        self.data_changed = true;
-        Ok(outcome)
-    }
-
-    pub(crate) fn apply_codex_rebuild_quarantine_session(
-        &mut self,
-        root_session_id: &str,
-        error_code: &str,
-        now_ms: i64,
-    ) -> Result<usize, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_quarantine_session(
-                connection,
-                root_session_id,
-                error_code,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn apply_codex_rebuild_record_progress(
-        &mut self,
-        progress: &crate::usage::rebuild::SourceProgress,
-    ) -> Result<crate::usage::rebuild::ProgressOutcome, crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_rebuild_record_progress(connection, progress)
-        })
-    }
-
-    pub(crate) fn apply_codex_replace_build_sources(
-        &mut self,
-        parser_version: i64,
-        present: &std::collections::BTreeSet<i64>,
-        invalidated: &std::collections::BTreeSet<i64>,
-        now_ms: i64,
-    ) -> Result<(), crate::usage::rebuild::RebuildError> {
-        self.apply_codex_rebuild(|connection| {
-            crate::usage::rebuild::apply_codex_replace_build_sources(
-                connection,
-                parser_version,
-                present,
-                invalidated,
-                now_ms,
-            )
-        })
-    }
-
-    pub(crate) fn with_codex_private_state<T>(
-        &mut self,
-        operation: impl FnOnce(&Connection) -> crate::storage::Result<T>,
-    ) -> crate::storage::Result<T> {
-        self.apply_codex_storage(operation)
-    }
-
-    pub fn scan_id(&self) -> &str {
-        &self.scan_id
-    }
-
-    pub fn source(&self) -> &SourceId {
+impl SourceWriteTxn<'_> {
+    pub(crate) fn source(&self) -> &SourceId {
         &self.source
     }
 
-    pub fn ensure_usage_epoch(&mut self) -> Result<(), SourceStorageError> {
-        self.mutate(|transaction| transaction.ensure_usage_epoch_inner())
+    pub(crate) fn with_private_state<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<SourceStorageError>,
+    {
+        self.require_open().map_err(E::from)?;
+        let result = operation(self.connection().map_err(E::from)?.connection());
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
-    fn ensure_usage_epoch_inner(&mut self) -> Result<(), SourceStorageError> {
-        self.require_open()?;
-        let source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
-        connection
-            .execute(
-                "INSERT INTO source_usage_epochs(
-                    source,active_epoch,build_epoch,active_parser_version,build_parser_version)
-                 VALUES(?1,0,NULL,0,NULL) ON CONFLICT(source) DO NOTHING",
-                [source.as_str()],
-            )
-            .map_err(map_sql_error)?;
-        Ok(())
-    }
-
-    pub fn upsert_session_metadata(
+    pub(crate) fn upsert_session_metadata_no_revision(
         &mut self,
         identity: &SessionIdentity,
         patch: &ResolvedThreadPatch,
-    ) -> Result<(), SourceStorageError> {
-        self.mutate(|transaction| transaction.upsert_session_metadata_inner(identity, patch))
-    }
-
-    fn upsert_session_metadata_inner(
-        &mut self,
-        identity: &SessionIdentity,
-        patch: &ResolvedThreadPatch,
-    ) -> Result<(), SourceStorageError> {
+    ) -> Result<SessionMutationOutcome, SourceStorageError> {
         self.require_open()?;
-        if identity.source != self.source {
+        if identity.source != self.source
+            || patch.source != self.source
+            || identity.thread_id != patch.thread_id
+            || identity.native_session_id != patch.native_session_id
+        {
             return Err(SourceStorageError::SourceMismatch);
-        }
-        if identity.thread_id != patch.thread_id {
-            return Err(SourceStorageError::InvalidRequest(
-                "session identity and metadata patch thread ids differ".to_owned(),
-            ));
-        }
-        if patch.source != self.source || patch.native_session_id != identity.native_session_id {
-            return Err(SourceStorageError::InvalidRequest(
-                "metadata patch attempts to change canonical session identity".to_owned(),
-            ));
         }
         patch
             .validate()
             .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))?;
-        let bound_source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
+        let connection = self.connection()?.connection();
+        let before = read_session_visibility(connection, &identity.thread_id)?;
         let existing: Option<(String, String)> = connection
             .query_row(
                 "SELECT source,native_session_id FROM threads WHERE thread_id=?1",
@@ -886,9 +580,8 @@ impl<'a> SourceWriteTxn<'a> {
             )
             .optional()
             .map_err(map_sql_error)?;
-        let before = read_session_visibility(connection, &identity.thread_id)?;
         if let Some((source, native)) = existing {
-            if source != bound_source || native != identity.native_session_id {
+            if source != self.source.as_str() || native != identity.native_session_id {
                 return Err(SourceStorageError::InvalidRequest(
                     "canonical session identity conflict".to_owned(),
                 ));
@@ -898,7 +591,7 @@ impl<'a> SourceWriteTxn<'a> {
             let collision: Option<String> = connection
                 .query_row(
                     "SELECT thread_id FROM threads WHERE source=?1 AND native_session_id=?2",
-                    params![bound_source.as_str(), identity.native_session_id.as_str()],
+                    params![self.source.as_str(), identity.native_session_id.as_str()],
                     |row| row.get(0),
                 )
                 .optional()
@@ -912,111 +605,97 @@ impl<'a> SourceWriteTxn<'a> {
         }
         validate_session_relationships(connection, identity, patch)?;
         let after = read_session_visibility(connection, &identity.thread_id)?;
-        if before != after {
+        Ok(SessionMutationOutcome {
+            visible_changed: before != after,
+            previous_root_session_id: before.and_then(|row| row.root_session_id),
+            next_root_session_id: after.and_then(|row| row.root_session_id),
+        })
+    }
+
+    pub fn upsert_session_metadata(
+        &mut self,
+        identity: &SessionIdentity,
+        patch: &ResolvedThreadPatch,
+    ) -> Result<(), SourceStorageError> {
+        let outcome = self.upsert_session_metadata_no_revision(identity, patch)?;
+        if outcome.visible_changed {
             self.bump_data_revision()?;
         }
         Ok(())
     }
 
-    pub fn write_usage(
+    pub(crate) fn write_usage_no_revision(
         &mut self,
         target: UsageWriteTarget,
         event: CanonicalUsageEventWrite,
-    ) -> Result<(), SourceStorageError> {
-        self.mutate(|transaction| transaction.write_usage_inner(target, event).map(|_| ()))
-    }
-
-    fn write_usage_inner(
-        &mut self,
-        target: UsageWriteTarget,
-        event: CanonicalUsageEventWrite,
-    ) -> Result<bool, SourceStorageError> {
+    ) -> Result<CanonicalWriteOutcome, SourceStorageError> {
         self.require_open()?;
-        event
-            .usage
-            .validate()
-            .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))?;
-        if event.event_id.trim().is_empty()
-            || event.thread_id.trim().is_empty()
-            || event.root_session_id.trim().is_empty()
-            || event.model.trim().is_empty()
-            || event.occurred_at_ms < 0
-        {
-            return Err(SourceStorageError::InvalidRequest(
-                "canonical usage event contains an invalid identity or timestamp".to_owned(),
-            ));
-        }
+        validate_usage_event(&event)?;
         let epoch = self.resolve_usage_write_epoch(target)?;
-        let bound_source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
+        let connection = self.connection()?.connection();
         validate_event_session_source(
             connection,
-            &SourceId::new(bound_source.clone())
-                .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))?,
+            &self.source,
             &event.thread_id,
             &event.root_session_id,
         )?;
+        let event_kind = event.kind.as_str();
         let quality = if event.usage.cache_write_tokens.is_some() {
             "complete"
         } else {
             "partial"
         };
-        let created_at_ms = now_ms();
-        let event_kind = match event.kind {
-            EventKind::Normal => "normal",
-            EventKind::Recovered => "recovered",
-            EventKind::TurnCompensation => "turn_compensation",
-        };
-        let existing = connection
+        let existing: Option<CanonicalIdentityRow> = connection
             .query_row(
                 "SELECT event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
                         reasoning_effort,input_tokens,cached_tokens,cache_write_tokens,output_tokens,
                         reasoning_tokens,total_tokens,quality_status
-                 FROM usage_events
-                 WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
-                params![bound_source.as_str(), epoch, event.event_id],
+                 FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
+                params![self.source.as_str(), epoch, event.event_id.as_str()],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, i64>(8)?,
-                        row.get::<_, Option<i64>>(9)?,
-                        row.get::<_, i64>(10)?,
-                        row.get::<_, i64>(11)?,
-                        row.get::<_, i64>(12)?,
-                        row.get::<_, String>(13)?,
-                    ))
+                    Ok(CanonicalIdentityRow {
+                        event_kind: row.get(0)?,
+                        occurred_at_ms: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        root_session_id: row.get(3)?,
+                        turn_key: row.get(4)?,
+                        model: row.get(5)?,
+                        reasoning_effort: row.get(6)?,
+                        input_tokens: row.get(7)?,
+                        cached_tokens: row.get(8)?,
+                        cache_write_tokens: row.get(9)?,
+                        output_tokens: row.get(10)?,
+                        reasoning_tokens: row.get(11)?,
+                        total_tokens: row.get(12)?,
+                        quality_status: row.get(13)?,
+                    })
                 },
             )
             .optional()
             .map_err(map_sql_error)?;
+        let identity = CanonicalIdentityRow {
+            event_kind: event_kind.to_owned(),
+            occurred_at_ms: event.occurred_at_ms,
+            thread_id: event.thread_id.clone(),
+            root_session_id: event.root_session_id.clone(),
+            turn_key: event.turn_key.clone(),
+            model: event.model.clone(),
+            reasoning_effort: event.reasoning_effort.clone(),
+            input_tokens: event.usage.input_tokens,
+            cached_tokens: event.usage.cached_tokens,
+            cache_write_tokens: event.usage.cache_write_tokens,
+            output_tokens: event.usage.output_tokens,
+            reasoning_tokens: event.usage.reasoning_tokens,
+            total_tokens: event.usage.total_tokens,
+            quality_status: quality.to_owned(),
+        };
         if let Some(existing) = existing {
-            let same = existing.0 == event_kind
-                && existing.1 == event.occurred_at_ms
-                && existing.2 == event.thread_id
-                && existing.3 == event.root_session_id
-                && existing.4 == event.turn_key
-                && existing.5 == event.model
-                && existing.6 == event.reasoning_effort
-                && existing.7 == event.usage.input_tokens
-                && existing.8 == event.usage.cached_tokens
-                && existing.9 == event.usage.cache_write_tokens
-                && existing.10 == event.usage.output_tokens
-                && existing.11 == event.usage.reasoning_tokens
-                && existing.12 == event.usage.total_tokens
-                && existing.13 == quality;
-            if !same {
+            if existing != identity {
                 return Err(SourceStorageError::InvalidRequest(
                     "canonical usage event immutable payload conflict".to_owned(),
                 ));
             }
-            return Ok(false);
+            return Ok(CanonicalWriteOutcome::Duplicate);
         }
         connection
             .execute(
@@ -1026,64 +705,218 @@ impl<'a> SourceWriteTxn<'a> {
                     cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
-                    bound_source.as_str(), epoch, event.event_id, event_kind, event.occurred_at_ms,
+                    self.source.as_str(), epoch, event.event_id, event_kind, event.occurred_at_ms,
                     event.thread_id, event.root_session_id, event.turn_key, event.model,
                     event.reasoning_effort, event.estimated_cost_nanos_usd, event.usage.input_tokens,
                     event.usage.cached_tokens, event.usage.cache_write_tokens, event.usage.output_tokens,
-                    event.usage.reasoning_tokens, event.usage.total_tokens, quality, created_at_ms,
+                    event.usage.reasoning_tokens, event.usage.total_tokens, quality, event.created_at_ms,
                 ],
             )
             .map_err(map_sql_error)?;
-        if target == UsageWriteTarget::Active {
+        Ok(CanonicalWriteOutcome::Inserted)
+    }
+
+    pub fn write_usage(
+        &mut self,
+        target: UsageWriteTarget,
+        event: CanonicalUsageEventWrite,
+    ) -> Result<(), SourceStorageError> {
+        let outcome = self.write_usage_no_revision(target, event)?;
+        if target == UsageWriteTarget::Active && outcome == CanonicalWriteOutcome::Inserted {
             self.bump_data_revision()?;
         }
-        Ok(true)
+        Ok(())
+    }
+
+    pub(crate) fn copy_usage_event_no_revision(
+        &mut self,
+        from: UsageWriteTarget,
+        to: UsageWriteTarget,
+        event_id: &str,
+    ) -> Result<CanonicalWriteOutcome, SourceStorageError> {
+        let from_epoch = self.resolve_usage_write_epoch(from)?;
+        let to_epoch = self.resolve_usage_write_epoch(to)?;
+        if from_epoch == to_epoch {
+            return Err(SourceStorageError::InvalidRequest(
+                "canonical usage copy requires distinct epochs".to_owned(),
+            ));
+        }
+        let connection = self.connection()?.connection();
+        let row: Option<CanonicalUsageEventWrite> = connection
+            .query_row(
+                "SELECT event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
+                        reasoning_effort,estimated_cost_nanos_usd,input_tokens,cached_tokens,
+                        cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,created_at_ms
+                 FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
+                params![self.source.as_str(), from_epoch, event_id],
+                |row| {
+                    Ok(CanonicalUsageEventWrite {
+                        event_id: event_id.to_owned(),
+                        kind: parse_event_kind(row.get::<_, String>(0)?.as_str())?,
+                        occurred_at_ms: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        root_session_id: row.get(3)?,
+                        turn_key: row.get(4)?,
+                        model: row.get(5)?,
+                        reasoning_effort: row.get(6)?,
+                        estimated_cost_nanos_usd: row.get(7)?,
+                        usage: NormalizedTokenUsage::new(
+                            row.get(8)?,
+                            row.get(9)?,
+                            row.get(10)?,
+                            row.get(11)?,
+                            row.get(12)?,
+                            row.get(13)?,
+                        )
+                        .map_err(|error| {
+                            rusqlite::Error::InvalidParameterName(error.to_string())
+                        })?,
+                        created_at_ms: row.get(14)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(map_sql_error)?;
+        let Some(event) = row else {
+            return Err(SourceStorageError::InvalidRequest(
+                "canonical usage copy source event is missing".to_owned(),
+            ));
+        };
+        self.write_usage_no_revision(to, event)
+    }
+
+    pub(crate) fn delete_usage_events_no_revision(
+        &mut self,
+        target: UsageWriteTarget,
+        event_ids: &[String],
+    ) -> Result<usize, SourceStorageError> {
+        let epoch = self.resolve_usage_write_epoch(target)?;
+        let connection = self.connection()?.connection();
+        let mut statement = connection
+            .prepare("DELETE FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3")
+            .map_err(map_sql_error)?;
+        let mut deleted = 0usize;
+        for event_id in event_ids {
+            deleted += statement
+                .execute(params![self.source.as_str(), epoch, event_id])
+                .map_err(map_sql_error)?;
+        }
+        Ok(deleted)
+    }
+
+    pub(crate) fn delete_inactive_usage_events_no_revision(
+        &mut self,
+        expected_epoch: i64,
+        event_ids: &[String],
+    ) -> Result<usize, SourceStorageError> {
+        if expected_epoch <= 0 {
+            return Err(SourceStorageError::InvalidRequest(
+                "inactive usage epoch must be positive".to_owned(),
+            ));
+        }
+        let state = self.usage_epoch_state()?;
+        if expected_epoch == state.active_epoch || Some(expected_epoch) == state.build_epoch {
+            return Err(SourceStorageError::InvalidRequest(
+                "cannot delete active or build usage epoch".to_owned(),
+            ));
+        }
+        let connection = self.connection()?.connection();
+        let mut statement = connection
+            .prepare("DELETE FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3")
+            .map_err(map_sql_error)?;
+        let mut deleted = 0usize;
+        for event_id in event_ids {
+            deleted += statement
+                .execute(params![self.source.as_str(), expected_epoch, event_id])
+                .map_err(map_sql_error)?;
+        }
+        Ok(deleted)
+    }
+
+    pub(crate) fn rebind_usage_root_no_revision(
+        &mut self,
+        target: UsageWriteTarget,
+        thread_id: &str,
+        next_root_session_id: &str,
+    ) -> Result<usize, SourceStorageError> {
+        let epoch = self.resolve_usage_write_epoch(target)?;
+        let connection = self.connection()?.connection();
+        connection
+            .execute(
+                "UPDATE usage_events SET root_session_id=?1
+                 WHERE source=?2 AND source_epoch=?3 AND thread_id=?4",
+                params![next_root_session_id, self.source.as_str(), epoch, thread_id],
+            )
+            .map_err(map_sql_error)
+    }
+
+    pub fn ensure_usage_epoch(&mut self) -> Result<(), SourceStorageError> {
+        self.require_open()?;
+        let connection = self.connection()?.connection();
+        connection
+            .execute(
+                "INSERT INTO source_usage_epochs(
+                    source,active_epoch,build_epoch,active_parser_version,build_parser_version)
+                 VALUES(?1,0,NULL,0,NULL) ON CONFLICT(source) DO NOTHING",
+                [self.source.as_str()],
+            )
+            .map_err(map_sql_error)?;
+        Ok(())
+    }
+
+    pub fn usage_epoch_state(&mut self) -> Result<SourceUsageEpochState, SourceStorageError> {
+        self.require_open()?;
+        let connection = self.connection()?.connection();
+        let values: (i64, Option<i64>, i64, Option<i64>) = connection
+            .query_row(
+                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
+                 FROM source_usage_epochs WHERE source=?1",
+                [self.source.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(map_sql_error)?;
+        SourceUsageEpochState::new(self.source.clone(), values.0, values.1, values.2, values.3)
+            .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))
     }
 
     pub fn begin_or_resume_usage_build(
         &mut self,
         parser_version: i64,
     ) -> Result<i64, SourceStorageError> {
-        self.mutate(|transaction| transaction.begin_or_resume_usage_build_inner(parser_version))
-    }
-
-    fn begin_or_resume_usage_build_inner(
-        &mut self,
-        parser_version: i64,
-    ) -> Result<i64, SourceStorageError> {
-        self.require_open()?;
         if parser_version < 0 {
             return Err(SourceStorageError::InvalidRequest(
                 "usage parser version must be non-negative".to_owned(),
             ));
         }
         self.ensure_usage_epoch()?;
-        let bound_source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
-        let state: (i64, Option<i64>, i64, Option<i64>) = connection
-            .query_row(
-                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
-                 FROM source_usage_epochs WHERE source=?1",
-                [bound_source.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(map_sql_error)?;
-        match (state.1, state.3) {
-            (Some(epoch), Some(existing_parser)) if existing_parser == parser_version => Ok(epoch),
+        let state = self.usage_epoch_state()?;
+        let connection = self.connection()?.connection();
+        match (state.build_epoch, state.build_parser_version) {
+            (Some(epoch), Some(existing)) if existing == parser_version => Ok(epoch),
             (Some(_), Some(_)) => Err(SourceStorageError::InvalidRequest(
                 "a different usage build is already active for this source".to_owned(),
             )),
             (None, None) => {
-                let build = state.0.checked_add(1).ok_or_else(|| {
+                let build = state.active_epoch.checked_add(1).ok_or_else(|| {
                     SourceStorageError::InvalidRequest("usage epoch overflow".to_owned())
                 })?;
-                connection
+                let changed = connection
                     .execute(
                         "UPDATE source_usage_epochs SET build_epoch=?1,build_parser_version=?2
                          WHERE source=?3 AND build_epoch IS NULL AND active_epoch=?4",
-                        params![build, parser_version, bound_source.as_str(), state.0],
+                        params![
+                            build,
+                            parser_version,
+                            self.source.as_str(),
+                            state.active_epoch
+                        ],
                     )
                     .map_err(map_sql_error)?;
+                if changed != 1 {
+                    return Err(SourceStorageError::InvalidRequest(
+                        "usage epoch build CAS failed".to_owned(),
+                    ));
+                }
                 Ok(build)
             }
             _ => Err(SourceStorageError::InvalidRequest(
@@ -1092,49 +925,92 @@ impl<'a> SourceWriteTxn<'a> {
         }
     }
 
-    pub fn activate_usage_build(
+    pub fn resolve_usage_write_epoch(
         &mut self,
-        expected_epoch: i64,
-        expected_parser_version: i64,
-    ) -> Result<(), SourceStorageError> {
-        self.mutate(|transaction| {
-            transaction.activate_usage_build_inner(expected_epoch, expected_parser_version)
-        })
+        target: UsageWriteTarget,
+    ) -> Result<i64, SourceStorageError> {
+        let state = self.usage_epoch_state()?;
+        match target {
+            UsageWriteTarget::Active if state.active_epoch > 0 => Ok(state.active_epoch),
+            UsageWriteTarget::Active => Err(SourceStorageError::InvalidRequest(
+                "active usage epoch is not initialized".to_owned(),
+            )),
+            UsageWriteTarget::Build => state.build_epoch.ok_or_else(|| {
+                SourceStorageError::InvalidRequest("usage build epoch is not active".to_owned())
+            }),
+        }
     }
 
-    fn activate_usage_build_inner(
+    pub(crate) fn retarget_usage_build(
         &mut self,
-        expected_epoch: i64,
-        expected_parser_version: i64,
+        expected_build_epoch: i64,
+        expected_old_parser_version: i64,
+        new_parser_version: i64,
     ) -> Result<(), SourceStorageError> {
-        self.require_open()?;
-        let bound_source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
-        let current_epochs: (i64, Option<i64>, i64, Option<i64>) = connection
-            .query_row(
-                "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
-                 FROM source_usage_epochs WHERE source=?1",
-                [bound_source.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let connection = self.connection()?.connection();
+        let changed = connection
+            .execute(
+                "UPDATE source_usage_epochs SET build_parser_version=?1
+                 WHERE source=?2 AND build_epoch=?3 AND build_parser_version=?4",
+                params![
+                    new_parser_version,
+                    self.source.as_str(),
+                    expected_build_epoch,
+                    expected_old_parser_version
+                ],
             )
             .map_err(map_sql_error)?;
-        let build_epoch = current_epochs.1.ok_or_else(|| {
-            SourceStorageError::InvalidRequest("usage build epoch is not active".to_owned())
+        if changed != 1 {
+            return Err(SourceStorageError::InvalidRequest(
+                "usage build parser retarget CAS failed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activate_usage_build_with_private_visibility<F, E>(
+        &mut self,
+        expected_build_epoch: i64,
+        expected_parser_version: i64,
+        private_visibility_equal: F,
+    ) -> Result<UsageActivationOutcome, E>
+    where
+        F: FnOnce(&Connection, &SourceId, i64, i64, i64, i64) -> Result<bool, E>,
+        E: From<SourceStorageError>,
+    {
+        let state = self.usage_epoch_state().map_err(E::from)?;
+        let build_epoch = state.build_epoch.ok_or_else(|| {
+            E::from(SourceStorageError::InvalidRequest(
+                "usage build epoch is not active".to_owned(),
+            ))
         })?;
-        let build_parser_version = current_epochs.3.ok_or_else(|| {
-            SourceStorageError::InvalidRequest(
+        let build_parser = state.build_parser_version.ok_or_else(|| {
+            E::from(SourceStorageError::InvalidRequest(
                 "usage build parser version is not active".to_owned(),
-            )
+            ))
         })?;
-        let visible_changed = !crate::usage::usage_epochs_visible_equal(
-            connection,
-            bound_source.as_str(),
-            current_epochs.0,
-            current_epochs.2,
-            build_epoch,
-            build_parser_version,
-        )
-        .map_err(map_sql_error)?;
+        if build_epoch != expected_build_epoch || build_parser != expected_parser_version {
+            return Err(E::from(SourceStorageError::InvalidRequest(
+                "usage build activation expected pair mismatch".to_owned(),
+            )));
+        }
+        let connection = self.connection().map_err(E::from)?.connection();
+        let canonical_equal =
+            canonical_projection_equal(connection, &self.source, state.active_epoch, build_epoch)
+                .map_err(E::from)?;
+        let private_equal = if canonical_equal {
+            private_visibility_equal(
+                connection,
+                &self.source,
+                state.active_epoch,
+                state.active_parser_version,
+                build_epoch,
+                build_parser,
+            )?
+        } else {
+            false
+        };
+        let visible_changed = !(canonical_equal && private_equal);
         let changed = connection
             .execute(
                 "UPDATE source_usage_epochs
@@ -1142,75 +1018,46 @@ impl<'a> SourceWriteTxn<'a> {
                      build_epoch=NULL,build_parser_version=NULL
                  WHERE source=?1 AND build_epoch=?2 AND build_parser_version=?3",
                 params![
-                    bound_source.as_str(),
-                    expected_epoch,
+                    self.source.as_str(),
+                    expected_build_epoch,
                     expected_parser_version
                 ],
             )
-            .map_err(map_sql_error)?;
+            .map_err(map_sql_error)
+            .map_err(E::from)?;
         if changed != 1 {
-            return Err(SourceStorageError::InvalidRequest(
+            return Err(E::from(SourceStorageError::InvalidRequest(
                 "usage build activation CAS failed".to_owned(),
-            ));
+            )));
         }
         if visible_changed {
-            // Keep the revision bump in the same transaction as activation so
-            // readers cannot observe a new active epoch with an old revision.
-            self.bump_data_revision()?;
+            self.bump_data_revision().map_err(E::from)?;
         }
-        Ok(())
-    }
-
-    pub fn resolve_usage_write_epoch(
-        &mut self,
-        target: UsageWriteTarget,
-    ) -> Result<i64, SourceStorageError> {
-        self.mutate(|transaction| transaction.resolve_usage_write_epoch_inner(target))
-    }
-
-    fn resolve_usage_write_epoch_inner(
-        &mut self,
-        target: UsageWriteTarget,
-    ) -> Result<i64, SourceStorageError> {
-        self.require_open()?;
-        let bound_source = self.source.as_str().to_owned();
-        let connection = self.connection_mut()?;
-        let (active, build): (i64, Option<i64>) = connection
-            .query_row(
-                "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source=?1",
-                [bound_source.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(map_sql_error)?;
-        match target {
-            UsageWriteTarget::Active if active > 0 => Ok(active),
-            UsageWriteTarget::Active => Err(SourceStorageError::InvalidRequest(
-                "active usage epoch is not initialized".to_owned(),
-            )),
-            UsageWriteTarget::Build => build.ok_or_else(|| {
-                SourceStorageError::InvalidRequest("usage build epoch is not active".to_owned())
-            }),
-        }
-    }
-
-    /// Run one source-private mutation inside this already source-bound
-    /// `BEGIN IMMEDIATE` transaction.  The seam is crate-private on purpose:
-    /// adapters cannot obtain the raw connection or select another source,
-    /// while Codex provenance/checkpoints and test-only private state can
-    /// participate in the same atomic commit.
-    #[allow(dead_code)]
-    pub(crate) fn with_private_state<T>(
-        &mut self,
-        operation: impl FnOnce(&rusqlite::Connection) -> Result<T, SourceStorageError>,
-    ) -> Result<T, SourceStorageError> {
-        self.mutate(|transaction| {
-            let connection = transaction.connection_mut()?;
-            operation(connection)
+        let revision = self.current_revisions().map_err(E::from)?.0;
+        Ok(UsageActivationOutcome {
+            active_epoch: build_epoch,
+            data_revision: revision,
+            visible_changed,
         })
     }
 
-    fn bump_data_revision(&mut self) -> Result<(), SourceStorageError> {
-        let connection = self.connection_mut()?;
+    pub(crate) fn activate_usage_build(
+        &mut self,
+        expected_build_epoch: i64,
+        expected_parser_version: i64,
+    ) -> Result<UsageActivationOutcome, SourceStorageError> {
+        self.activate_usage_build_with_private_visibility(
+            expected_build_epoch,
+            expected_parser_version,
+            |_connection, _source, _active, _active_parser, _build, _build_parser| Ok(true),
+        )
+    }
+
+    pub(crate) fn bump_data_revision(&mut self) -> Result<i64, SourceStorageError> {
+        if self.data_revision_bumped {
+            return Ok(self.current_revisions()?.0);
+        }
+        let connection = self.connection()?.connection();
         let current: i64 = connection
             .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
                 row.get(0)
@@ -1227,26 +1074,47 @@ impl<'a> SourceWriteTxn<'a> {
             .map_err(map_sql_error)?;
         if changed != 1 {
             return Err(SourceStorageError::InvalidRequest(
-                "app meta revision changed during source write".to_owned(),
+                "app meta data revision CAS failed".to_owned(),
             ));
         }
-        self.data_changed = true;
-        Ok(())
+        self.data_revision_bumped = true;
+        Ok(next)
     }
 
-    pub fn commit(mut self) -> Result<(), SourceStorageError> {
-        self.require_open()?;
-        let revisions = if self.data_changed {
-            let connection = self.connection_mut()?;
-            Some(
-                connection
-                    .query_row(
-                        "SELECT data_revision,status_revision FROM app_meta WHERE id=1",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(map_sql_error)?,
+    pub(crate) fn bump_status_revision(&mut self) -> Result<i64, SourceStorageError> {
+        if self.status_revision_bumped {
+            return Ok(self.current_revisions()?.1);
+        }
+        let connection = self.connection()?.connection();
+        let current: i64 = connection
+            .query_row(
+                "SELECT status_revision FROM app_meta WHERE id=1",
+                [],
+                |row| row.get(0),
             )
+            .map_err(map_sql_error)?;
+        let next = current.checked_add(1).ok_or_else(|| {
+            SourceStorageError::InvalidRequest("status revision overflow".to_owned())
+        })?;
+        let changed = connection
+            .execute(
+                "UPDATE app_meta SET status_revision=?1 WHERE id=1 AND status_revision=?2",
+                params![next, current],
+            )
+            .map_err(map_sql_error)?;
+        if changed != 1 {
+            return Err(SourceStorageError::InvalidRequest(
+                "app meta status revision CAS failed".to_owned(),
+            ));
+        }
+        self.status_revision_bumped = true;
+        Ok(next)
+    }
+
+    pub(crate) fn commit(mut self) -> Result<(), SourceStorageError> {
+        self.require_open()?;
+        let revisions = if self.data_revision_bumped || self.status_revision_bumped {
+            Some(self.current_revisions()?)
         } else {
             None
         };
@@ -1254,21 +1122,31 @@ impl<'a> SourceWriteTxn<'a> {
             .connection
             .take()
             .ok_or(SourceStorageError::TransactionClosed)?;
-        let commit_result = match connection {
-            SourceWriteConnection::Locked(connection) => connection.execute_batch("COMMIT"),
-            SourceWriteConnection::Legacy(transaction) => transaction.commit(),
-        };
-        commit_result.map_err(|error| {
-            self.poisoned = true;
-            map_sql_error(error)
-        })?;
+        connection
+            .connection()
+            .execute_batch("COMMIT")
+            .map_err(|error| {
+                self.poisoned = true;
+                map_sql_error(error)
+            })?;
         self.committed = true;
-        if let (Some(publisher), Some((data_revision, status_revision))) =
+        if let (Some(publisher), Some((data, status))) =
             (self.revision_publisher.as_ref(), revisions)
         {
-            publisher.publish(data_revision, status_revision);
+            publisher.publish(data, status);
         }
         Ok(())
+    }
+
+    fn current_revisions(&self) -> Result<(i64, i64), SourceStorageError> {
+        let connection = self.connection()?.connection();
+        connection
+            .query_row(
+                "SELECT data_revision,status_revision FROM app_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(map_sql_error)
     }
 
     fn require_open(&self) -> Result<(), SourceStorageError> {
@@ -1281,77 +1159,101 @@ impl<'a> SourceWriteTxn<'a> {
         }
     }
 
-    fn mutate<T>(
-        &mut self,
-        operation: impl FnOnce(&mut Self) -> Result<T, SourceStorageError>,
-    ) -> Result<T, SourceStorageError> {
-        self.require_open()?;
-        let result = operation(self);
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
-    fn connection_mut(&mut self) -> Result<&Connection, SourceStorageError> {
+    fn connection(&self) -> Result<&SourceWriteConnection<'_>, SourceStorageError> {
         self.connection
-            .as_mut()
-            .map(SourceWriteConnection::connection_mut)
+            .as_ref()
             .ok_or(SourceStorageError::TransactionClosed)
     }
 }
 
 impl Drop for SourceWriteTxn<'_> {
     fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        if let Some(connection) = self.connection.as_mut() {
-            match connection {
-                SourceWriteConnection::Locked(connection) => {
-                    let _ = connection.execute_batch("ROLLBACK");
-                }
-                SourceWriteConnection::Legacy(_) => {
-                    // rusqlite::Transaction rolls back on drop.
-                }
+        if !self.committed {
+            if let Some(connection) = self.connection.as_ref() {
+                let _ = connection.connection().execute_batch("ROLLBACK");
             }
         }
     }
 }
 
-fn map_sql_error(error: rusqlite::Error) -> SourceStorageError {
-    SourceStorageError::Storage(crate::storage::StorageError::sqlite(error).kind())
+#[derive(PartialEq, Eq)]
+struct CanonicalIdentityRow {
+    event_kind: String,
+    occurred_at_ms: i64,
+    thread_id: String,
+    root_session_id: String,
+    turn_key: Option<String>,
+    model: String,
+    reasoning_effort: Option<String>,
+    input_tokens: i64,
+    cached_tokens: i64,
+    cache_write_tokens: Option<i64>,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    total_tokens: i64,
+    quality_status: String,
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+fn validate_usage_event(event: &CanonicalUsageEventWrite) -> Result<(), SourceStorageError> {
+    event
+        .usage
+        .validate()
+        .map_err(|error| SourceStorageError::InvalidRequest(error.to_string()))?;
+    if event.event_id.trim().is_empty()
+        || event.thread_id.trim().is_empty()
+        || event.root_session_id.trim().is_empty()
+        || event.model.trim().is_empty()
+        || event.occurred_at_ms < 0
+        || event.created_at_ms < 0
+    {
+        return Err(SourceStorageError::InvalidRequest(
+            "canonical usage event contains an invalid identity or timestamp".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SessionVisibility {
-    source: String,
-    native_session_id: String,
-    parent_thread_id: Option<String>,
-    root_session_id: Option<String>,
-    agent_role: String,
-    title: Option<String>,
-    project_name: Option<String>,
-    project_path: Option<String>,
-    project_kind: String,
-    metadata_model: Option<String>,
-    created_at_ms: Option<i64>,
-    updated_at_ms: Option<i64>,
-    archived: i64,
-    metadata_quality_status: String,
-    metadata_resolved_at_ms: i64,
+fn parse_event_kind(value: &str) -> rusqlite::Result<EventKind> {
+    match value {
+        "normal" => Ok(EventKind::Normal),
+        "recovered" => Ok(EventKind::Recovered),
+        "turn_compensation" => Ok(EventKind::TurnCompensation),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "invalid canonical event kind".to_owned(),
+        )),
+    }
+}
+
+fn canonical_projection_equal(
+    connection: &Connection,
+    source: &SourceId,
+    active_epoch: i64,
+    build_epoch: i64,
+) -> Result<bool, SourceStorageError> {
+    let columns = "event_id,event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
+                   reasoning_effort,estimated_cost_nanos_usd,input_tokens,cached_tokens,
+                   cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,quality_status";
+    let sql = format!(
+        "SELECT NOT EXISTS(
+             SELECT {columns} FROM usage_events WHERE source=?1 AND source_epoch=?2
+             EXCEPT SELECT {columns} FROM usage_events WHERE source=?1 AND source_epoch=?3
+         ) AND NOT EXISTS(
+             SELECT {columns} FROM usage_events WHERE source=?1 AND source_epoch=?3
+             EXCEPT SELECT {columns} FROM usage_events WHERE source=?1 AND source_epoch=?2
+         )"
+    );
+    let equal: i64 = connection
+        .query_row(
+            &sql,
+            params![source.as_str(), active_epoch, build_epoch],
+            |row| row.get(0),
+        )
+        .map_err(map_sql_error)?;
+    Ok(equal != 0)
 }
 
 fn read_session_visibility(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     thread_id: &str,
 ) -> Result<Option<SessionVisibility>, SourceStorageError> {
     connection
@@ -1386,88 +1288,79 @@ fn read_session_visibility(
         .map_err(map_sql_error)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionVisibility {
+    source: String,
+    native_session_id: String,
+    parent_thread_id: Option<String>,
+    root_session_id: Option<String>,
+    agent_role: String,
+    title: Option<String>,
+    project_name: Option<String>,
+    project_path: Option<String>,
+    project_kind: String,
+    metadata_model: Option<String>,
+    created_at_ms: Option<i64>,
+    updated_at_ms: Option<i64>,
+    archived: i64,
+    metadata_quality_status: String,
+    metadata_resolved_at_ms: i64,
+}
+
 fn update_session_row(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
     let mut updates = Vec::new();
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
-    macro_rules! add_optional {
-        ($column:literal, $patch:expr) => {
-            match $patch {
+    macro_rules! optional {
+        ($column:literal, $field:expr) => {
+            match $field {
                 Patch::Keep => {}
                 Patch::Set(value) => {
                     updates.push(concat!($column, "=?"));
                     values.push(rusqlite::types::Value::Text(value.clone()));
                 }
-                Patch::Clear => {
-                    updates.push(concat!($column, "=NULL"));
-                }
+                Patch::Clear => updates.push(concat!($column, "=NULL")),
             }
         };
     }
-    macro_rules! add_required {
-        ($column:literal, $patch:expr, $value:expr) => {
-            match $patch {
-                Patch::Keep => {}
-                Patch::Set(_) => {
-                    updates.push(concat!($column, "=?"));
-                    values.push($value);
-                }
-                Patch::Clear => {}
+    macro_rules! required_text {
+        ($column:literal, $field:expr) => {
+            if let Patch::Set(value) = $field {
+                updates.push(concat!($column, "=?"));
+                values.push(rusqlite::types::Value::Text(value.as_str().to_owned()));
             }
         };
     }
-    add_optional!("parent_thread_id", &patch.parent_thread_id);
-    add_optional!("root_session_id", &patch.root_session_id);
-    add_optional!("title", &patch.title);
-    add_optional!("project_name", &patch.project_name);
-    add_optional!("project_path", &patch.project_path);
-    add_optional!("metadata_model", &patch.metadata_model);
-    add_required!(
-        "agent_role",
-        &patch.agent_role,
-        rusqlite::types::Value::Text(match &patch.agent_role {
-            Patch::Set(value) => value.as_str().to_owned(),
-            _ => unreachable!(),
-        })
-    );
-    add_required!(
-        "project_kind",
-        &patch.project_kind,
-        rusqlite::types::Value::Text(match &patch.project_kind {
-            Patch::Set(value) => value.as_str().to_owned(),
-            _ => unreachable!(),
-        })
-    );
-    add_required!(
-        "archived",
-        &patch.archived,
-        rusqlite::types::Value::Integer(match patch.archived {
-            Patch::Set(value) => i64::from(value),
-            _ => unreachable!(),
-        })
-    );
-    if !patch.created_at_ms.is_keep() {
-        match patch.created_at_ms {
-            Patch::Set(value) => {
-                updates.push("created_at_ms=?");
-                values.push(rusqlite::types::Value::Integer(value));
-            }
-            Patch::Clear => updates.push("created_at_ms=NULL"),
-            Patch::Keep => unreachable!(),
-        }
+    optional!("parent_thread_id", &patch.parent_thread_id);
+    optional!("root_session_id", &patch.root_session_id);
+    optional!("title", &patch.title);
+    optional!("project_name", &patch.project_name);
+    optional!("project_path", &patch.project_path);
+    optional!("metadata_model", &patch.metadata_model);
+    required_text!("agent_role", &patch.agent_role);
+    required_text!("project_kind", &patch.project_kind);
+    if let Patch::Set(value) = patch.archived {
+        updates.push("archived=?");
+        values.push(rusqlite::types::Value::Integer(i64::from(value)));
     }
-    if !patch.updated_at_ms.is_keep() {
-        match patch.updated_at_ms {
-            Patch::Set(value) => {
-                updates.push("updated_at_ms=?");
-                values.push(rusqlite::types::Value::Integer(value));
-            }
-            Patch::Clear => updates.push("updated_at_ms=NULL"),
-            Patch::Keep => unreachable!(),
+    match patch.created_at_ms {
+        Patch::Keep => {}
+        Patch::Set(value) => {
+            updates.push("created_at_ms=?");
+            values.push(rusqlite::types::Value::Integer(value));
         }
+        Patch::Clear => updates.push("created_at_ms=NULL"),
+    }
+    match patch.updated_at_ms {
+        Patch::Keep => {}
+        Patch::Set(value) => {
+            updates.push("updated_at_ms=?");
+            values.push(rusqlite::types::Value::Integer(value));
+        }
+        Patch::Clear => updates.push("updated_at_ms=NULL"),
     }
     updates.push("metadata_quality_status=?");
     values.push(rusqlite::types::Value::Text(
@@ -1475,27 +1368,30 @@ fn update_session_row(
     ));
     updates.push("metadata_resolved_at_ms=?");
     values.push(rusqlite::types::Value::Integer(patch.resolved_at_ms));
+    updates.push("native_session_id=?");
+    values.push(rusqlite::types::Value::Text(
+        identity.native_session_id.clone(),
+    ));
     let mut sql = format!("UPDATE threads SET {}", updates.join(","));
-    let mut bind = values;
+    values.push(rusqlite::types::Value::Text(identity.thread_id.clone()));
     sql.push_str(" WHERE thread_id=?");
-    bind.push(rusqlite::types::Value::Text(identity.thread_id.clone()));
     connection
-        .execute(&sql, rusqlite::params_from_iter(bind))
+        .execute(&sql, rusqlite::params_from_iter(values))
         .map_err(map_sql_error)?;
     Ok(())
 }
 
 fn insert_session_row(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
     let role = match &patch.agent_role {
-        Patch::Set(role) => role.as_str(),
+        Patch::Set(value) => value.as_str(),
         _ => "unknown",
     };
     let project_kind = match &patch.project_kind {
-        Patch::Set(kind) => kind.as_str(),
+        Patch::Set(value) => value.as_str(),
         _ => "unknown",
     };
     let archived = match patch.archived {
@@ -1556,7 +1452,7 @@ fn option_i64_patch(patch: &Patch<i64>) -> Option<i64> {
 }
 
 fn validate_session_relationships(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     identity: &SessionIdentity,
     patch: &ResolvedThreadPatch,
 ) -> Result<(), SourceStorageError> {
@@ -1575,7 +1471,9 @@ fn validate_session_relationships(
             )
             .optional()
             .map_err(map_sql_error)?;
-        if source.as_deref() != Some(identity.source.as_str()) {
+        if let Some(source) = source.as_deref()
+            && source != identity.source.as_str()
+        {
             return Err(SourceStorageError::InvalidRequest(
                 "session parent/root source mismatch".to_owned(),
             ));
@@ -1585,7 +1483,7 @@ fn validate_session_relationships(
 }
 
 fn validate_event_session_source(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     source: &SourceId,
     thread_id: &str,
     root_session_id: &str,
@@ -1608,609 +1506,77 @@ fn validate_event_session_source(
     Ok(())
 }
 
+fn map_sql_error(error: rusqlite::Error) -> SourceStorageError {
+    SourceStorageError::Storage(StorageError::sqlite(error).kind())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageWriteTarget {
+    Active,
+    Build,
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::storage::LedgerOptions;
     use std::{
         fs,
-        path::PathBuf,
         sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::*;
-    use crate::domain::{AgentRole, Patch, ProjectKind};
-    use crate::storage::{Ledger, LedgerOptions, StorageErrorKind};
-
-    struct TempPath(PathBuf);
-
-    impl TempPath {
-        fn new(label: &str) -> Self {
-            let stamp = SystemTime::now()
+    #[test]
+    fn private_read_is_query_only_and_restores_after_dml_or_error() {
+        let root = std::env::temp_dir().join(format!(
+            "usagi-source-read-seam-{}-{}",
+            std::process::id(),
+            SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("usagi-source-{label}-{stamp}"));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempPath {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn main_identity_patch(
-        source: &SourceId,
-        thread_id: &str,
-        native_session_id: &str,
-    ) -> (SessionIdentity, ResolvedThreadPatch) {
-        let identity = SessionIdentity::new(thread_id, source.clone(), native_session_id).unwrap();
-        let mut patch = ResolvedThreadPatch::new(thread_id, 1).unwrap();
-        patch.source = source.clone();
-        patch.native_session_id = native_session_id.to_owned();
-        patch.agent_role = Patch::Set(AgentRole::Main);
-        patch.root_session_id = Patch::Set(thread_id.to_owned());
-        patch.project_kind = Patch::Set(ProjectKind::Unknown);
-        (identity, patch)
-    }
-
-    fn usage_event(event_id: &str) -> CanonicalUsageEventWrite {
-        CanonicalUsageEventWrite {
-            event_id: event_id.to_owned(),
-            kind: EventKind::Normal,
-            occurred_at_ms: 10,
-            thread_id: "fake-thread".to_owned(),
-            root_session_id: "fake-thread".to_owned(),
-            turn_key: Some("turn-1".to_owned()),
-            model: "model-a".to_owned(),
-            reasoning_effort: Some("medium".to_owned()),
-            estimated_cost_nanos_usd: Some(1),
-            usage: NormalizedTokenUsage::new(10, 2, Some(1), 4, 1, 14).unwrap(),
-        }
-    }
-
-    #[test]
-    fn context_binds_storage_to_its_source() {
-        let descriptor = SourceDescriptor::codex();
-        let context = SourceRunContext::new("scan-1", &descriptor).unwrap();
-        assert_eq!(context.source(), &SourceId::CODEX);
-        assert_eq!(context.scan_id(), "scan-1");
-        assert_eq!(context.storage().scan_id(), "scan-1");
-        assert_eq!(context.storage().source(), &SourceId::CODEX);
-        assert!(matches!(
-            context.storage().load_usage_epoch(),
-            Err(SourceStorageError::NotImplemented)
+                .expect("clock before epoch")
+                .as_nanos()
         ));
-    }
-
-    #[test]
-    fn context_rejects_invalid_scan_ids() {
-        let descriptor = SourceDescriptor::codex();
-        assert!(matches!(
-            SourceRunContext::new("", &descriptor),
-            Err(SourceContextError::EmptyScanId)
-        ));
-        assert!(matches!(
-            SourceRunContext::new("   ", &descriptor),
-            Err(SourceContextError::EmptyScanId)
-        ));
-        assert!(matches!(
-            SourceRunContext::new("scan\n", &descriptor),
-            Err(SourceContextError::ControlCharacterInScanId)
-        ));
-    }
-
-    #[test]
-    fn source_bound_epoch_mutations_are_atomic_and_bootstrap_from_zero() {
-        let temp = TempPath::new("epoch");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
+        fs::create_dir_all(&root).expect("create temporary read seam directory");
+        let db_path = root.join("mu.sqlite3");
+        let ledger =
+            Arc::new(Ledger::open(LedgerOptions::new(&db_path)).expect("open temporary ledger"));
+        let storage = SourceStorage::with_ledger(
+            "query-only-seam",
+            SourceId::new("test").expect("valid test source"),
+            Arc::clone(&ledger),
         );
-        let storage = SourceStorage::with_ledger("scan-1", SourceId::CODEX, ledger);
-        let epoch = storage.load_usage_epoch().unwrap().unwrap();
-        assert_eq!(epoch.active_epoch, 0);
-        assert_eq!(epoch.build_epoch, None);
 
-        {
-            let mut txn = storage.begin_write_txn().unwrap();
-            txn.ensure_usage_epoch().unwrap();
-            assert_eq!(txn.begin_or_resume_usage_build(7).unwrap(), 1);
-            assert_eq!(
-                txn.resolve_usage_write_epoch(UsageWriteTarget::Build)
-                    .unwrap(),
-                1
-            );
-            assert!(matches!(
-                txn.resolve_usage_write_epoch(UsageWriteTarget::Active),
-                Err(SourceStorageError::InvalidRequest(message)) if message.contains("not initialized")
-            ));
-            // No commit: both the bootstrap row and build marker must roll back.
-        }
-        let rolled_back = storage.load_usage_epoch().unwrap().unwrap();
-        assert_eq!(rolled_back.active_epoch, 0);
-        assert_eq!(rolled_back.build_epoch, None);
-
-        let mut txn = storage.begin_write_txn().unwrap();
-        txn.ensure_usage_epoch().unwrap();
-        assert_eq!(txn.begin_or_resume_usage_build(7).unwrap(), 1);
-        txn.activate_usage_build(1, 7).unwrap();
-        txn.commit().unwrap();
-        let active = storage.load_usage_epoch().unwrap().unwrap();
-        assert_eq!(
-            (
-                active.active_epoch,
-                active.active_parser_version,
-                active.build_epoch,
-                active.build_parser_version,
-            ),
-            (1, 7, None, None)
-        );
-    }
-
-    #[test]
-    fn s01_sessions_allow_cross_source_native_collision_but_reject_same_source_remap() {
-        let temp = TempPath::new("s01");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let codex = SourceStorage::with_ledger("scan-codex", SourceId::CODEX, Arc::clone(&ledger));
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake =
-            SourceStorage::with_ledger("scan-fake", fake_source.clone(), Arc::clone(&ledger));
-        let (codex_identity, codex_patch) =
-            main_identity_patch(&SourceId::CODEX, "codex-thread", "native-x");
-        let (fake_identity, fake_patch) =
-            main_identity_patch(&fake_source, "fake-thread", "native-x");
-        let mut codex_tx = codex.begin_write_txn().unwrap();
-        codex_tx
-            .upsert_session_metadata(&codex_identity, &codex_patch)
-            .unwrap();
-        codex_tx.commit().unwrap();
-        let after_codex_insert: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_codex_insert, 1);
-        let mut fake_tx = fake.begin_write_txn().unwrap();
-        fake_tx
-            .upsert_session_metadata(&fake_identity, &fake_patch)
-            .unwrap();
-        fake_tx.commit().unwrap();
-        let after_fake_insert: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_fake_insert, 2);
-
-        let mut repeat_tx = codex.begin_write_txn().unwrap();
-        repeat_tx
-            .upsert_session_metadata(&codex_identity, &codex_patch)
-            .unwrap();
-        repeat_tx.commit().unwrap();
-        let after_repeat: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_repeat, after_fake_insert);
-
-        let mut metadata_change = codex_patch.clone();
-        metadata_change.title = Patch::Set("metadata-only change".to_owned());
-        let mut metadata_tx = codex.begin_write_txn().unwrap();
-        metadata_tx
-            .upsert_session_metadata(&codex_identity, &metadata_change)
-            .unwrap();
-        metadata_tx.commit().unwrap();
-        let after_metadata_change: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_metadata_change, after_repeat + 1);
-
-        let remap = SessionIdentity::new("other-thread", fake_source.clone(), "native-x").unwrap();
-        let remap_patch = main_identity_patch(&fake_source, "other-thread", "native-x").1;
-        let mut tx = fake.begin_write_txn().unwrap();
-        assert!(matches!(
-            tx.upsert_session_metadata(&remap, &remap_patch),
-            Err(SourceStorageError::InvalidRequest(message))
-                if message.contains("already maps")
-        ));
-    }
-
-    #[test]
-    fn s02_session_parent_and_root_must_stay_within_source() {
-        let temp = TempPath::new("s02");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let codex = SourceStorage::with_ledger("scan-codex", SourceId::CODEX, Arc::clone(&ledger));
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake = SourceStorage::with_ledger("scan-fake", fake_source.clone(), ledger);
-        let (root_identity, root_patch) =
-            main_identity_patch(&SourceId::CODEX, "codex-root", "root");
-        let mut root_tx = codex.begin_write_txn().unwrap();
-        root_tx
-            .upsert_session_metadata(&root_identity, &root_patch)
-            .unwrap();
-        root_tx.commit().unwrap();
-
-        let child_identity =
-            SessionIdentity::new("fake-child", fake_source.clone(), "child").unwrap();
-        let mut child_patch = ResolvedThreadPatch::new("fake-child", 1).unwrap();
-        child_patch.source = fake_source;
-        child_patch.native_session_id = "child".to_owned();
-        child_patch.agent_role = Patch::Set(AgentRole::Subagent);
-        child_patch.parent_thread_id = Patch::Set("codex-root".to_owned());
-        child_patch.root_session_id = Patch::Set("codex-root".to_owned());
-        assert!(matches!(
-            fake.begin_write_txn()
-                .unwrap()
-                .upsert_session_metadata(&child_identity, &child_patch),
-            Err(SourceStorageError::InvalidRequest(message))
-                if message.contains("source mismatch")
-        ));
-    }
-
-    #[test]
-    fn s03_fake_source_can_write_canonical_usage_without_codex_provenance() {
-        let temp = TempPath::new("s03");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake =
-            SourceStorage::with_ledger("scan-fake", fake_source.clone(), Arc::clone(&ledger));
-        let (identity, patch) = main_identity_patch(&fake_source, "fake-thread", "native");
-        let before_revision: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let mut tx = fake.begin_write_txn().unwrap();
-        tx.ensure_usage_epoch().unwrap();
-        assert_eq!(tx.begin_or_resume_usage_build(1).unwrap(), 1);
-        tx.upsert_session_metadata(&identity, &patch).unwrap();
-        tx.write_usage(UsageWriteTarget::Build, usage_event("fake-event"))
-            .unwrap();
-        tx.activate_usage_build(1, 1).unwrap();
-        tx.commit().unwrap();
-        let connection = ledger.connection().unwrap();
-        let after_revision: i64 = connection
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_revision, before_revision + 2);
-        let row: (String, i64) = connection
-            .query_row(
-                "SELECT source,source_epoch FROM usage_events WHERE event_id='fake-event'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(row, ("fake-source".to_owned(), 1));
-        let mut statement = connection
-            .prepare("PRAGMA table_info(usage_events)")
-            .unwrap();
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(!columns.iter().any(|column| column == "source_file_id"));
-    }
-
-    #[test]
-    fn s04_source_write_transaction_rolls_back_epoch_session_and_usage_on_error() {
-        let temp = TempPath::new("s04");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake =
-            SourceStorage::with_ledger("scan-fake", fake_source.clone(), Arc::clone(&ledger));
-        let (identity, patch) = main_identity_patch(&fake_source, "fake-thread", "native");
-        {
-            let mut tx = fake.begin_write_txn().unwrap();
-            tx.ensure_usage_epoch().unwrap();
-            tx.begin_or_resume_usage_build(1).unwrap();
-            tx.upsert_session_metadata(&identity, &patch).unwrap();
-            tx.write_usage(UsageWriteTarget::Build, usage_event("rollback-event"))
-                .unwrap();
-            let mut conflict = usage_event("rollback-event");
-            conflict.model = "different-model".to_owned();
-            assert!(tx.write_usage(UsageWriteTarget::Build, conflict).is_err());
-            // Ignoring the mutation error must not make a partial batch
-            // committable; the transaction is poisoned and rolls back all
-            // prior epoch/session/event writes.
-            assert!(matches!(
-                tx.commit(),
-                Err(SourceStorageError::TransactionPoisoned)
-            ));
-        }
-        let connection = ledger.connection().unwrap();
-        let epoch: Option<i64> = connection
-            .query_row(
-                "SELECT active_epoch FROM source_usage_epochs WHERE source='fake-source'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap();
-        assert_eq!(epoch, None);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT count(*) FROM threads WHERE source='fake-source'",
+        let dml_result = storage.with_private_read(|connection| {
+            let error = connection
+                .execute(
+                    "UPDATE app_meta SET data_revision=data_revision WHERE id=1",
                     [],
-                    |row| row.get::<_, i64>(0)
                 )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT count(*) FROM usage_events WHERE source='fake-source'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-        drop(connection);
-
-        // The same rollback guarantee covers adapter-private state executed
-        // through the crate-private transaction seam.
-        {
-            let mut tx = fake.begin_write_txn().unwrap();
-            tx.ensure_usage_epoch().unwrap();
-            tx.begin_or_resume_usage_build(1).unwrap();
-            tx.upsert_session_metadata(&identity, &patch).unwrap();
-            tx.write_usage(UsageWriteTarget::Build, usage_event("private-rollback"))
-                .unwrap();
-            let private_failure = tx.with_private_state(|connection| {
-                connection
-                    .execute(
-                        "UPDATE app_meta SET status_revision=status_revision+1
-                         WHERE id=1",
-                        [],
-                    )
-                    .map_err(map_sql_error)?;
-                Err::<(), _>(SourceStorageError::InvalidRequest(
-                    "PRIVATE_STATE_CAS_FAILED".to_owned(),
-                ))
-            });
-            assert!(matches!(
-                private_failure,
-                Err(SourceStorageError::InvalidRequest(message))
-                    if message == "PRIVATE_STATE_CAS_FAILED"
-            ));
-            assert!(matches!(
-                tx.commit(),
-                Err(SourceStorageError::TransactionPoisoned)
-            ));
-        }
-        let connection = ledger.connection().unwrap();
-        let private_epoch: Option<i64> = connection
-            .query_row(
-                "SELECT active_epoch FROM source_usage_epochs WHERE source='fake-source'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap();
-        assert_eq!(private_epoch, None);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT count(*) FROM usage_events
-                     WHERE source='fake-source' AND event_id='private-rollback'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn s05_s06_epoch_build_and_activation_are_source_local() {
-        let temp = TempPath::new("s05-s06");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let codex = SourceStorage::with_ledger("scan-codex", SourceId::CODEX, Arc::clone(&ledger));
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake =
-            SourceStorage::with_ledger("scan-fake", fake_source.clone(), Arc::clone(&ledger));
-        let before_revision: i64 = ledger
+                .expect_err("query_only must reject DML");
+            assert!(matches!(error, rusqlite::Error::SqliteFailure(..)));
+            Ok::<_, SourceStorageError>(())
+        });
+        assert_eq!(dml_result, Ok(()));
+        let query_only: i64 = ledger
             .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let bootstrap =
-            |storage: &SourceStorage, source: &SourceId, thread_id: &str, event_id: &str| {
-                let mut tx = storage.begin_write_txn().unwrap();
-                tx.ensure_usage_epoch().unwrap();
-                assert_eq!(tx.begin_or_resume_usage_build(1).unwrap(), 1);
-                let (identity, patch) = main_identity_patch(source, thread_id, thread_id);
-                tx.upsert_session_metadata(&identity, &patch).unwrap();
-                let mut event = usage_event(event_id);
-                event.thread_id = thread_id.to_owned();
-                event.root_session_id = thread_id.to_owned();
-                tx.write_usage(UsageWriteTarget::Build, event).unwrap();
-                tx.activate_usage_build(1, 1).unwrap();
-                tx.commit().unwrap();
-            };
-        bootstrap(&codex, &SourceId::CODEX, "codex-s05", "codex-s05-event");
-        bootstrap(&fake, &fake_source, "fake-s05", "fake-s05-event");
-        let after_bootstrap_revision: i64 = ledger
+            .expect("lock ledger connection")
+            .pragma_query_value(None, "query_only", |row| row.get(0))
+            .expect("read query_only after DML subcase");
+        assert_eq!(query_only, 0);
+
+        let expected = SourceStorageError::InvalidRequest("operation failed".to_owned());
+        let operation_result: Result<(), SourceStorageError> =
+            storage.with_private_read(|_| Err(expected.clone()));
+        assert_eq!(operation_result, Err(expected));
+        let query_only: i64 = ledger
             .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(after_bootstrap_revision, before_revision + 4);
-        let mut codex_tx = codex.begin_write_txn().unwrap();
-        assert_eq!(codex_tx.begin_or_resume_usage_build(2).unwrap(), 2);
-        codex_tx.commit().unwrap();
-        let codex_build = codex.load_usage_epoch().unwrap().unwrap();
-        let fake_active = fake.load_usage_epoch().unwrap().unwrap();
-        assert_eq!(
-            (codex_build.active_epoch, codex_build.build_epoch),
-            (1, Some(2))
-        );
-        assert_eq!(
-            (fake_active.active_epoch, fake_active.build_epoch),
-            (1, None)
-        );
-        let mut codex_tx = codex.begin_write_txn().unwrap();
-        codex_tx.activate_usage_build(2, 2).unwrap();
-        codex_tx.commit().unwrap();
-        let after_empty_activation_revision: i64 = ledger
-            .connection()
-            .unwrap()
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(
-            after_empty_activation_revision,
-            after_bootstrap_revision + 1
-        );
-        let codex_active = codex.load_usage_epoch().unwrap().unwrap();
-        let fake_unchanged = fake.load_usage_epoch().unwrap().unwrap();
-        assert_eq!(
-            (
-                codex_active.active_epoch,
-                codex_active.active_parser_version
-            ),
-            (2, 2)
-        );
-        assert_eq!(
-            (
-                fake_unchanged.active_epoch,
-                fake_unchanged.active_parser_version
-            ),
-            (1, 1)
-        );
-    }
+            .expect("lock ledger connection")
+            .pragma_query_value(None, "query_only", |row| row.get(0))
+            .expect("read query_only after operation error subcase");
+        assert_eq!(query_only, 0);
 
-    #[test]
-    fn s08_source_bound_transaction_rejects_identity_from_another_source() {
-        let temp = TempPath::new("s08");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake = SourceStorage::with_ledger("scan-fake", fake_source, ledger);
-        let (identity, patch) = main_identity_patch(&SourceId::CODEX, "codex-thread", "native");
-        let mut tx = fake.begin_write_txn().unwrap();
-        tx.ensure_usage_epoch().unwrap();
-        assert!(matches!(
-            tx.upsert_session_metadata(&identity, &patch),
-            Err(SourceStorageError::SourceMismatch)
-        ));
-    }
-
-    #[test]
-    fn s10_duplicate_ignores_cost_and_creation_time_but_rejects_immutable_change() {
-        let temp = TempPath::new("s10");
-        let home = temp.path().join("codex");
-        fs::create_dir_all(&home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
-        let fake_source = SourceId::new("fake-source").unwrap();
-        let fake =
-            SourceStorage::with_ledger("scan-fake", fake_source.clone(), Arc::clone(&ledger));
-        let (identity, patch) = main_identity_patch(&fake_source, "fake-thread", "native");
-        let mut tx = fake.begin_write_txn().unwrap();
-        tx.ensure_usage_epoch().unwrap();
-        tx.begin_or_resume_usage_build(1).unwrap();
-        tx.upsert_session_metadata(&identity, &patch).unwrap();
-        tx.write_usage(UsageWriteTarget::Build, usage_event("duplicate-event"))
-            .unwrap();
-        tx.activate_usage_build(1, 1).unwrap();
-        tx.commit().unwrap();
-
-        let mut duplicate = usage_event("duplicate-event");
-        duplicate.estimated_cost_nanos_usd = Some(99);
-        let mut tx = fake.begin_write_txn().unwrap();
-        tx.write_usage(UsageWriteTarget::Active, duplicate).unwrap();
-        tx.commit().unwrap();
-        let connection = ledger.connection().unwrap();
-        let cost: Option<i64> = connection
-            .query_row(
-                "SELECT estimated_cost_nanos_usd FROM usage_events
-                 WHERE source='fake-source' AND source_epoch=1 AND event_id='duplicate-event'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(cost, Some(1));
-        drop(connection);
-
-        let mut conflict = usage_event("duplicate-event");
-        conflict.model = "different-model".to_owned();
-        let mut tx = fake.begin_write_txn().unwrap();
-        assert!(tx.write_usage(UsageWriteTarget::Active, conflict).is_err());
-    }
-
-    #[test]
-    fn v10_bridge_preserves_source_storage_error_category() {
-        let temp = TempPath::new("changed");
-        let home_a = temp.path().join("codex-a");
-        let home_b = temp.path().join("codex-b");
-        fs::create_dir_all(&home_a).unwrap();
-        fs::create_dir_all(&home_b).unwrap();
-        let db = temp.path().join("mu.sqlite3");
-        let first = Ledger::open(LedgerOptions::new(&db, &home_a)).unwrap();
-        drop(first);
-        let changed = Arc::new(Ledger::open(LedgerOptions::new(&db, &home_b)).unwrap());
-        let storage = SourceStorage::with_ledger("scan-1", SourceId::CODEX, changed);
-        let legacy = storage.legacy_codex_ingestion().unwrap();
-        assert!(matches!(
-            legacy.ensure_codex_home(&home_b),
-            Err(SourceStorageError::Storage(StorageErrorKind::SourceChanged))
-        ));
-        assert!(storage.load_usage_epoch().unwrap().is_some());
+        drop(storage);
+        drop(ledger);
+        fs::remove_dir_all(root).expect("remove temporary read seam directory");
     }
 }

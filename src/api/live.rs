@@ -8,9 +8,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::{
-    domain::ScanTrigger,
-    scanner::{CommitFailureKind, RequestDisposition, ScanHandle, ScanRequestError},
+use crate::ingestion::{
+    CommitFailureKind, RequestDisposition, ScanHandle, ScanRequestError, ScanTrigger,
 };
 
 pub const REFRESH_HEADER_VALUE: &str = "1";

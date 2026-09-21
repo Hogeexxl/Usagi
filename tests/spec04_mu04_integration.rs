@@ -16,11 +16,12 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
     domain::{ScanResult, ScanTrigger},
     ingestion::{IngestionConfig, IngestionCoordinator},
+    ingestion::{RequestDisposition, ScanHandle},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition, ScanHandle},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
@@ -95,18 +96,13 @@ impl Fixture {
     }
 
     fn ledger(&self) -> Arc<Ledger> {
-        Arc::new(
-            Ledger::open(LedgerOptions::new(&self.db, &self.home)).expect("open fixture ledger"),
-        )
+        Arc::new(Ledger::open(LedgerOptions::new(&self.db)).expect("open fixture ledger"))
     }
 
     fn scanner(&self, ledger: Arc<Ledger>) -> ScanHandle {
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                self.home.clone(),
-                CodexMetadata::from_home(self.home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(self.home.clone())))
             .expect("register Codex source");
         IngestionCoordinator::start(
             IngestionConfig::default().with_interval(Duration::from_secs(3_600)),
@@ -117,13 +113,14 @@ impl Fixture {
     }
 
     fn router(&self, ledger: Arc<Ledger>, scanner: ScanHandle) -> Router {
-        let codex_quota_service = CodexQuotaService::unavailable(ledger.codex_home());
+        let codex_quota_service = CodexQuotaService::unavailable(&self.home);
         QueryApi::router(
             AppContext {
                 ledger,
                 scanner,
                 source_registry: SourceRegistry::new(),
                 codex_quota_service,
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),
             },
@@ -383,7 +380,7 @@ fn request_and_wait(scanner: &ScanHandle, ledger: &Ledger) {
             Ok(RequestDisposition::Coalesced {
                 followup_scan_id, ..
             }) => break followup_scan_id,
-            Err(usagi::scanner::ScanRequestError::Recovering) => {
+            Err(usagi::ingestion::ScanRequestError::Recovering) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("manual scan request failed: {error:?}"),
@@ -485,7 +482,7 @@ async fn t_mu04_f01_single_fixture_closes_scanner_db_aggregate_api_contract() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM usage_event_occurrences
+                "SELECT count(*) FROM codex_usage_event_occurrences
                  WHERE source='codex' AND ledger_epoch=?1",
                 [epoch],
                 |row| row.get::<_, i64>(0),
@@ -496,7 +493,7 @@ async fn t_mu04_f01_single_fixture_closes_scanner_db_aggregate_api_contract() {
     drop(connection);
 
     let range = TimeRange::new(0, i64::MAX).expect("valid range");
-    let usage = UsageLedger::new(&ledger);
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     let aggregate = usage
         .summary(SummaryQuery::new(range, UsageFilter::default()))
         .expect("aggregate summary");
@@ -643,14 +640,14 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
         .expect("mark old usage parser version");
     connection
         .execute(
-            "UPDATE source_checkpoints SET parser_version=4
+            "UPDATE codex_source_checkpoints SET parser_version=4
              WHERE consumer_kind='usage'",
             [],
         )
         .expect("mark usage checkpoints parser4");
     connection
         .execute(
-            "UPDATE usage_source_states
+            "UPDATE codex_usage_source_states
              SET usage_parser_version=4,canonical_algorithm_version=4
              WHERE ledger_epoch=?1",
             [old_epoch],
@@ -725,7 +722,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
         .expect("read stored alias model");
     assert_eq!(alias_model, "codex-auto-review");
     drop(connection);
-    let old_summary = UsageLedger::new(&reopened)
+    let old_summary = UsageLedger::new(&reopened, &[&CodexSessionErrorSidecar])
         .summary(SummaryQuery::new(
             TimeRange::new(0, i64::MAX).expect("valid old range"),
             UsageFilter::default(),
@@ -761,7 +758,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(
         final_versions,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             None,
             1,
             TARGET_PRICING_CATALOG_VERSION,
@@ -787,7 +784,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM usage_event_occurrences
+                "SELECT count(*) FROM codex_usage_event_occurrences
                  WHERE source='codex' AND ledger_epoch=?1",
                 [new_epoch],
                 |row| row.get::<_, i64>(0),
@@ -798,7 +795,7 @@ fn t_mu04_f02_parser4_pricing1_reprice_and_shadow_rebuild_stay_independent() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(DISTINCT event_id) FROM usage_event_occurrences
+                "SELECT count(DISTINCT event_id) FROM codex_usage_event_occurrences
                  WHERE source='codex' AND ledger_epoch=?1",
                 [new_epoch],
                 |row| row.get::<_, i64>(0),
@@ -905,7 +902,7 @@ fn t_mu04_f03_reserve_historical_reprice_preserves_identity_and_epoch() {
             1,
             TARGET_PRICING_CATALOG_VERSION,
             old_epoch,
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             None,
         )
     );

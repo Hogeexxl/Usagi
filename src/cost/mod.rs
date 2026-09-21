@@ -19,6 +19,20 @@ pub enum UsageCostGranularity {
     AggregateCompensation,
 }
 
+/// Map a canonical usage event kind to its estimator granularity.
+pub(crate) fn granularity_for_event_kind(
+    event_kind: crate::usage::event::EventKind,
+) -> UsageCostGranularity {
+    match event_kind {
+        crate::usage::event::EventKind::Normal | crate::usage::event::EventKind::Recovered => {
+            UsageCostGranularity::RequestScoped
+        }
+        crate::usage::event::EventKind::TurnCompensation => {
+            UsageCostGranularity::AggregateCompensation
+        }
+    }
+}
+
 /// Context tier selected for one usage estimate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextTier {

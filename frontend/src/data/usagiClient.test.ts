@@ -282,7 +282,7 @@ describe("usagiClient DTO seam", () => {
             last_scan_completed_at_ms: null,
             last_scan_failed_at_ms: null,
             last_scan_error_code: null,
-            source_binding_status: "ready",
+            sources: [],
           }),
           { status: 200 },
         ),
@@ -294,7 +294,7 @@ describe("usagiClient DTO seam", () => {
       usage,
     });
     const status = await usagiClient.getStatus();
-    expect(status.source_binding_status).toBe("ready");
+    expect(status.sources).toEqual([]);
     await expect(usagiClient.getRevision()).resolves.toEqual({ data_revision: 3, status_revision: 4 });
   });
 

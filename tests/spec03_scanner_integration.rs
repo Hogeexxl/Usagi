@@ -12,14 +12,13 @@ use usagi::codex::rollout::{
     OwningCandidateConfidence, OwningThreadCandidate, OwningThreadCandidates,
 };
 use usagi::{
+    codex::domain::{SourceArea, SourceObservation, SourceObservationBatch, SourceRegionStatus},
+    codex::{CodexAdapter, CodexConfig},
     codex::{CompleteRolloutLine, ResumeState, RolloutMetadataParser, RolloutParseContext},
-    domain::{
-        ScanResult, ScanTrigger, SourceArea, SourceObservation, SourceObservationBatch,
-        SourceRegionStatus,
-    },
+    domain::{ScanResult, ScanTrigger},
     ingestion::{IngestionConfig, IngestionCoordinator},
-    platform::file_identity,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    ingestion::{RequestDisposition, ScanHandle},
+    platform::{file_identity, paths},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
 };
@@ -103,18 +102,14 @@ impl ScannerFixture {
 
     fn open_ledger(&self) -> Arc<Ledger> {
         Arc::new(
-            Ledger::open(LedgerOptions::new(&self.db_path, &self.home))
-                .expect("open scanner fixture ledger"),
+            Ledger::open(LedgerOptions::new(&self.db_path)).expect("open scanner fixture ledger"),
         )
     }
 
-    fn start(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
+    fn start(&self, ledger: Arc<Ledger>) -> usagi::ingestion::ScanHandle {
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                self.home.clone(),
-                CodexMetadata::from_home(self.home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(self.home.clone())))
             .expect("register Codex source");
         IngestionCoordinator::start(IngestionConfig::default(), ledger, registry)
             .expect("start public scan coordinator")
@@ -141,7 +136,7 @@ impl ScannerFixture {
         }
     }
 
-    fn request_and_wait(&self, handle: &usagi::scanner::ScanHandle, ledger: &Ledger) -> String {
+    fn request_and_wait(&self, handle: &usagi::ingestion::ScanHandle, ledger: &Ledger) -> String {
         let disposition = handle
             .request(ScanTrigger::Manual)
             .expect("request manual scan");
@@ -156,14 +151,16 @@ impl ScannerFixture {
     }
 
     fn source_row(&self) -> (i64, i64, String, Option<String>) {
+        let normalized_rollout_path =
+            paths::normalize_source_path(&self.rollout_path).expect("normalize rollout path");
         Connection::open(&self.db_path)
             .expect("open ledger query")
             .query_row(
                 "SELECT sf.source_file_id, sc.committed_offset, sc.processing_status, sf.thread_id
-                 FROM source_files sf
-                 JOIN source_checkpoints sc USING (source_file_id)
+                 FROM codex_source_files sf
+                 JOIN codex_source_checkpoints sc USING (source_file_id)
                  WHERE sf.current_path = ?1 AND sc.consumer_kind = 'metadata'",
-                [self.rollout_path.to_str().unwrap()],
+                [normalized_rollout_path.to_str().unwrap()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("read source checkpoint")
@@ -294,32 +291,51 @@ fn write_session_index(home: &Path, thread_id: &str, title: &str) {
 }
 
 fn observe_rollout_only(ledger: &Ledger, rollout_path: &Path) -> i64 {
+    let normalized_rollout_path =
+        paths::normalize_source_path(rollout_path).expect("normalize rollout path");
     let file = fs::File::open(rollout_path).expect("open rollout");
     let metadata = file.metadata().expect("stat rollout");
     let identity = file_identity::identity_from_file(&file).expect("rollout identity");
     let mtime_ns = file_identity::modified_ns(&metadata).expect("mtime fits i64 nanoseconds");
-    let observation = SourceObservation::new(
-        rollout_path.to_str().unwrap(),
-        SourceArea::Sessions,
-        i64::try_from(identity.device_id).expect("device id fits i64"),
-        i64::try_from(identity.inode).expect("inode fits i64"),
-        i64::try_from(metadata.len()).expect("file size fits i64"),
-        mtime_ns,
-        1,
-    )
-    .unwrap();
-    ledger
-        .record_source_observations(
-            SourceObservationBatch::new(
-                vec![observation],
-                SourceRegionStatus::Complete,
-                SourceRegionStatus::Complete,
-            )
-            .unwrap(),
+    let source_file_id: i64 = Connection::open(ledger.database_path())
+        .expect("open scanner fixture")
+        .query_row(
+            "SELECT coalesce(max(source_file_id), 0) + 1 FROM codex_source_files",
+            [],
+            |row| row.get(0),
         )
-        .unwrap()
-        .results[0]
-        .source_file_id
+        .expect("allocate source id");
+    let connection = Connection::open(ledger.database_path()).expect("open scanner fixture");
+    connection
+        .execute(
+            "INSERT INTO codex_source_files (
+                source_file_id,thread_id,current_path,source_area,device_id,inode,
+                file_generation,observed_size,observed_mtime_ns,file_status,last_seen_at_ms
+             ) VALUES (?1,NULL,?2,'sessions',?3,?4,1,?5,?6,'present',1)",
+            rusqlite::params![
+                source_file_id,
+                normalized_rollout_path.to_str().unwrap(),
+                i64::try_from(identity.device_id).expect("device id fits i64"),
+                i64::try_from(identity.inode).expect("inode fits i64"),
+                i64::try_from(metadata.len()).expect("file size fits i64"),
+                mtime_ns,
+            ],
+        )
+        .expect("seed source row");
+    connection
+        .execute(
+            "INSERT INTO codex_source_checkpoints (
+                source_file_id,consumer_kind,parser_version,committed_offset,
+                guard_hash,processing_status,last_successful_scan_at_ms,last_error_code
+             ) VALUES (?1,'metadata',1,0,NULL,'pending',NULL,NULL),
+                      (?1,'usage',?2,0,NULL,'pending',NULL,NULL)",
+            rusqlite::params![
+                source_file_id,
+                usagi::codex::normalization::USAGE_PARSER_VERSION,
+            ],
+        )
+        .expect("seed checkpoint rows");
+    source_file_id
 }
 
 fn parse_entire_rollout_without_committing(source_file_id: i64, thread_id: &str, bytes: &[u8]) {
@@ -409,7 +425,7 @@ fn t_s03_009_real_ledger_crash_windows_resume_from_last_committed_offset() {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT committed_offset FROM source_checkpoints
+                    "SELECT committed_offset FROM codex_source_checkpoints
                      WHERE source_file_id = ?1 AND consumer_kind = 'metadata'",
                     [source_id],
                     |row| row.get::<_, i64>(0),
@@ -420,7 +436,7 @@ fn t_s03_009_real_ledger_crash_windows_resume_from_last_committed_offset() {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT count(*) FROM rollout_metadata_facts WHERE source_file_id = ?1",
+                    "SELECT count(*) FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
                     [source_id],
                     |row| row.get::<_, i64>(0),
                 )
@@ -566,7 +582,7 @@ fn t_s03_016_real_scanner_preserves_child_fact_across_parent_replay_until_owning
                     parent_thread_id_hint, replay_start_offset,
                     owning_records_start_offset, continuation_state,
                     ownership_confidence
-             FROM rollout_metadata_facts",
+             FROM codex_rollout_metadata_facts",
             [],
             |row| {
                 Ok((
@@ -613,7 +629,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
     Connection::open(&fixture.db_path)
         .unwrap()
         .execute(
-            "DELETE FROM rollout_metadata_facts WHERE source_file_id = ?1",
+            "DELETE FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
         )
         .unwrap();
@@ -622,7 +638,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
         .unwrap()
         .query_row(
             "SELECT file_generation, resolved_through_offset, latest_context_model
-             FROM rollout_metadata_facts WHERE source_file_id = ?1",
+             FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -637,7 +653,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
     Connection::open(&fixture.db_path)
         .unwrap()
         .execute(
-            "UPDATE rollout_metadata_facts
+            "UPDATE codex_rollout_metadata_facts
              SET file_generation = 999, latest_context_model = 'STALE_GENERATION_MARKER'
              WHERE source_file_id = ?1",
             [source_id],
@@ -648,7 +664,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
         .unwrap()
         .query_row(
             "SELECT file_generation, resolved_through_offset, latest_context_model
-             FROM rollout_metadata_facts WHERE source_file_id = ?1",
+             FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -662,7 +678,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
     Connection::open(&fixture.db_path)
         .unwrap()
         .execute(
-            "UPDATE rollout_metadata_facts
+            "UPDATE codex_rollout_metadata_facts
              SET resolved_through_offset = ?2,
                  latest_context_model = 'STALE_OFFSET_MARKER'
              WHERE source_file_id = ?1",
@@ -674,7 +690,7 @@ fn t_s03_017_missing_and_stale_safe_facts_force_real_worker_rebuild_from_zero() 
         .unwrap()
         .query_row(
             "SELECT resolved_through_offset, latest_context_model
-             FROM rollout_metadata_facts WHERE source_file_id = ?1",
+             FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

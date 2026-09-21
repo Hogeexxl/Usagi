@@ -150,38 +150,3 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
     transaction.commit()?;
     Ok(true)
 }
-
-/// Map a persisted event kind to its estimator granularity.
-pub(crate) fn granularity_for_event_kind(
-    event_kind: super::usage::UsageEventKind,
-) -> UsageCostGranularity {
-    match event_kind {
-        super::usage::UsageEventKind::Normal | super::usage::UsageEventKind::Recovered => {
-            UsageCostGranularity::RequestScoped
-        }
-        super::usage::UsageEventKind::TurnCompensation => {
-            UsageCostGranularity::AggregateCompensation
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_granularity_matches_persisted_kinds() {
-        assert_eq!(
-            granularity_for_event_kind(super::super::usage::UsageEventKind::Normal),
-            UsageCostGranularity::RequestScoped
-        );
-        assert_eq!(
-            granularity_for_event_kind(super::super::usage::UsageEventKind::Recovered),
-            UsageCostGranularity::RequestScoped
-        );
-        assert_eq!(
-            granularity_for_event_kind(super::super::usage::UsageEventKind::TurnCompensation),
-            UsageCostGranularity::AggregateCompensation
-        );
-    }
-}

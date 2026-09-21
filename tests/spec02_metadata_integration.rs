@@ -10,9 +10,11 @@ use std::{
 use rusqlite::{Connection, params};
 use serde_json::json;
 use usagi::{
+    codex::{CodexAdapter, CodexConfig},
     domain::{ScanResult, ScanTrigger},
+    ingestion::RequestDisposition,
     ingestion::{IngestionConfig, IngestionCoordinator},
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    platform::paths,
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
 };
@@ -91,18 +93,14 @@ impl ScannerFixture {
 
     fn open_ledger(&self) -> Arc<Ledger> {
         Arc::new(
-            Ledger::open(LedgerOptions::new(&self.db_path, &self.home))
-                .expect("open scanner fixture ledger"),
+            Ledger::open(LedgerOptions::new(&self.db_path)).expect("open scanner fixture ledger"),
         )
     }
 
-    fn start(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
+    fn start(&self, ledger: Arc<Ledger>) -> usagi::ingestion::ScanHandle {
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                self.home.clone(),
-                CodexMetadata::from_home(self.home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(self.home.clone())))
             .expect("register Codex source");
         IngestionCoordinator::start(IngestionConfig::default(), ledger, registry)
             .expect("start public scan coordinator")
@@ -129,7 +127,7 @@ impl ScannerFixture {
         }
     }
 
-    fn request_and_wait(&self, handle: &usagi::scanner::ScanHandle, ledger: &Ledger) -> String {
+    fn request_and_wait(&self, handle: &usagi::ingestion::ScanHandle, ledger: &Ledger) -> String {
         let disposition = handle
             .request(ScanTrigger::Manual)
             .expect("request manual scan");
@@ -145,13 +143,15 @@ impl ScannerFixture {
 
     fn source_row(&self) -> (i64, i64, String, Option<String>) {
         let connection = Connection::open(&self.db_path).expect("open ledger query");
+        let normalized_rollout_path =
+            paths::normalize_source_path(&self.rollout_path).expect("normalize rollout path");
         connection
             .query_row(
                 "SELECT sf.source_file_id, sc.committed_offset, sc.processing_status, sf.thread_id
-                 FROM source_files sf
-                 JOIN source_checkpoints sc USING (source_file_id)
+                 FROM codex_source_files sf
+                 JOIN codex_source_checkpoints sc USING (source_file_id)
                  WHERE sf.current_path = ?1 AND sc.consumer_kind = 'metadata'",
-                [self.rollout_path.to_str().unwrap()],
+                [normalized_rollout_path.to_str().unwrap()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("read source checkpoint")
@@ -314,7 +314,7 @@ fn t_s02_014_present_rollout_missing_fact_blocks_patch_only_commit() {
     Connection::open(&fixture.db_path)
         .unwrap()
         .execute(
-            "DELETE FROM rollout_metadata_facts WHERE source_file_id = ?1",
+            "DELETE FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
         )
         .unwrap();
@@ -394,7 +394,7 @@ fn t_s02_019_reopen_resumes_from_persisted_nonzero_safe_fact() {
     Connection::open(&fixture.db_path)
         .unwrap()
         .execute(
-            "UPDATE rollout_metadata_facts
+            "UPDATE codex_rollout_metadata_facts
              SET latest_context_model = 'persisted-resume-marker'
              WHERE source_file_id = ?1",
             [source_id],
@@ -429,7 +429,7 @@ fn t_s02_019_reopen_resumes_from_persisted_nonzero_safe_fact() {
     let persisted_model: String = Connection::open(&fixture.db_path)
         .unwrap()
         .query_row(
-            "SELECT latest_context_model FROM rollout_metadata_facts WHERE source_file_id = ?1",
+            "SELECT latest_context_model FROM codex_rollout_metadata_facts WHERE source_file_id = ?1",
             [source_id],
             |row| row.get(0),
         )

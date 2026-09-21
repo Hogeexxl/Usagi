@@ -19,10 +19,6 @@ impl SourceDescriptor {
         Self { id, display_name }
     }
 
-    pub const fn codex() -> Self {
-        Self::new(SourceId::CODEX, "Codex")
-    }
-
     pub fn try_new(
         id: SourceId,
         display_name: &'static str,
@@ -218,18 +214,19 @@ mod tests {
             .register(TestAdapter::new(SourceId::new("zeta").unwrap(), "Zeta"))
             .unwrap();
         registry
-            .register(TestAdapter::new(SourceId::CODEX, "Codex"))
+            .register(TestAdapter::new(SourceId::new("alpha").unwrap(), "Alpha"))
             .unwrap();
         assert_eq!(
             registry
                 .source_ids()
                 .map(SourceId::as_str)
                 .collect::<Vec<_>>(),
-            ["codex", "zeta"]
+            ["alpha", "zeta"]
         );
         assert!(matches!(
-            registry.register(TestAdapter::new(SourceId::CODEX, "Codex")),
-            Err(SourceRegistryError::DuplicateSource(source)) if source == SourceId::CODEX
+            registry.register(TestAdapter::new(SourceId::new("alpha").unwrap(), "Alpha")),
+            Err(SourceRegistryError::DuplicateSource(source))
+                if source == SourceId::new("alpha").unwrap()
         ));
     }
 }

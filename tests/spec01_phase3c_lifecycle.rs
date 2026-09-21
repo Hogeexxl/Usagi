@@ -55,7 +55,7 @@ fn ledger_fixture(label: &str) -> (TempRoot, PathBuf, Arc<Ledger>) {
     let home = root.path().join("codex");
     fs::create_dir_all(&home).expect("create Codex home");
     let db = root.path().join("mu.sqlite3");
-    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db, &home)).expect("open ledger"));
+    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db)).expect("open ledger"));
     (root, db, ledger)
 }
 
@@ -270,7 +270,7 @@ fn c06_recovery_terminalizes_only_unfinished_children_as_interrupted() {
     drop(ledger);
 
     let home = root.path().join("codex");
-    let reopened = Arc::new(Ledger::open(LedgerOptions::new(&db, &home)).unwrap());
+    let reopened = Arc::new(Ledger::open(LedgerOptions::new(&db)).unwrap());
     let handle = IngestionCoordinator::start(
         IngestionConfig::default().with_interval(Duration::from_secs(300)),
         Arc::clone(&reopened),

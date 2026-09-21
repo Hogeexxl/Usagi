@@ -6,7 +6,6 @@ pub mod ingestion;
 pub mod launcher;
 pub mod platform;
 pub mod range;
-pub mod scanner;
 pub mod source;
 pub mod storage;
 pub mod update;

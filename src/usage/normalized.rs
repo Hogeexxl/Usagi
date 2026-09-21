@@ -2,19 +2,6 @@
 
 use crate::domain::DomainError;
 
-/// The parser and canonical algorithm versions compiled into this binary.
-pub const USAGE_PARSER_VERSION: i64 = 11;
-pub const USAGE_CANONICAL_ALGORITHM_VERSION: i64 = 5;
-
-/// Return the canonical algorithm that belongs to a parser version.
-pub const fn canonical_algorithm_for(parser_version: i64) -> Option<i64> {
-    match parser_version {
-        4 | 5 => Some(4),
-        6 | 7 | 8 | 9 | 10 | USAGE_PARSER_VERSION => Some(USAGE_CANONICAL_ALGORITHM_VERSION),
-        _ => None,
-    }
-}
-
 /// Provider-independent token counts.  All values are validated before they
 /// cross the adapter boundary and all arithmetic is checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,24 +193,6 @@ impl NormalizedTokenUsage {
     pub fn cache_hit_rate(&self) -> Option<f64> {
         (self.input_tokens > 0).then(|| self.cached_tokens as f64 / self.input_tokens as f64)
     }
-
-    pub fn fingerprint(&self) -> [u8; 32] {
-        let mut bytes = Vec::with_capacity(8 * 7 + 1);
-        bytes.extend_from_slice(&USAGE_CANONICAL_ALGORITHM_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&self.input_tokens.to_be_bytes());
-        bytes.extend_from_slice(&self.cached_tokens.to_be_bytes());
-        match self.cache_write_tokens {
-            Some(value) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&value.to_be_bytes());
-            }
-            None => bytes.push(0),
-        }
-        bytes.extend_from_slice(&self.output_tokens.to_be_bytes());
-        bytes.extend_from_slice(&self.reasoning_tokens.to_be_bytes());
-        bytes.extend_from_slice(&self.total_tokens.to_be_bytes());
-        *blake3::hash(&bytes).as_bytes()
-    }
 }
 
 #[cfg(test)]
@@ -314,33 +283,5 @@ mod tests {
         let lower =
             NormalizedTokenUsage::new(10_000, 6_000, Some(1_999), 1_500, 500, 11_500).unwrap();
         assert!(lower.checked_sub(&current).is_err());
-    }
-
-    #[test]
-    fn t_dc_010_fingerprint_is_v5_and_distinguishes_states() {
-        assert_eq!(USAGE_PARSER_VERSION, 11);
-        assert_eq!(USAGE_CANONICAL_ALGORITHM_VERSION, 5);
-        assert_eq!(canonical_algorithm_for(1), None);
-        assert_eq!(canonical_algorithm_for(2), None);
-        assert_eq!(canonical_algorithm_for(3), None);
-        assert_eq!(canonical_algorithm_for(4), Some(4));
-        assert_eq!(canonical_algorithm_for(5), Some(4));
-        assert_eq!(canonical_algorithm_for(6), Some(5));
-        assert_eq!(canonical_algorithm_for(8), Some(5));
-        assert_eq!(canonical_algorithm_for(9), Some(5));
-        assert_eq!(canonical_algorithm_for(10), Some(5));
-        assert_eq!(canonical_algorithm_for(11), Some(5));
-        assert_eq!(
-            standard(Some(2_000)).fingerprint(),
-            standard(Some(2_000)).fingerprint()
-        );
-        assert_ne!(
-            standard(Some(2_000)).fingerprint(),
-            standard(None).fingerprint()
-        );
-        assert_ne!(
-            standard(Some(2_000)).fingerprint(),
-            standard(Some(2_001)).fingerprint()
-        );
     }
 }

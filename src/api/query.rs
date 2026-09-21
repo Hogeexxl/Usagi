@@ -10,9 +10,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    domain::{
-        AppState, FollowupState, ScanRun, ScanStatusSnapshot, SourceBindingStatus, SourceScanStatus,
-    },
+    codex::analytics::SkillsUsage,
+    domain::{AppState, FollowupState, ScanRun, ScanStatusSnapshot, SourceScanStatus},
     range::ResolvedRange,
     source::SourceId,
     storage::{Ledger, StorageErrorKind},
@@ -25,7 +24,7 @@ use crate::{
         },
         analytics::{
             AnalyticsSnapshot, DistributionCostStatus, ModelDistributionRow,
-            ProjectDistributionIdentity, ProjectDistributionRow, SkillsUsage,
+            ProjectDistributionIdentity, ProjectDistributionRow,
         },
         ledger::{
             SessionDetailSnapshot, SessionRowsSnapshot, SessionSnapshot, UsageLedgerError,
@@ -431,7 +430,6 @@ pub struct StatusResponse {
     pub last_scan_completed_at_ms: Option<i64>,
     pub last_scan_failed_at_ms: Option<i64>,
     pub last_scan_error_code: Option<String>,
-    pub source_binding_status: String,
     pub sources: Vec<SourceScanStatusDto>,
 }
 
@@ -1240,12 +1238,6 @@ pub fn status_from_snapshot(snapshot: ScanStatusSnapshot) -> Result<StatusRespon
         last_scan_completed_at_ms: state.last_scan_completed_at_ms,
         last_scan_failed_at_ms: state.last_scan_failed_at_ms,
         last_scan_error_code: state.last_scan_error_code,
-        source_binding_status: match state.source_binding_status {
-            SourceBindingStatus::Unbound => "unbound",
-            SourceBindingStatus::Ready => "ready",
-            SourceBindingStatus::SourceChanged => "source_changed",
-        }
-        .to_owned(),
         sources,
     })
 }
@@ -1281,7 +1273,6 @@ pub(crate) fn map_usage_ledger_error(error: UsageLedgerError) -> ApiError {
         UsageLedgerError::Aggregate(error) => map_aggregate_error(error),
         UsageLedgerError::StaleDataRevision => ApiError::StaleDataRevision,
         UsageLedgerError::Invalid(_) => ApiError::QueryFailed,
-        UsageLedgerError::Pipeline(_) | UsageLedgerError::Rebuild(_) => ApiError::QueryFailed,
     }
 }
 
@@ -1308,7 +1299,7 @@ mod tests {
     use crate::{
         domain::{
             AppState, FollowupState, ScanLifecycleState, ScanRequestKind, ScanResult, ScanRunState,
-            ScanState, ScanTrigger, SourceBindingStatus,
+            ScanState, ScanTrigger,
         },
         range::{RangeKey, resolve_utc_range_at_for_test},
         usage::aggregate::{CostCompleteness, ModelUsageRow, SessionUsageRow, TokenTotals},
@@ -1814,7 +1805,6 @@ mod tests {
             followup_requested_at_ms: Some(3),
             followup_enqueued_status_revision: Some(11),
             followup_error_code: Some("SCANNER_UNAVAILABLE".into()),
-            source_binding_status: SourceBindingStatus::SourceChanged,
         };
         let app_state = AppState::new(8, scan).unwrap();
         let target = ScanRun {
@@ -1846,7 +1836,6 @@ mod tests {
             Some("SCANNER_UNAVAILABLE")
         );
         assert_eq!(response.target_scan.unwrap().state, "failed");
-        assert_eq!(response.source_binding_status, "source_changed");
         assert_eq!(response.last_scan_completed_at_ms, None);
 
         assert_eq!(
@@ -1882,7 +1871,6 @@ mod tests {
                     followup_requested_at_ms: Some(11),
                     followup_enqueued_status_revision: Some(4),
                     followup_error_code: None,
-                    source_binding_status: SourceBindingStatus::Ready,
                 },
                 "running",
                 Some("queued"),
@@ -1906,7 +1894,6 @@ mod tests {
                     followup_requested_at_ms: None,
                     followup_enqueued_status_revision: None,
                     followup_error_code: None,
-                    source_binding_status: SourceBindingStatus::Ready,
                 },
                 "idle",
                 None,
@@ -1915,7 +1902,7 @@ mod tests {
             ),
         ];
 
-        for (scan, expected_state, expected_followup, expected_result, binding) in cases {
+        for (scan, expected_state, expected_followup, expected_result, _binding) in cases {
             let response = status_from_snapshot(
                 ScanStatusSnapshot::new(AppState::new(3, scan).unwrap(), None).unwrap(),
             )
@@ -1929,7 +1916,6 @@ mod tests {
                 response.last_finished_scan_result.as_deref(),
                 expected_result
             );
-            assert_eq!(response.source_binding_status, binding);
             if let Some(followup) = response.followup {
                 assert_eq!(
                     followup.error_code, None,

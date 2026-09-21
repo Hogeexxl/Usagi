@@ -49,14 +49,26 @@ impl SourceAvailability {
     }
 }
 
+pub mod domain;
 pub mod global_state;
 pub mod metadata;
+pub mod normalization;
 pub mod quota;
 pub mod rollout;
 pub mod session_index;
 mod skill_usage;
 pub mod state_index;
 pub mod usage;
+
+mod adapter;
+pub(crate) mod analytics;
+mod config;
+pub(crate) mod ingestion;
+pub(crate) mod status;
+pub(crate) mod storage;
+
+pub use adapter::{CodexAdapter, CodexSessionErrorSidecar};
+pub use config::{CodexConfig, CodexConfigError, CodexConfigResolution, CodexMetadataPaths};
 
 pub use crate::domain::ExistingThreadProjection;
 

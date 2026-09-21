@@ -1115,64 +1115,31 @@ impl ScanWorker for RegistryWorker {
             }
             match adapter.availability() {
                 Ok(AdapterAvailability::Unavailable(reason)) => {
-                    if source == crate::source::SourceId::CODEX {
-                        let detail = reason;
-                        let _child_result = self.ledger.mark_source_scan_failed(
-                            scan_id,
-                            source.as_str(),
-                            now_ms(),
-                            "SCANNER_UNAVAILABLE",
-                        );
-                        reports.push(SourceRunReport::failed_with_detail(
-                            scan_id,
-                            &source,
-                            "SCANNER_UNAVAILABLE",
-                            detail,
-                        ));
+                    if self
+                        .ledger
+                        .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
+                        .is_err()
+                    {
                         failed = true;
-                    } else {
-                        if self
-                            .ledger
-                            .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
-                            .is_err()
-                        {
-                            failed = true;
-                        }
-                        reports.push(SourceRunReport::skipped_with_detail(
-                            scan_id, &source, reason,
-                        ));
                     }
+                    reports.push(SourceRunReport::skipped_with_detail(
+                        scan_id, &source, reason,
+                    ));
                     continue;
                 }
                 Ok(AdapterAvailability::NotInstalled) => {
-                    if source == crate::source::SourceId::CODEX {
-                        let _ = self.ledger.mark_source_scan_failed(
-                            scan_id,
-                            source.as_str(),
-                            now_ms(),
-                            "SCANNER_UNAVAILABLE",
-                        );
-                        reports.push(SourceRunReport::failed_with_detail(
-                            scan_id,
-                            &source,
-                            "SCANNER_UNAVAILABLE",
-                            "source is not installed",
-                        ));
+                    if self
+                        .ledger
+                        .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
+                        .is_err()
+                    {
                         failed = true;
-                    } else {
-                        if self
-                            .ledger
-                            .mark_source_scan_skipped(scan_id, source.as_str(), now_ms())
-                            .is_err()
-                        {
-                            failed = true;
-                        }
-                        reports.push(SourceRunReport::skipped_with_detail(
-                            scan_id,
-                            &source,
-                            "source is not installed",
-                        ));
                     }
+                    reports.push(SourceRunReport::skipped_with_detail(
+                        scan_id,
+                        &source,
+                        "source is not installed",
+                    ));
                     continue;
                 }
                 Ok(AdapterAvailability::Available) => {}
@@ -1491,7 +1458,7 @@ mod tests {
                 None,
             )),
             InjectedFailure::Internal => StorageError::invalid_state("injected lifecycle failure"),
-            InjectedFailure::SourceChanged => StorageError::source_changed("old", "new"),
+            InjectedFailure::SourceChanged => StorageError::invalid_state("injected source change"),
             InjectedFailure::BlockAfter => {
                 unreachable!("test-only timing controls are not storage errors")
             }
@@ -1531,15 +1498,8 @@ mod tests {
 
     fn setup(label: &str) -> (TempDir, Arc<Ledger>, IngestionConfig) {
         let temp = TempDir::new(label);
-        let codex_home = temp.path().join("codex");
-        fs::create_dir_all(&codex_home).unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(
-                temp.path().join("mu.sqlite3"),
-                &codex_home,
-            ))
-            .unwrap(),
-        );
+        let ledger =
+            Arc::new(Ledger::open(LedgerOptions::new(temp.path().join("mu.sqlite3"))).unwrap());
         (temp, ledger, IngestionConfig::new())
     }
 

@@ -788,9 +788,7 @@ async fn t_public_api_v1_revision_and_status_expose_only_public_contract() {
 #[tokio::test]
 async fn q05_c_public_status_excludes_zero_child_followup_from_prev11_fallback() {
     let fixture = support::ApiFixture::new("public-v1-followup-fallback");
-    let base_t = fixture
-        .ledger
-        .codex_scan_status_snapshot()
+    let base_t = crate::codex::status::snapshot(&fixture.ledger)
         .unwrap()
         .last_scan_started_at_ms
         .unwrap_or(0)
@@ -879,9 +877,7 @@ async fn q05_c_public_status_excludes_zero_child_followup_from_prev11_fallback()
 #[tokio::test]
 async fn q05_public_v1_status_state_matrix_keeps_ready_binding() {
     let fixture = support::ApiFixture::new("public-v1-state-matrix");
-    let base_t = fixture
-        .ledger
-        .codex_scan_status_snapshot()
+    let base_t = crate::codex::status::snapshot(&fixture.ledger)
         .unwrap()
         .last_scan_started_at_ms
         .unwrap_or(0)
@@ -1050,9 +1046,7 @@ async fn t_public_api_v1_status_multi_source_isolation() {
     let fixture = support::ApiFixture::new("public-v1-multisource");
     let sources = vec!["codex".to_owned(), "fake".to_owned()];
 
-    let base_t = fixture
-        .ledger
-        .codex_scan_status_snapshot()
+    let base_t = crate::codex::status::snapshot(&fixture.ledger)
         .unwrap()
         .last_scan_started_at_ms
         .unwrap_or(0)

@@ -13,6 +13,7 @@ import {
   type SessionSnapshotResponse,
   type SessionSortField,
   type SessionSortOrder,
+  type SourceScanStatusDto,
   type StatusResponse,
   type SummaryResponse,
   type SummaryUsageDto,
@@ -661,16 +662,35 @@ function parseTarget(value: unknown): TargetScanDto {
   };
 }
 
+function parseSourceScanStatus(value: unknown): SourceScanStatusDto {
+  const record = requiredRecord(value);
+  if (!hasOnlyKeys(record, ["source", "state", "error_code"])) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const source = requiredString(record, "source");
+  const state = requiredString(record, "state");
+  if (!["queued", "running", "completed", "skipped", "failed"].includes(state)) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const errorCode = nullableString(record, "error_code");
+  if ((state === "failed") !== (errorCode !== null)) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  return {
+    source,
+    state: state as SourceScanStatusDto["state"],
+    error_code: errorCode,
+  };
+}
+
 function parseStatus(value: unknown): StatusResponse {
   const record = requiredRecord(value);
   const scanState = requiredString(record, "scan_state");
-  if (!["startup", "running", "idle", "failed", "source_changed"].includes(scanState)) {
+  if (!["startup", "running", "idle", "failed"].includes(scanState)) {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
-  const binding = requiredString(record, "source_binding_status");
-  if (!["unbound", "ready", "source_changed"].includes(binding)) {
-    throw new UsagiClientError("HTTP_ERROR", 200);
-  }
+  const sourcesValue = record.sources;
+  if (!Array.isArray(sourcesValue)) throw new UsagiClientError("HTTP_ERROR", 200);
   const followupValue = record.followup;
   const targetValue = record.target_scan;
   return {
@@ -686,7 +706,7 @@ function parseStatus(value: unknown): StatusResponse {
     last_scan_completed_at_ms: nullableSafeInteger(record, "last_scan_completed_at_ms"),
     last_scan_failed_at_ms: nullableSafeInteger(record, "last_scan_failed_at_ms"),
     last_scan_error_code: nullableString(record, "last_scan_error_code"),
-    source_binding_status: binding as StatusResponse["source_binding_status"],
+    sources: sourcesValue.map(parseSourceScanStatus),
   };
 }
 

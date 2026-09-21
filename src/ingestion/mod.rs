@@ -8,7 +8,9 @@
 pub(crate) mod coordinator;
 pub(crate) mod policy;
 
-pub use crate::scanner::LegacyCodexSourceAdapter;
+pub use crate::domain::ScanTrigger;
 pub use coordinator::{
-    IngestionConfig, IngestionConfigError, IngestionCoordinator, IngestionStartError,
+    CommitFailureKind, IngestionConfig, IngestionConfigError, IngestionCoordinator,
+    IngestionStartError, RequestDisposition, ScanHandle, ScanRequestError, ScanShutdownError,
+    ScanStartError,
 };

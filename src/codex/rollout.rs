@@ -153,7 +153,7 @@ impl RolloutThreadFact {
     }
 
     /// Convert a parser fact to the durable Spec 01 safe-fact shape.  The
-    /// scanner/ledger supplies every commit-context value explicitly; this
+    /// scanner/storage seam supplies every commit-context value explicitly; this
     /// adapter never guesses a generation, parser version, offset, or clock.
     pub fn to_safe_fact(
         &self,
@@ -162,8 +162,8 @@ impl RolloutThreadFact {
         resolved_through_offset: u64,
         updated_at_ms: i64,
         continuation: &FinalContinuation,
-    ) -> Result<crate::domain::RolloutMetadataFact, crate::domain::DomainError> {
-        use crate::domain::{
+    ) -> Result<crate::codex::domain::RolloutMetadataFact, crate::domain::DomainError> {
+        use crate::codex::domain::{
             AgentPathProvenance as DomainAgentPathProvenance,
             AgentRoleProvenance as DomainAgentRoleProvenance,
             ContinuationState as DomainContinuationState, CwdProvenance as DomainCwdProvenance,
@@ -314,13 +314,13 @@ impl RolloutThreadFact {
         Ok(fact)
     }
 
-    /// Rehydrate the resolver-facing fact from a Ledger-matched safe fact.
+    /// Rehydrate the resolver-facing fact from a storage-matched safe fact.
     /// This is used only for `Skip`: generation/parser/offset/binding matching
     /// has already happened in `load_metadata_scan_state` upstream.
     pub fn from_safe_fact(
-        fact: &crate::domain::RolloutMetadataFact,
+        fact: &crate::codex::domain::RolloutMetadataFact,
     ) -> Result<Self, crate::domain::DomainError> {
-        use crate::domain::{
+        use crate::codex::domain::{
             AgentPathProvenance as DomainAgentPathProvenance,
             AgentRoleProvenance as DomainAgentRoleProvenance, CwdProvenance as DomainCwdProvenance,
             OwnershipConfidence as DomainOwnershipConfidence,
@@ -451,7 +451,7 @@ impl RolloutThreadFact {
             },
             has_conflict: matches!(
                 fact.fact_quality_status,
-                crate::domain::FactQualityStatus::Conflict
+                crate::codex::domain::FactQualityStatus::Conflict
             ),
             relationship_conflict: fact.relationship_conflict,
         };
@@ -1869,7 +1869,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             safe.parent_hint_provenance,
-            Some(crate::domain::ParentHintProvenance::SessionMetaParent)
+            Some(crate::codex::domain::ParentHintProvenance::SessionMetaParent)
         );
         assert_eq!(
             RolloutThreadFact::from_safe_fact(&safe)
@@ -2175,11 +2175,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             safe.continuation_state,
-            crate::domain::ContinuationState::ReplayedAncestor
+            crate::codex::domain::ContinuationState::ReplayedAncestor
         );
         assert_eq!(
             safe.ownership_confidence,
-            crate::domain::OwnershipConfidence::Confirmed
+            crate::codex::domain::OwnershipConfidence::Confirmed
         );
     }
 
@@ -2610,7 +2610,7 @@ mod tests {
         assert_eq!(safe.agent_path.as_deref(), Some("/root/persisted_task"));
         assert_eq!(
             safe.agent_path_provenance,
-            Some(crate::domain::AgentPathProvenance::SessionMeta)
+            Some(crate::codex::domain::AgentPathProvenance::SessionMeta)
         );
         assert_eq!(safe.agent_path_record_offset, Some(record_offset as i64));
         let restored = RolloutThreadFact::from_safe_fact(&safe).unwrap();

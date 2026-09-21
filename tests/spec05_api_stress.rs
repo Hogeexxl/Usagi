@@ -19,10 +19,10 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
     ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
@@ -58,7 +58,7 @@ struct Fixture {
     _root: TempRoot,
     rollout: PathBuf,
     ledger: Arc<Ledger>,
-    scanner: usagi::scanner::ScanHandle,
+    scanner: usagi::ingestion::ScanHandle,
     app: Router,
 }
 impl Fixture {
@@ -103,15 +103,11 @@ impl Fixture {
         )
         .unwrap();
 
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
+        let ledger =
+            Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"))).unwrap());
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                home.clone(),
-                CodexMetadata::from_home(home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
             .unwrap();
         let scanner = IngestionCoordinator::start(
             IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
@@ -120,13 +116,14 @@ impl Fixture {
         )
         .unwrap();
         wait_quiet(&ledger, Duration::from_secs(8));
-        let codex_quota_service = CodexQuotaService::unavailable(ledger.codex_home());
+        let codex_quota_service = CodexQuotaService::unavailable(&home);
         let app = QueryApi::router(
             AppContext {
                 ledger: Arc::clone(&ledger),
                 scanner: scanner.clone(),
                 source_registry: SourceRegistry::new(),
                 codex_quota_service,
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),
             },

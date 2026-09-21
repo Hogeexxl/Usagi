@@ -10,10 +10,12 @@ use std::{
     path::Path,
 };
 
+use crate::codex::domain::{FileStatus, SourceArea, SourceFileState};
 use crate::domain::{
-    AgentRole, ExistingThreadProjection, FileStatus, MetadataQualityStatus, Patch, ProjectKind,
-    ResolvedThreadPatch, SourceArea, SourceFileState,
+    AgentRole, ExistingThreadProjection, MetadataQualityStatus, Patch, ProjectKind,
+    ResolvedThreadPatch, SessionIdentity,
 };
+use crate::source::SourceId;
 
 use super::{
     GlobalStateSnapshot, GlobalStateStatus,
@@ -749,7 +751,8 @@ impl Resolver {
             MetadataQualityStatus::Complete
         };
 
-        let mut patch = ResolvedThreadPatch::new(thread_id, self.input.resolved_at_ms).ok()?;
+        let identity = SessionIdentity::new(thread_id, SourceId::CODEX, thread_id).ok()?;
+        let mut patch = ResolvedThreadPatch::new(&identity, self.input.resolved_at_ms).ok()?;
         patch.full_resolution = source_view_complete;
         patch.metadata_quality_status = quality;
 
@@ -1215,12 +1218,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::codex::domain::{FileStatus, SourceArea};
     use crate::codex::{
         rollout::{Candidate, OwnershipBoundary},
         session_index::{SessionNameFact, SessionSourceStatus},
         state_index::{SpawnEdgeFact, SpawnEdgeSource, StateSourceStatus},
     };
-    use crate::domain::{FileStatus, SourceArea};
 
     fn fixture_path(name: &str) -> String {
         std::env::temp_dir()

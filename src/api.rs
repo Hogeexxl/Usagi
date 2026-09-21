@@ -23,10 +23,11 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    codex::CodexSessionErrorSidecar,
     codex::quota::{CodexQuotaResponse, CodexQuotaService},
+    ingestion::{CommitFailureKind, ScanHandle, ScanShutdownError},
     platform::browser::BrowserOpener,
     range::{RangeKey, resolve_day_buckets, resolve_system_custom_range, resolve_system_range},
-    scanner::{CommitFailureKind, ScanHandle, ScanShutdownError},
     source::{SourceId, SourceRegistry},
     storage::{Ledger, RevisionTuple},
     update::{ReleaseInfo, UpdateService, UpdateSnapshot},
@@ -53,6 +54,7 @@ pub struct AppContext {
     pub scanner: ScanHandle,
     pub source_registry: SourceRegistry,
     pub codex_quota_service: Arc<CodexQuotaService>,
+    pub codex_session_error_sidecar: Arc<CodexSessionErrorSidecar>,
     pub update_service: Arc<UpdateService>,
     pub browser_opener: Arc<dyn BrowserOpener>,
 }
@@ -274,10 +276,14 @@ async fn summary(
     let aggregate_range = range.aggregate_range()?;
     let summary_query = SummaryQuery::new(aggregate_range, params.filter);
     let ledger = Arc::clone(&state.context.ledger);
-    let snapshot =
-        run_blocking_query(move || UsageLedger::new(&ledger).summary_snapshot(summary_query))
-            .await?
-            .map_err(query::map_usage_ledger_error)?;
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
+    let snapshot = run_blocking_query(move || {
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).summary_snapshot(summary_query)
+    })
+    .await?
+    .map_err(query::map_usage_ledger_error)?;
     Ok(Json(query::summary_response(&range, snapshot)?))
 }
 
@@ -293,8 +299,11 @@ async fn sessions(
     )?;
     let aggregate_range = range.aggregate_range()?;
     let ledger = Arc::clone(&state.context.ledger);
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
     let snapshot = run_blocking_query(move || {
-        UsageLedger::new(&ledger).sessions_snapshot(
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).sessions_snapshot(
             aggregate_range,
             params.filter,
             params.seed_sort_field,
@@ -318,8 +327,11 @@ async fn session_rows(
     )?;
     let aggregate_range = range.aggregate_range()?;
     let ledger = Arc::clone(&state.context.ledger);
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
     let snapshot = run_blocking_query(move || {
-        UsageLedger::new(&ledger).session_rows_snapshot(
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).session_rows_snapshot(
             aggregate_range,
             params.filter,
             params.expected_data_revision,
@@ -347,8 +359,11 @@ async fn session_detail(
     )?;
     let aggregate_range = range.aggregate_range()?;
     let ledger = Arc::clone(&state.context.ledger);
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
     let snapshot = run_blocking_query(move || {
-        UsageLedger::new(&ledger).session_detail_snapshot(
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).session_detail_snapshot(
             aggregate_range,
             params.filter,
             params.expected_data_revision,
@@ -372,8 +387,12 @@ async fn models(
     )?;
     let aggregate_range = range.aggregate_range()?;
     let ledger = Arc::clone(&state.context.ledger);
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
     let snapshot = run_blocking_query(move || {
-        UsageLedger::new(&ledger).models_snapshot_filtered(aggregate_range, &params.filter)
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars)
+            .models_snapshot_filtered(aggregate_range, &params.filter)
     })
     .await?
     .map_err(query::map_usage_ledger_error)?;
@@ -449,7 +468,7 @@ async fn skills_usage(
     }
     let ledger = Arc::clone(&state.context.ledger);
     let snapshot = run_blocking_query(move || {
-        crate::usage::analytics::skills_usage_snapshot(&ledger, &days, &params.filter)
+        crate::codex::analytics::skills_usage_snapshot(&ledger, &days, &params.filter)
     })
     .await?
     .map_err(query::map_usage_ledger_error)?;
@@ -460,9 +479,14 @@ async fn filter_options(
     State(state): State<ApiState>,
 ) -> Result<Json<query::FilterOptionsResponse>, ApiError> {
     let ledger = Arc::clone(&state.context.ledger);
-    let snapshot = run_blocking_query(move || UsageLedger::new(&ledger).filter_options_snapshot())
-        .await?
-        .map_err(query::map_usage_ledger_error)?;
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
+    let snapshot = run_blocking_query(move || {
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).filter_options_snapshot()
+    })
+    .await?
+    .map_err(query::map_usage_ledger_error)?;
     let mut response = query::filter_options_response(snapshot)?;
     for option in &mut response.sources {
         if let Ok(source) = SourceId::new(option.source.clone())

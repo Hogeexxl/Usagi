@@ -21,8 +21,9 @@ use serde::Serialize;
 
 use crate::{
     codex::quota::{CodexQuotaResponse, CodexQuotaStatus, CodexQuotaWindow},
+    codex::status::CodexScanStatusSnapshot,
     source::SourceId,
-    storage::{CodexScanStatusSnapshot, RevisionTuple},
+    storage::RevisionTuple,
     usage::{SummaryQuery, aggregate::UsageFilter, ledger::UsageLedger},
 };
 
@@ -116,7 +117,7 @@ impl From<CodexScanStatusSnapshot> for StatusResponse {
 
 async fn status(State(state): State<ApiState>) -> Result<Json<StatusResponse>, ApiError> {
     let ledger = Arc::clone(&state.context.ledger);
-    let snapshot = run_blocking_query(move || ledger.codex_scan_status_snapshot())
+    let snapshot = run_blocking_query(move || crate::codex::status::snapshot(&ledger))
         .await?
         .map_err(query::map_storage_error)?;
     query::ensure_safe(snapshot.data_revision)?;
@@ -331,10 +332,14 @@ async fn summary(
         UsageFilter::default().with_sources(vec![SourceId::CODEX]),
     );
     let ledger = Arc::clone(&state.context.ledger);
-    let snapshot =
-        run_blocking_query(move || UsageLedger::new(&ledger).summary_snapshot(summary_query))
-            .await?
-            .map_err(query::map_usage_ledger_error)?;
+    let codex_sidecar = Arc::clone(&state.context.codex_session_error_sidecar);
+    let snapshot = run_blocking_query(move || {
+        let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
+            [codex_sidecar.as_ref()];
+        UsageLedger::new(&ledger, &sidecars).summary_snapshot(summary_query)
+    })
+    .await?
+    .map_err(query::map_usage_ledger_error)?;
     let response = query::summary_response(&range, snapshot)?;
     Ok(Json(response.into()))
 }

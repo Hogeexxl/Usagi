@@ -16,13 +16,6 @@ pub fn home_dir() -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
 
-/// Resolve the default Codex home without creating it.
-pub fn default_codex_home() -> PathBuf {
-    home_dir()
-        .map(|home| home.join(".codex"))
-        .unwrap_or_else(|| PathBuf::from(".codex"))
-}
-
 /// Resolve the canonical Usagi database path.
 ///
 /// `BaseDirs::data_local_dir` maps to `~/Library/Application Support` on
@@ -48,14 +41,6 @@ pub(crate) fn legacy_database_path() -> Option<PathBuf> {
         .join(LEGACY_DATABASE_DIRECTORY)
         .join(DATABASE_FILENAME);
     normalize_path(path).ok()
-}
-
-/// Resolve an explicitly supplied or environment-selected Codex home.
-pub fn resolve_codex_home(explicit: Option<PathBuf>) -> PathBuf {
-    resolve_codex_home_with_env(
-        explicit,
-        non_empty_env_path("CODEX_HOME").map(PathBuf::into_os_string),
-    )
 }
 
 /// Resolve a path to an absolute, stable representation for internal use.
@@ -103,25 +88,6 @@ pub fn same_source_path(left: &Path, right: &Path) -> bool {
         (Some(left), Some(right)) => left == right,
         _ => false,
     }
-}
-
-fn non_empty_env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn resolve_codex_home_with_env(
-    explicit: Option<PathBuf>,
-    env_home: Option<std::ffi::OsString>,
-) -> PathBuf {
-    explicit
-        .or_else(|| {
-            env_home
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(default_codex_home)
 }
 
 fn lexically_normalize(path: &Path) -> PathBuf {
@@ -215,33 +181,6 @@ mod tests {
         assert!(
             path.to_string_lossy()
                 .contains("Library/Application Support/Usagi")
-        );
-    }
-
-    #[test]
-    fn t_dist_002_explicit_env_default_precedence_and_empty_env() {
-        assert_eq!(non_empty_env_path("USAGI_TEST_MISSING"), None);
-        let explicit = PathBuf::from(if cfg!(windows) {
-            r"C:\用户\.codex"
-        } else {
-            "/tmp/用户/.codex"
-        });
-        let env_home = PathBuf::from(if cfg!(windows) {
-            r"C:\环境\.codex"
-        } else {
-            "/tmp/环境/.codex"
-        });
-        assert_eq!(
-            resolve_codex_home_with_env(Some(explicit.clone()), Some(env_home.clone().into())),
-            explicit
-        );
-        assert_eq!(
-            resolve_codex_home_with_env(None, Some(env_home.clone().into())),
-            env_home
-        );
-        assert_eq!(
-            resolve_codex_home_with_env(None, Some(std::ffi::OsString::new())),
-            default_codex_home()
         );
     }
 

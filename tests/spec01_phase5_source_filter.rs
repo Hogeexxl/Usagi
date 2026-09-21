@@ -4,7 +4,7 @@
 //! - Q01: Codex-only data invariance (no filter == source=codex for KPI, sessions, charts)
 //! - Q02: Multi-source isolation and combined filtering (all = codex + fake)
 //! - Q03: Session identity and Codex backward compatibility
-//! - Q04: Public API v1 /v1/usage/summary isolation (returns only Codex data)
+//! - Q04: Public API v1 /v1/usage/summary isolation (recodex_turns only Codex data)
 //! - Q06: Filter options source facts and fallback display names
 //! - Q07: All session identity DTOs carry source and native_session_id
 
@@ -25,10 +25,11 @@ use serde_json::Value;
 use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
+    ingestion::ScanHandle,
     ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, ScanHandle},
     source::{
         AdapterAvailability, SourceAdapter, SourceAdapterError, SourceDescriptor, SourceId,
         SourceRegistry, SourceRunContext, SourceRunResult,
@@ -121,14 +122,11 @@ impl TestApp {
         fs::write(static_dir.join("index.html"), "<html>phase5</html>").unwrap();
 
         let db_path = root.path().join("mu.sqlite3");
-        let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path, &home)).unwrap());
+        let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
 
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                home.clone(),
-                CodexMetadata::from_home(home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
             .expect("register Codex source");
 
         configure(&mut registry);
@@ -148,6 +146,7 @@ impl TestApp {
                 scanner: scanner.clone(),
                 source_registry: registry,
                 codex_quota_service: CodexQuotaService::unavailable(&home),
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),
             },
@@ -828,7 +827,7 @@ async fn q05_codex_quarantine_and_session_health_are_source_isolated() {
             ts,
         );
         conn.execute(
-            "INSERT INTO usage_session_quarantine(
+            "INSERT INTO codex_usage_session_quarantine(
                  ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,
                  first_seen_at_ms,updated_at_ms
              ) VALUES (?1,?2,?3,?4,?4,?4), (?1,?5,?3,?4,?4,?4)",

@@ -11,23 +11,21 @@ use axum::{
     http::{Method, Request, StatusCode},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
     domain::{ScanResult, ScanTrigger},
+    ingestion::RequestDisposition,
     ingestion::{IngestionConfig, IngestionCoordinator},
-    platform::browser::SystemBrowser,
-    platform::file_identity,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition},
+    platform::{browser::SystemBrowser, file_identity, paths},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
-    usage::{
-        CompletionStatus, SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger,
-    },
+    usage::{SessionPageRequest, SummaryQuery, TimeRange, UsageFilter, UsageLedger},
 };
 
 const ROOT: &str = "00000000-03e8-7000-8000-000000000001";
@@ -35,6 +33,217 @@ const CHILD: &str = "00000000-07d0-7000-8000-000000000002";
 
 fn empty_summary_query(range: TimeRange) -> SummaryQuery {
     SummaryQuery::new(range, UsageFilter::default())
+}
+
+fn seed_usage_rebuild_for_carry(
+    connection: &Connection,
+    source_file_id: i64,
+    parser_version: i64,
+    now_ms: i64,
+) {
+    let active_epoch: i64 = connection
+        .query_row(
+            "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let build_epoch = active_epoch + 1;
+    let source: (i64, i64, i64, i64, String, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT sf.file_generation,sf.device_id,sf.inode,sf.observed_size,
+                    sf.file_status,sf.thread_id,t.root_session_id
+             FROM codex_source_files sf
+             LEFT JOIN threads t ON t.thread_id=sf.thread_id
+             WHERE sf.source_file_id=?1",
+            [source_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    let checkpoint: (i64, Option<Vec<u8>>) = connection
+        .query_row(
+            "SELECT committed_offset,guard_hash
+             FROM codex_source_checkpoints
+             WHERE source_file_id=?1 AND consumer_kind='usage'",
+            [source_file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let active_state_fingerprint = connection
+        .query_row(
+            "SELECT file_generation,device_id,inode,usage_parser_version,
+                    canonical_algorithm_version,resolved_through_offset,observed_raw_size,
+                    raw_tail_status,raw_tail_start_offset,owning_thread_id,root_session_id,
+                    continuation_state,previous_total_input_tokens,
+                    previous_total_cached_tokens,previous_total_cache_write_tokens,
+                    previous_total_output_tokens,previous_total_reasoning_tokens,
+                    previous_total_total_tokens,previous_total_fingerprint,
+                    previous_total_offset,chain_state,chain_block_reason,active_turn_key,
+                    active_model,active_model_offset,active_reasoning_effort,
+                    active_reasoning_effort_offset
+             FROM codex_usage_source_states
+             WHERE ledger_epoch=?1 AND source_file_id=?2",
+            params![active_epoch, source_file_id],
+            |row| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"usage-source-state-proof-v2");
+                for index in 0..27 {
+                    match row.get_ref(index)? {
+                        ValueRef::Null => {
+                            hasher.update(&[0]);
+                        }
+                        ValueRef::Integer(value) => {
+                            hasher.update(&[1]);
+                            hasher.update(&value.to_be_bytes());
+                        }
+                        ValueRef::Real(value) => {
+                            hasher.update(&[2]);
+                            hasher.update(&value.to_bits().to_be_bytes());
+                        }
+                        ValueRef::Text(value) => {
+                            hasher.update(&[3]);
+                            hasher.update(&(value.len() as u64).to_be_bytes());
+                            hasher.update(value);
+                        }
+                        ValueRef::Blob(value) => {
+                            hasher.update(&[4]);
+                            hasher.update(&(value.len() as u64).to_be_bytes());
+                            hasher.update(value);
+                        }
+                    }
+                }
+                Ok(hasher.finalize().as_bytes().to_vec())
+            },
+        )
+        .unwrap();
+    let (raw_tail_status, raw_tail_start_offset): (String, Option<i64>) = connection
+        .query_row(
+            "SELECT raw_tail_status,raw_tail_start_offset
+             FROM codex_usage_source_states
+             WHERE ledger_epoch=?1 AND source_file_id=?2",
+            params![active_epoch, source_file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+
+    connection
+        .execute(
+            "UPDATE source_usage_epochs SET build_epoch=?1,build_parser_version=?2
+             WHERE source='codex' AND build_epoch IS NULL AND active_epoch=?3",
+            params![build_epoch, parser_version, active_epoch],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO codex_usage_build_sources(
+                build_epoch,source_file_id,target_parser_version,
+                expected_file_generation,expected_device_id,expected_inode,
+                expected_owning_thread_id,expected_root_session_id,
+                active_committed_offset,active_guard_hash,active_state_fingerprint,
+                required_generation,required_through_offset,observed_raw_size,
+                raw_tail_status,raw_tail_start_offset,membership_reason,
+                completion_status,completion_error_code,completed_generation,
+                completed_through_offset,carry_from_epoch,carry_phase,
+                carry_after_start_offset,carry_after_turn_key,carry_after_anomaly_id,
+                created_at_ms,updated_at_ms
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?4,?9,?12,
+                       ?13,?14,'both','pending',NULL,NULL,NULL,NULL,'none',NULL,NULL,NULL,?15,?15)",
+            params![
+                build_epoch,
+                source_file_id,
+                parser_version,
+                source.0,
+                source.1,
+                source.2,
+                source.5,
+                source.6,
+                checkpoint.0,
+                checkpoint.1,
+                active_state_fingerprint,
+                source.3,
+                raw_tail_status,
+                raw_tail_start_offset,
+                now_ms,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE codex_source_checkpoints SET parser_version=?1,committed_offset=0,
+                    guard_hash=NULL,processing_status='rebuild_required',
+                    last_successful_scan_at_ms=NULL,last_error_code=NULL
+             WHERE source_file_id=?2 AND consumer_kind='usage'",
+            params![parser_version, source_file_id],
+        )
+        .unwrap();
+}
+
+fn seed_blocked_usage_build(connection: &Connection, source_file_id: i64, parser_version: i64) {
+    let owning_thread: Option<String> = connection
+        .query_row(
+            "SELECT thread_id
+             FROM codex_source_files WHERE source_file_id=?1",
+            [source_file_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO codex_source_checkpoints(
+                source_file_id,consumer_kind,parser_version,committed_offset,
+                guard_hash,processing_status,last_successful_scan_at_ms,last_error_code
+             ) VALUES (?1,'usage',?2,0,NULL,'rebuild_required',NULL,NULL)",
+            params![source_file_id, parser_version],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE source_usage_epochs SET build_epoch=active_epoch+1,
+                    build_parser_version=?1 WHERE source='codex'",
+            [parser_version],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE codex_source_checkpoints SET parser_version=?1,committed_offset=0,
+                    guard_hash=NULL,processing_status='rebuild_required'
+             WHERE source_file_id=?2 AND consumer_kind='usage'",
+            params![parser_version, source_file_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO codex_usage_build_sources(
+                build_epoch,source_file_id,target_parser_version,
+                expected_file_generation,expected_device_id,expected_inode,
+                expected_owning_thread_id,expected_root_session_id,
+                active_committed_offset,active_guard_hash,active_state_fingerprint,
+                required_generation,required_through_offset,observed_raw_size,
+                raw_tail_status,raw_tail_start_offset,membership_reason,
+                completion_status,completion_error_code,completed_generation,
+                completed_through_offset,carry_from_epoch,carry_phase,
+                carry_after_start_offset,carry_after_turn_key,carry_after_anomaly_id,
+                created_at_ms,updated_at_ms)
+             SELECT sue.build_epoch,?1,?2,sf.file_generation,sf.device_id,sf.inode,
+                    ?3,NULL,0,NULL,NULL,sf.file_generation,sf.observed_size,
+                    sf.observed_size,'none',NULL,'active_contributor','blocked',
+                    'fixture_blocked',NULL,NULL,NULL,'none',NULL,NULL,NULL,0,0
+             FROM source_usage_epochs sue JOIN codex_source_files sf
+               ON sf.source_file_id=?1
+             WHERE sue.source='codex'",
+            params![source_file_id, parser_version, owning_thread],
+        )
+        .unwrap();
 }
 
 struct TempRoot(PathBuf);
@@ -86,16 +295,13 @@ impl Fixture {
     }
 
     fn ledger(&self) -> Arc<Ledger> {
-        Arc::new(Ledger::open(LedgerOptions::new(&self.db, &self.home)).unwrap())
+        Arc::new(Ledger::open(LedgerOptions::new(&self.db)).unwrap())
     }
 
-    fn start(&self, ledger: Arc<Ledger>) -> usagi::scanner::ScanHandle {
+    fn start(&self, ledger: Arc<Ledger>) -> usagi::ingestion::ScanHandle {
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                self.home.clone(),
-                CodexMetadata::from_home(self.home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(self.home.clone())))
             .expect("register Codex source");
         IngestionCoordinator::start(IngestionConfig::default(), ledger, registry).unwrap()
     }
@@ -371,7 +577,7 @@ fn wait_scan(ledger: &Ledger, wanted: Option<&str>) {
     }
 }
 
-fn request_and_wait(handle: &usagi::scanner::ScanHandle, ledger: &Ledger) {
+fn request_and_wait(handle: &usagi::ingestion::ScanHandle, ledger: &Ledger) {
     let id = match handle.request(ScanTrigger::Manual).unwrap() {
         RequestDisposition::Started { scan_id, .. } => scan_id,
         RequestDisposition::Coalesced {
@@ -398,7 +604,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 11);
+    assert_eq!(user_version, 12);
     let source_id = 1_i64;
     let db = Connection::open(&fixture.db).unwrap();
     let old_metadata: (i64, i64, Option<String>, Option<String>, Option<i64>) = db
@@ -406,7 +612,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
             "SELECT c.parser_version,f.metadata_parser_version,
                     f.parent_thread_id_hint,f.parent_hint_provenance,
                     f.parent_hint_record_offset
-             FROM source_checkpoints c JOIN rollout_metadata_facts f
+             FROM codex_source_checkpoints c JOIN codex_rollout_metadata_facts f
                ON f.source_file_id=c.source_file_id
              WHERE c.source_file_id=?1 AND c.consumer_kind='metadata'",
             [source_id],
@@ -424,39 +630,31 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(old_metadata, (1, 1, None, None, None));
     drop(db);
 
-    let usage = UsageLedger::new(&ledger);
-    let build = usage
-        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 10)
-        .unwrap();
-    assert_eq!(build.active_epoch, 0);
-    assert_eq!(build.build_epoch, 1);
-    assert_eq!(
-        build.target_parser_version,
-        usagi::usage::USAGE_PARSER_VERSION
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
+    let db = Connection::open(&fixture.db).unwrap();
+    seed_blocked_usage_build(
+        &db,
+        source_id,
+        usagi::codex::normalization::USAGE_PARSER_VERSION,
     );
-    assert_eq!(build.members.len(), 1);
-    assert_eq!(
-        build.members[0].completion_status,
-        CompletionStatus::Blocked
-    );
-    let expected_root: Option<String> = Connection::open(&fixture.db)
-        .unwrap()
+    let expected_root: Option<String> = db
         .query_row(
-            "SELECT expected_root_session_id FROM usage_build_sources
-             WHERE build_epoch=?1 AND source_file_id=?2",
-            params![build.build_epoch, source_id],
+            "SELECT expected_root_session_id FROM codex_usage_build_sources
+             WHERE build_epoch=1 AND source_file_id=?1",
+            [source_id],
             |row| row.get(0),
         )
         .unwrap();
     assert!(expected_root.is_none());
-
-    // The incomplete manifest cannot be activated by a caller; activation is
-    // reached only after metadata reconciliation and a complete usage proof.
-    assert!(
-        usage
-            .activate_rebuild(build.build_epoch, &[source_id])
-            .is_err()
-    );
+    let completion_status: String = db
+        .query_row(
+            "SELECT completion_status FROM codex_usage_build_sources
+             WHERE build_epoch=1 AND source_file_id=?1",
+            [source_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(completion_status, "blocked");
     let db = Connection::open(&fixture.db).unwrap();
     let before_scan: (i64, Option<i64>, i64) = db
         .query_row(
@@ -470,7 +668,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let usage_checkpoint_before: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='usage'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -479,7 +677,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_checkpoint_before,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             0,
             "rebuild_required".to_owned()
         )
@@ -507,11 +705,14 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap();
     assert_eq!(after_scan.0, 1);
     assert!(after_scan.1.is_none());
-    assert_eq!(after_scan.2, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(
+        after_scan.2,
+        usagi::codex::normalization::USAGE_PARSER_VERSION
+    );
     assert!(after_scan.3 > 0);
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_build_sources WHERE build_epoch=1",
+            "SELECT count(*) FROM codex_usage_build_sources WHERE build_epoch=1",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -521,7 +722,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let metadata_checkpoint: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='metadata'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -539,7 +740,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .query_row(
             "SELECT metadata_parser_version,parent_thread_id_hint,
                     parent_hint_provenance,parent_hint_record_offset
-             FROM rollout_metadata_facts WHERE source_file_id=?1",
+             FROM codex_rollout_metadata_facts WHERE source_file_id=?1",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -572,7 +773,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     let usage_checkpoint_after: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='usage'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -581,7 +782,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_checkpoint_after,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             bytes.len() as i64,
             "ready".to_owned()
         )
@@ -590,7 +791,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .query_row(
             "SELECT usage_parser_version,resolved_through_offset,
                     owning_thread_id,root_session_id,raw_tail_status
-             FROM usage_source_states
+             FROM codex_usage_source_states
              WHERE ledger_epoch=1 AND source_file_id=?1",
             [source_id],
             |row| {
@@ -607,7 +808,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
     assert_eq!(
         usage_state,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             bytes.len() as i64,
             CHILD.to_owned(),
             ROOT.to_owned(),
@@ -725,7 +926,7 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     let backfilled_cost: Option<i64> = db
         .query_row(
@@ -775,7 +976,7 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     assert_eq!(active.4.as_deref(), Some("high"));
     let metadata_parser: i64 = db
         .query_row(
-            "SELECT parser_version FROM source_checkpoints
+            "SELECT parser_version FROM codex_source_checkpoints
              WHERE source_file_id=1 AND consumer_kind='metadata'",
             [],
             |row| row.get(0),
@@ -783,14 +984,17 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
         .unwrap();
     let usage_parser: i64 = db
         .query_row(
-            "SELECT parser_version FROM source_checkpoints
+            "SELECT parser_version FROM codex_source_checkpoints
              WHERE source_file_id=1 AND consumer_kind='usage'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(metadata_parser, usagi::codex::METADATA_PARSER_VERSION);
-    assert_eq!(usage_parser, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(
+        usage_parser,
+        usagi::codex::normalization::USAGE_PARSER_VERSION
+    );
     drop(db);
     scanner.shutdown().unwrap();
 }
@@ -828,13 +1032,13 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     )
     .unwrap();
     db.execute(
-        "UPDATE source_checkpoints SET parser_version=3
+        "UPDATE codex_source_checkpoints SET parser_version=3
          WHERE source_file_id=1 AND consumer_kind='usage'",
         [],
     )
     .unwrap();
     db.execute(
-        "UPDATE usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
+        "UPDATE codex_usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
          WHERE ledger_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
            AND source_file_id=1",
         [],
@@ -876,14 +1080,14 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     )
     .unwrap();
     db.execute(
-        "UPDATE source_checkpoints SET parser_version=3,committed_offset=0,
+        "UPDATE codex_source_checkpoints SET parser_version=3,committed_offset=0,
                 guard_hash=NULL,processing_status='pending'
          WHERE source_file_id=1 AND consumer_kind='usage'",
         [],
     )
     .unwrap();
     db.execute(
-        "UPDATE usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
+        "UPDATE codex_usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
          WHERE ledger_epoch=(SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
            AND source_file_id=1",
         [],
@@ -923,11 +1127,18 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
         .unwrap();
     assert_eq!(
         after,
-        (2, baseline.1, 1, 1, 0, usagi::usage::USAGE_PARSER_VERSION,)
+        (
+            2,
+            baseline.1,
+            1,
+            1,
+            0,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
+        )
     );
     assert_eq!(fs::read(&rollout).unwrap(), raw_before);
 
-    let detail = UsageLedger::new(&ledger)
+    let detail = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .session_detail_snapshot(
             TimeRange::new(0, i64::MAX).unwrap(),
             UsageFilter::default(),
@@ -959,13 +1170,14 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
     let static_dir = fixture._root.path().join("static");
     fs::create_dir_all(&static_dir).unwrap();
     fs::write(static_dir.join("index.html"), "<html>s03</html>").unwrap();
-    let codex_quota_service = CodexQuotaService::unavailable(ledger.codex_home());
+    let codex_quota_service = CodexQuotaService::unavailable(&fixture.home);
     let app = QueryApi::router(
         AppContext {
             ledger: Arc::clone(&ledger),
             scanner: scanner.clone(),
             source_registry: SourceRegistry::new(),
             codex_quota_service,
+            codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
             update_service: UpdateService::unavailable(),
             browser_opener: Arc::new(SystemBrowser),
         },
@@ -1034,7 +1246,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
             },
         )
         .unwrap();
-    assert_eq!(initial.1, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(initial.1, usagi::codex::normalization::USAGE_PARSER_VERSION);
     assert_eq!((initial.2, initial.3), (1, 4));
     let initial_tokens: i64 = db
         .query_row(
@@ -1050,13 +1262,13 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     // and event totals remain untouched.
     let db = Connection::open(&fixture.db).unwrap();
     db.execute(
-        "UPDATE source_checkpoints SET parser_version=2
+        "UPDATE codex_source_checkpoints SET parser_version=2
          WHERE source_file_id=1 AND consumer_kind='metadata'",
         [],
     )
     .unwrap();
     db.execute(
-        "UPDATE rollout_metadata_facts SET metadata_parser_version=2
+        "UPDATE codex_rollout_metadata_facts SET metadata_parser_version=2
          WHERE source_file_id=1",
         [],
     )
@@ -1067,7 +1279,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     let metadata_only: (i64, i64, i64) = db
         .query_row(
             "SELECT sue.active_epoch,sue.active_parser_version,
-                    (SELECT parser_version FROM source_checkpoints
+                    (SELECT parser_version FROM codex_source_checkpoints
                      WHERE source_file_id=1 AND consumer_kind='metadata')
              FROM source_usage_epochs sue WHERE sue.source='codex'",
             [],
@@ -1086,7 +1298,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         metadata_only,
         (
             initial.0,
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             usagi::codex::METADATA_PARSER_VERSION,
         )
     );
@@ -1137,14 +1349,14 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
     )
     .unwrap();
     db.execute(
-        "UPDATE source_checkpoints SET parser_version=3,committed_offset=0,
+        "UPDATE codex_source_checkpoints SET parser_version=3,committed_offset=0,
                 guard_hash=NULL,processing_status='pending'
          WHERE source_file_id=1 AND consumer_kind='usage'",
         [],
     )
     .unwrap();
     db.execute(
-        "UPDATE usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
+        "UPDATE codex_usage_source_states SET usage_parser_version=3,canonical_algorithm_version=3
          WHERE ledger_epoch=?1 AND source_file_id=1",
         [initial.0],
     )
@@ -1157,7 +1369,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
             Ok(RequestDisposition::Coalesced {
                 followup_scan_id, ..
             }) => break followup_scan_id,
-            Err(usagi::scanner::ScanRequestError::Recovering) => {
+            Err(usagi::ingestion::ScanRequestError::Recovering) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("usage upgrade scan request failed: {error:?}"),
@@ -1169,7 +1381,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         .query_row(
             "SELECT sue.active_epoch,sue.active_parser_version,am.cost_algorithm_version,
                     pricing_catalog_version,
-                    (SELECT parser_version FROM source_checkpoints
+                    (SELECT parser_version FROM codex_source_checkpoints
                      WHERE source_file_id=1 AND consumer_kind='metadata')
              FROM source_usage_epochs sue JOIN app_meta am ON am.id=1
              WHERE sue.source='codex'",
@@ -1186,7 +1398,10 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         )
         .unwrap();
     assert_ne!(usage_only.0, initial.0);
-    assert_eq!(usage_only.1, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(
+        usage_only.1,
+        usagi::codex::normalization::USAGE_PARSER_VERSION
+    );
     assert_eq!((usage_only.2, usage_only.3), (1, 4));
     assert_eq!(usage_only.4, usagi::codex::METADATA_PARSER_VERSION);
     scanner.shutdown().unwrap();
@@ -1220,7 +1435,7 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
         .unwrap();
     assert_eq!(app.0, 1);
     assert!(app.1.is_none());
-    assert_eq!(app.2, usagi::usage::USAGE_PARSER_VERSION);
+    assert_eq!(app.2, usagi::codex::normalization::USAGE_PARSER_VERSION);
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=1",
@@ -1232,7 +1447,7 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
     );
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM usage_event_occurrences
+            "SELECT count(*) FROM codex_usage_event_occurrences
              WHERE source='codex' AND ledger_epoch=1",
             [],
             |r| r.get::<_, i64>(0)
@@ -1283,9 +1498,12 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
         1
     );
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_event_occurrences", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
+        db.query_row(
+            "SELECT count(*) FROM codex_usage_event_occurrences",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         2
     );
     let raw = fs::read(&fixture.db).unwrap();
@@ -1302,7 +1520,7 @@ fn t_s04_010_026_035_046_047_real_scanner_builds_active_usage_and_dedupes_archiv
     }
     drop(db);
 
-    let usage = UsageLedger::new(&ledger);
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     let summary = usage
         .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
@@ -1373,24 +1591,35 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
 
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
     let source_id: i64 = Connection::open(&fixture.db)
         .unwrap()
         .query_row(
-            "SELECT source_file_id FROM source_files WHERE current_path=?1",
-            [rollout.to_str().unwrap()],
+            "SELECT source_file_id FROM codex_source_files WHERE current_path=?1",
+            [normalized_rollout.to_str().unwrap()],
             |r| r.get(0),
         )
         .unwrap();
-    let before = UsageLedger::new(&ledger)
+    let before = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
     let rev_before = ledger.app_state().unwrap().data_revision;
 
-    let build = UsageLedger::new(&ledger)
-        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 100)
-        .unwrap();
-    assert_eq!(build.build_epoch, 2);
     let db = Connection::open(&fixture.db).unwrap();
+    seed_usage_rebuild_for_carry(
+        &db,
+        source_id,
+        usagi::codex::normalization::USAGE_PARSER_VERSION,
+        100,
+    );
+    let build_epoch: i64 = db
+        .query_row(
+            "SELECT build_epoch FROM source_usage_epochs WHERE source='codex'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(build_epoch, 2);
     let active_during: i64 = db
         .query_row(
             "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
@@ -1414,16 +1643,16 @@ fn t_s04_033_036_037_040_042_missing_source_carries_active_facts_and_reactivates
         .unwrap();
     assert_eq!(epoch, (2, None));
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_event_occurrences WHERE source='codex' AND ledger_epoch=2 AND source_file_id=?1", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
+        db.query_row("SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=2 AND source_file_id=?1", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
         1
     );
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_source_states WHERE ledger_epoch=2 AND source_file_id=?1 AND raw_tail_status<>'unverified'", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
+        db.query_row("SELECT count(*) FROM codex_usage_source_states WHERE ledger_epoch=2 AND source_file_id=?1 AND raw_tail_status<>'unverified'", [source_id], |r| r.get::<_, i64>(0)).unwrap(),
         1
     );
     drop(db);
 
-    let after = UsageLedger::new(&ledger)
+    let after = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
     assert_eq!(after.totals, before.totals);
@@ -1447,17 +1676,18 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     let ledger = fixture.ledger();
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
 
     let source_id: i64 = Connection::open(&fixture.db)
         .unwrap()
         .query_row(
-            "SELECT source_file_id FROM source_files WHERE current_path=?1",
-            [rollout.to_str().unwrap()],
+            "SELECT source_file_id FROM codex_source_files WHERE current_path=?1",
+            [normalized_rollout.to_str().unwrap()],
             |r| r.get(0),
         )
         .unwrap();
     let offset_before: i64 = Connection::open(&fixture.db).unwrap()
-        .query_row("SELECT committed_offset FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'", [source_id], |r| r.get(0)).unwrap();
+        .query_row("SELECT committed_offset FROM codex_source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'", [source_id], |r| r.get(0)).unwrap();
 
     // A truly missing last is recovered from the durable cumulative baseline.
     let recovered = json!({
@@ -1470,7 +1700,7 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     bytes.push(b'\n');
     fs::write(&rollout, &bytes).unwrap();
     request_and_wait(&handle, &ledger);
-    let usage = UsageLedger::new(&ledger);
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     assert_eq!(
         usage
             .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
@@ -1490,7 +1720,7 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
         .unwrap(),
         1
     );
-    let after_recovered: i64 = db.query_row("SELECT committed_offset FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'", [source_id], |r| r.get(0)).unwrap();
+    let after_recovered: i64 = db.query_row("SELECT committed_offset FROM codex_source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'", [source_id], |r| r.get(0)).unwrap();
     assert!(after_recovered > offset_before);
     drop(db);
 
@@ -1508,7 +1738,7 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     let tail: (i64, String, Option<i64>) = db
         .query_row(
             "SELECT c.committed_offset,s.raw_tail_status,s.raw_tail_start_offset
-         FROM source_checkpoints c JOIN usage_source_states s
+         FROM codex_source_checkpoints c JOIN codex_usage_source_states s
            ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(
                SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
          WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
@@ -1556,7 +1786,7 @@ fn t_s04_007_008_009_013_014_031_032_043_045_047_incremental_recovery_half_line_
     let final_tail: (i64, i64, String) = db
         .query_row(
             "SELECT c.committed_offset,s.observed_raw_size,s.raw_tail_status
-         FROM source_checkpoints c JOIN usage_source_states s
+         FROM codex_source_checkpoints c JOIN codex_usage_source_states s
            ON s.source_file_id=c.source_file_id AND s.ledger_epoch=(
                SELECT active_epoch FROM source_usage_epochs WHERE source='codex')
          WHERE c.source_file_id=?1 AND c.consumer_kind='usage'",
@@ -1589,7 +1819,7 @@ fn t_s04_019_root_unconfirmed_blocks_usage_then_parent_resolution_replays_once()
     let ledger = fixture.ledger();
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
-    let usage = UsageLedger::new(&ledger);
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     assert_eq!(
         usage
             .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
@@ -1600,7 +1830,7 @@ fn t_s04_019_root_unconfirmed_blocks_usage_then_parent_resolution_replays_once()
     );
     let db = Connection::open(&fixture.db).unwrap();
     let usage_offset: Option<i64> = db.query_row(
-        "SELECT committed_offset FROM source_checkpoints c JOIN source_files s USING(source_file_id) WHERE c.consumer_kind='usage' AND s.current_path=?1",
+        "SELECT committed_offset FROM codex_source_checkpoints c JOIN codex_source_files s USING(source_file_id) WHERE c.consumer_kind='usage' AND s.current_path=?1",
         [rollout.to_str().unwrap()], |r| r.get(0)).optional().unwrap();
     assert!(usage_offset.is_none() || usage_offset == Some(0));
     drop(db);
@@ -1630,9 +1860,12 @@ fn t_s04_019_root_unconfirmed_blocks_usage_then_parent_resolution_replays_once()
         1
     );
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_event_occurrences", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
+        db.query_row(
+            "SELECT count(*) FROM codex_usage_event_occurrences",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
     handle.shutdown().unwrap();
@@ -1640,8 +1873,6 @@ fn t_s04_019_root_unconfirmed_blocks_usage_then_parent_resolution_replays_once()
 
 #[test]
 fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_shadow_build() {
-    use usagi::domain::{CheckpointRebuildCommand, ConsumerKind};
-
     let fixture = Fixture::new("bounded-multibatch");
     let mut records = vec![
         json!({"type":"session_meta","timestamp":"2026-08-08T04:00:00Z","payload":{"id":ROOT,"cwd":"/work/main","agent_role":"main"}}),
@@ -1655,7 +1886,8 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     let ledger = fixture.ledger();
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
-    let usage = UsageLedger::new(&ledger);
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
+    let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     assert_eq!(
         usage
             .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
@@ -1668,8 +1900,8 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     let db = Connection::open(&fixture.db).unwrap();
     let source_id: i64 = db
         .query_row(
-            "SELECT source_file_id FROM source_files WHERE current_path=?1",
-            [rollout.to_str().unwrap()],
+            "SELECT source_file_id FROM codex_source_files WHERE current_path=?1",
+            [normalized_rollout.to_str().unwrap()],
             |r| r.get(0),
         )
         .unwrap();
@@ -1687,9 +1919,14 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
         .unwrap();
     drop(db);
 
-    ledger
-        .require_checkpoint_rebuild(
-            CheckpointRebuildCommand::new(ConsumerKind::Usage, vec![source_id]).unwrap(),
+    Connection::open(&fixture.db)
+        .unwrap()
+        .execute(
+            "UPDATE codex_source_checkpoints SET committed_offset=0,
+                    guard_hash=NULL,processing_status='rebuild_required',
+                    last_successful_scan_at_ms=NULL,last_error_code=NULL
+             WHERE source_file_id=?1 AND consumer_kind='usage'",
+            [source_id],
         )
         .unwrap();
     request_and_wait(&handle, &ledger);
@@ -1698,7 +1935,7 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     let (active, build, revision, offset, raw): (i64, Option<i64>, i64, i64, i64) = db.query_row(
         "SELECT sue.active_epoch,sue.build_epoch,a.data_revision,c.committed_offset,s.observed_size
          FROM app_meta a JOIN source_usage_epochs sue ON sue.source='codex',
-              source_checkpoints c JOIN source_files s USING(source_file_id)
+              codex_source_checkpoints c JOIN codex_source_files s USING(source_file_id)
          WHERE a.id=1 AND c.consumer_kind='usage' AND c.source_file_id=?1",
         [source_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
     assert_eq!(
@@ -1782,10 +2019,11 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     );
 
     let db = Connection::open(&fixture.db).unwrap();
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
     let source_id: i64 = db
         .query_row(
-            "SELECT source_file_id FROM source_files WHERE current_path=?1",
-            [rollout.to_str().unwrap()],
+            "SELECT source_file_id FROM codex_source_files WHERE current_path=?1",
+            [normalized_rollout.to_str().unwrap()],
             |row| row.get(0),
         )
         .unwrap();
@@ -1801,7 +2039,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     let first_checkpoint: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='usage'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1810,7 +2048,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         first_checkpoint,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             initial_offset,
             "ready".to_owned()
         )
@@ -1820,7 +2058,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
             "SELECT reasoning_effort_state,single_reasoning_effort,
                     unresolved_reasoning_effort_seen,accounted_candidate_count,
                     state_through_offset,status
-             FROM turns
+             FROM codex_turns
              WHERE ledger_epoch=?1 AND source_file_id=?2 AND turn_key=?3",
             params![first_epoch.0, source_id, TURN],
             |row| {
@@ -1866,25 +2104,22 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     file.write_all(&appended_bytes).unwrap();
     drop(file);
 
-    let usage = UsageLedger::new(&ledger);
-    let build = usage
-        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, [source_id], 100)
+    Connection::open(&fixture.db)
+        .unwrap()
+        .execute(
+            "UPDATE codex_source_checkpoints SET committed_offset=0,
+                    guard_hash=NULL,processing_status='rebuild_required',
+                    last_successful_scan_at_ms=NULL,last_error_code=NULL
+             WHERE source_file_id=?1 AND consumer_kind='usage'",
+            [source_id],
+        )
         .unwrap();
-    assert_eq!(build.active_epoch, first_epoch.0);
-    assert!(build.build_epoch > build.active_epoch);
-    assert_eq!(build.members.len(), 1);
-    assert_eq!(
-        build.members[0].completion_status,
-        CompletionStatus::Pending
-    );
-    let required_boundary = build.members[0].required_through_offset;
-    assert_eq!(required_boundary, u64::try_from(initial_offset).unwrap());
 
     let db = Connection::open(&fixture.db).unwrap();
     let rebuild_checkpoint: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='usage'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1893,7 +2128,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         rebuild_checkpoint,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             0,
             "rebuild_required".to_owned()
         )
@@ -1918,14 +2153,14 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(final_epoch.0, build.build_epoch);
+    assert_eq!(final_epoch.0, first_epoch.0 + 1);
     assert!(final_epoch.1.is_none());
     // The completed member is consumed by atomic activation; active_epoch and
     // the final ready checkpoint are the durable rebuilt proof afterward.
     let final_checkpoint: (i64, i64, String) = db
         .query_row(
             "SELECT parser_version,committed_offset,processing_status
-             FROM source_checkpoints
+             FROM codex_source_checkpoints
              WHERE source_file_id=?1 AND consumer_kind='usage'",
             [source_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1934,15 +2169,15 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
     assert_eq!(
         final_checkpoint,
         (
-            usagi::usage::USAGE_PARSER_VERSION,
+            usagi::codex::normalization::USAGE_PARSER_VERSION,
             final_offset,
             "ready".to_owned()
         )
     );
-    assert!(final_checkpoint.1 >= i64::try_from(required_boundary).unwrap());
+    assert!(final_checkpoint.1 >= initial_offset);
     let final_state_offset: i64 = db
         .query_row(
-            "SELECT resolved_through_offset FROM usage_source_states
+            "SELECT resolved_through_offset FROM codex_usage_source_states
              WHERE ledger_epoch=?1 AND source_file_id=?2",
             params![final_epoch.0, source_id],
             |row| row.get(0),
@@ -1954,7 +2189,7 @@ fn t_hf_re04_shadow_rebuild_cross_batch_none_to_single_completes() {
             "SELECT reasoning_effort_state,single_reasoning_effort,
                     unresolved_reasoning_effort_seen,accounted_candidate_count,
                     state_through_offset,status
-             FROM turns
+             FROM codex_turns
              WHERE ledger_epoch=?1 AND source_file_id=?2 AND turn_key=?3",
             params![final_epoch.0, source_id, TURN],
             |row| {
@@ -2006,16 +2241,17 @@ fn t_s04_019_t_s02_020_late_foreign_meta_discards_preceding_usage_and_starts_reb
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
 
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
     let db = Connection::open(&fixture.db).unwrap();
     let source_id: i64 = db
         .query_row(
-            "SELECT source_file_id FROM source_files WHERE current_path=?1",
-            [rollout.to_str().unwrap()],
+            "SELECT source_file_id FROM codex_source_files WHERE current_path=?1",
+            [normalized_rollout.to_str().unwrap()],
             |r| r.get(0),
         )
         .unwrap();
     let old_offset: i64 = db.query_row(
-        "SELECT committed_offset FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'",
+        "SELECT committed_offset FROM codex_source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'",
         [source_id], |r| r.get(0),
     ).unwrap();
     drop(db);
@@ -2055,8 +2291,8 @@ fn t_s04_019_t_s02_020_late_foreign_meta_discards_preceding_usage_and_starts_reb
         "SELECT
             (SELECT active_epoch FROM source_usage_epochs WHERE source='codex'),
             (SELECT build_epoch FROM source_usage_epochs WHERE source='codex'),
-            (SELECT processing_status FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'),
-            (SELECT committed_offset FROM source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage')",
+            (SELECT processing_status FROM codex_source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage'),
+            (SELECT committed_offset FROM codex_source_checkpoints WHERE source_file_id=?1 AND consumer_kind='usage')",
         [source_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     ).unwrap();
@@ -2090,6 +2326,7 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
     let ledger = fixture.ledger();
     let handle = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
+    let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
 
     // The child's owning identity is already confirmed even though the fixed
     // view ends while replaying its ancestor. That replay tail is resumable:
@@ -2116,13 +2353,13 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
                 s.root_session_id
              FROM app_meta a
              JOIN source_usage_epochs sue ON sue.source='codex'
-             JOIN source_files f ON f.current_path=?1
-             JOIN source_checkpoints c
+             JOIN codex_source_files f ON f.current_path=?1
+             JOIN codex_source_checkpoints c
                ON c.source_file_id=f.source_file_id AND c.consumer_kind='usage'
-             JOIN usage_source_states s
+             JOIN codex_usage_source_states s
                ON s.ledger_epoch=sue.active_epoch AND s.source_file_id=f.source_file_id
              WHERE a.id=1",
-            [rollout.to_str().unwrap()],
+            [normalized_rollout.to_str().unwrap()],
             |r| {
                 Ok((
                     r.get(0)?,
@@ -2182,13 +2419,13 @@ fn t_s04_024_long_subagent_replay_prefix_persists_safe_resume_without_parent_usa
             "SELECT c.committed_offset,s.continuation_state
              FROM app_meta a
              JOIN source_usage_epochs sue ON sue.source='codex'
-             JOIN source_files f ON f.current_path=?1
-             JOIN source_checkpoints c
+             JOIN codex_source_files f ON f.current_path=?1
+             JOIN codex_source_checkpoints c
                ON c.source_file_id=f.source_file_id AND c.consumer_kind='usage'
-             JOIN usage_source_states s
+             JOIN codex_usage_source_states s
                ON s.ledger_epoch=sue.active_epoch AND s.source_file_id=f.source_file_id
              WHERE a.id=1",
-            [rollout.to_str().unwrap()],
+            [normalized_rollout.to_str().unwrap()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
@@ -2227,7 +2464,7 @@ fn t_dc_030_runtime_canonical_crud_duplicate_and_reopen() {
     assert_eq!(event, (10, 0, None, 0, 0, 10, "partial".to_owned()));
     let source_state: Option<i64> = db
         .query_row(
-            "SELECT previous_total_cache_write_tokens FROM usage_source_states",
+            "SELECT previous_total_cache_write_tokens FROM codex_usage_source_states",
             [],
             |row| row.get(0),
         )
@@ -2244,9 +2481,11 @@ fn t_dc_030_runtime_canonical_crud_duplicate_and_reopen() {
         1
     );
     assert_eq!(
-        db.query_row("SELECT count(*) FROM usage_event_occurrences", [], |row| {
-            row.get::<_, i64>(0)
-        })
+        db.query_row(
+            "SELECT count(*) FROM codex_usage_event_occurrences",
+            [],
+            |row| { row.get::<_, i64>(0) }
+        )
         .unwrap(),
         1
     );
@@ -2255,7 +2494,7 @@ fn t_dc_030_runtime_canonical_crud_duplicate_and_reopen() {
     drop(ledger);
     let reopened = fixture.ledger();
     assert_eq!(
-        UsageLedger::new(&reopened)
+        UsageLedger::new(&reopened, &[&CodexSessionErrorSidecar])
             .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
             .unwrap()
             .totals

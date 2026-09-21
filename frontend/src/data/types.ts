@@ -277,7 +277,7 @@ export type TargetScanDto = {
 export type StatusResponse = {
   data_revision: number;
   status_revision: number;
-  scan_state: "startup" | "running" | "idle" | "failed" | "source_changed";
+  scan_state: "startup" | "running" | "idle" | "failed";
   active_scan_id: string | null;
   last_finished_scan_id: string | null;
   last_finished_scan_result: string | null;
@@ -287,7 +287,13 @@ export type StatusResponse = {
   last_scan_completed_at_ms: number | null;
   last_scan_failed_at_ms: number | null;
   last_scan_error_code: string | null;
-  source_binding_status: "unbound" | "ready" | "source_changed";
+  sources: SourceScanStatusDto[];
+};
+
+export type SourceScanStatusDto = {
+  source: string;
+  state: "queued" | "running" | "completed" | "skipped" | "failed";
+  error_code: string | null;
 };
 
 export type UpdateStatusResponse = {

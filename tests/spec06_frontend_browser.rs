@@ -18,17 +18,20 @@ use tokio::{
 };
 use usagi::{
     api::{AppContext, QueryApi},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
     domain::ScanResult,
+    domain::ScanTrigger,
+    ingestion::ScanHandle,
     ingestion::{IngestionConfig, IngestionCoordinator},
     platform::browser::SystemBrowser,
     platform::file_identity,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, ScanHandle, ScanTrigger},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
-    usage::{CompletionStatus, USAGE_PARSER_VERSION, UsageLedger},
 };
+
+const USAGE_PARSER_VERSION: i64 = usagi::codex::normalization::USAGE_PARSER_VERSION;
 
 struct TempRoot(PathBuf);
 
@@ -126,6 +129,7 @@ async fn bind_fixture_listener() -> TcpListener {
 async fn serve_fixture(
     ledger: Arc<Ledger>,
     scanner: ScanHandle,
+    codex_home: PathBuf,
     static_dir: PathBuf,
     mut commands: UnboundedReceiver<FixtureServerCommand>,
 ) {
@@ -136,7 +140,8 @@ async fn serve_fixture(
                 ledger: Arc::clone(&ledger),
                 scanner: scanner.clone(),
                 source_registry: SourceRegistry::new(),
-                codex_quota_service: CodexQuotaService::unavailable(ledger.codex_home()),
+                codex_quota_service: CodexQuotaService::unavailable(&codex_home),
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),
             },
@@ -571,7 +576,7 @@ fn seed_v3_guardian_database(database: &Path, rollouts: &[(i64, String, PathBuf)
         }
         connection
             .execute(
-                "INSERT INTO source_files(
+                "INSERT INTO codex_source_files(
                     source_file_id,thread_id,current_path,source_area,device_id,inode,
                     file_generation,observed_size,observed_mtime_ns,file_status,last_seen_at_ms
                  ) VALUES (?1,?2,?3,'sessions',?4,?5,1,?6,?7,'present',1)",
@@ -588,7 +593,7 @@ fn seed_v3_guardian_database(database: &Path, rollouts: &[(i64, String, PathBuf)
             .expect("seed browser source");
         connection
             .execute(
-                "INSERT INTO source_checkpoints(
+                "INSERT INTO codex_source_checkpoints(
                     source_file_id,consumer_kind,parser_version,committed_offset,guard_hash,
                     processing_status,last_successful_scan_at_ms,last_error_code
                  ) VALUES (?1,'metadata',1,?2,zeroblob(32),'ready',1,NULL)",
@@ -606,7 +611,7 @@ fn seed_v3_guardian_database(database: &Path, rollouts: &[(i64, String, PathBuf)
         };
         connection
             .execute(
-                "INSERT INTO rollout_metadata_facts(
+                "INSERT INTO codex_rollout_metadata_facts(
                     source_file_id,file_generation,metadata_parser_version,
                     resolved_through_offset,owning_thread_id,continuation_state,
                     cwd,cwd_provenance,cwd_record_offset,created_at_ms,
@@ -701,31 +706,22 @@ async fn spec06_real_axum_browser_gate() {
         .map(|(index, (id, path))| ((index + 1) as i64, id.clone(), path.clone()))
         .collect::<Vec<_>>();
     seed_v3_guardian_database(&database, &sources);
-    let ledger = Arc::new(
-        Ledger::open(LedgerOptions::new(&database, &codex_home)).expect("temporary ledger"),
-    );
+    let ledger = Arc::new(Ledger::open(LedgerOptions::new(&database)).expect("temporary ledger"));
     assert_eq!(ledger.schema_version().expect("browser schema version"), 11);
-    let source_ids = sources
-        .iter()
-        .map(|(source_id, _, _)| *source_id)
-        .collect::<Vec<_>>();
-    let build = UsageLedger::new(&ledger)
-        .begin_rebuild(USAGE_PARSER_VERSION, source_ids, 10)
-        .expect("begin blocked browser build");
-    assert_eq!(build.members.len(), 3 + EXTRA_ROLLOUTS);
-    assert!(
-        build
-            .members
-            .iter()
-            .any(|member| member.completion_status == CompletionStatus::Blocked)
-    );
+    Connection::open(&database)
+        .expect("open browser fixture database")
+        .execute(
+            "UPDATE source_usage_epochs SET build_epoch=active_epoch+1,
+                    build_parser_version=?1 WHERE source='codex'",
+            [USAGE_PARSER_VERSION],
+        )
+        .expect("seed browser shadow build");
     let state_index = codex_home.join("state_5.sqlite");
     let mut registry = SourceRegistry::new();
     registry
-        .register(LegacyCodexSourceAdapter::new(
+        .register(CodexAdapter::new(CodexConfig::from_home(
             codex_home.clone(),
-            CodexMetadata::from_home(codex_home.clone()),
-        ))
+        )))
         .unwrap();
     let scanner: ScanHandle =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
@@ -742,7 +738,8 @@ async fn spec06_real_axum_browser_gate() {
     let connection = Connection::open(&database).expect("open browser final database");
     let active: (i64, Option<i64>, i64) = connection
         .query_row(
-            "SELECT usage_active_epoch,usage_build_epoch,usage_parser_version FROM app_meta WHERE id=1",
+            "SELECT active_epoch,build_epoch,active_parser_version
+             FROM source_usage_epochs WHERE source='codex'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -752,7 +749,7 @@ async fn spec06_real_axum_browser_gate() {
         .query_row(
             "SELECT c.parser_version,f.metadata_parser_version,
                     f.parent_thread_id_hint,f.parent_hint_provenance
-             FROM source_checkpoints c JOIN rollout_metadata_facts f
+             FROM codex_source_checkpoints c JOIN codex_rollout_metadata_facts f
                ON f.source_file_id=c.source_file_id
              WHERE c.source_file_id=3 AND c.consumer_kind='metadata'",
             [],
@@ -770,7 +767,7 @@ async fn spec06_real_axum_browser_gate() {
     );
     let main_parent: Option<String> = connection
         .query_row(
-            "SELECT parent_thread_id_hint FROM rollout_metadata_facts WHERE source_file_id=1",
+            "SELECT parent_thread_id_hint FROM codex_rollout_metadata_facts WHERE source_file_id=1",
             [],
             |row| row.get(0),
         )
@@ -779,7 +776,7 @@ async fn spec06_real_axum_browser_gate() {
     let legacy_fact: (Option<String>, Option<String>) = connection
         .query_row(
             "SELECT parent_thread_id_hint,parent_hint_provenance
-             FROM rollout_metadata_facts WHERE source_file_id=2",
+             FROM codex_rollout_metadata_facts WHERE source_file_id=2",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -822,6 +819,7 @@ async fn spec06_real_axum_browser_gate() {
     let mut server = tokio::spawn(serve_fixture(
         Arc::clone(&ledger),
         scanner.clone(),
+        codex_home.clone(),
         static_dir,
         command_rx,
     ));

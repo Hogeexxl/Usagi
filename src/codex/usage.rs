@@ -3,7 +3,7 @@
 use chrono::DateTime;
 use serde_json::{Map, Value};
 
-use crate::usage::adapters::openai::codex::{CodexRawTokenUsage, CodexRolloutAdapter};
+use crate::codex::normalization::{CodexRawTokenUsage, CodexRolloutAdapter};
 use crate::usage::normalized::NormalizedTokenUsage;
 
 pub struct CompleteUsageLine {
@@ -318,7 +318,7 @@ mod tests {
         CompleteUsageLine::new(0, format!("{json}\n").into_bytes()).unwrap()
     }
 
-    fn snapshot(write: Option<&str>) -> String {
+    fn snapshot_json(write: Option<&str>) -> String {
         format!(
             "{{\"input_tokens\":10,\"cached_input_tokens\":2,{}\"output_tokens\":4,\"reasoning_output_tokens\":1,\"total_tokens\":14}}",
             write
@@ -361,8 +361,8 @@ mod tests {
     fn t_dc_011_to_017_parser_boundary_and_two_state_mapping() {
         let parser = CodexRolloutParser;
         let UsageRawRecord::TokenCount(record) = parser.parse_line(&token_line(
-            &snapshot(Some("3")),
-            Some(&snapshot(Some("3"))),
+            &snapshot_json(Some("3")),
+            Some(&snapshot_json(Some("3"))),
         )) else {
             panic!("expected token count");
         };
@@ -373,9 +373,10 @@ mod tests {
         assert!(
             matches!(info.last_usage, OptionalTokenValue::Valid(value) if value.cached_tokens == 2)
         );
-        let UsageRawRecord::TokenCount(record) =
-            parser.parse_line(&token_line(&snapshot(None), Some(&snapshot(None))))
-        else {
+        let UsageRawRecord::TokenCount(record) = parser.parse_line(&token_line(
+            &snapshot_json(None),
+            Some(&snapshot_json(None)),
+        )) else {
             panic!("expected token count");
         };
         let info = record.info.unwrap();

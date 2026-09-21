@@ -17,11 +17,12 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use usagi::{
     api::{AppContext, QueryApi, listen_address},
-    codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexSessionErrorSidecar, quota::CodexQuotaService},
     domain::{ScanCompletedEvent, ScanFailedEvent, ScanStartEvent, ScanTrigger},
     ingestion::{IngestionConfig, IngestionCoordinator},
+    ingestion::{RequestDisposition, ScanHandle},
     platform::browser::SystemBrowser,
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, RequestDisposition, ScanHandle},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
@@ -100,16 +101,17 @@ impl Fixture {
     }
 
     fn ledger(&self) -> Arc<Ledger> {
-        Arc::new(Ledger::open(LedgerOptions::new(&self.db, &self.home)).unwrap())
+        Arc::new(Ledger::open(LedgerOptions::new(&self.db)).unwrap())
     }
 
     fn start(&self, ledger: Arc<Ledger>) -> ScanHandle {
+        self.start_with_home(ledger, self.home.clone())
+    }
+
+    fn start_with_home(&self, ledger: Arc<Ledger>, home: PathBuf) -> ScanHandle {
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                self.home.clone(),
-                CodexMetadata::from_home(self.home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(home)))
             .unwrap();
         IngestionCoordinator::start(
             IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
@@ -120,13 +122,14 @@ impl Fixture {
     }
 
     fn router(&self, ledger: Arc<Ledger>, scanner: ScanHandle) -> Router {
-        let codex_quota_service = CodexQuotaService::unavailable(ledger.codex_home());
+        let codex_quota_service = CodexQuotaService::unavailable(&self.home);
         QueryApi::router(
             AppContext {
                 ledger,
                 scanner,
                 source_registry: SourceRegistry::new(),
                 codex_quota_service,
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service: UpdateService::unavailable(),
                 browser_opener: Arc::new(SystemBrowser),
             },
@@ -483,6 +486,20 @@ fn wait_scan(ledger: &Ledger, wanted: Option<&str>) {
     }
 }
 
+fn wait_next_scan(ledger: &Ledger, previous_scan_id: Option<&str>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = ledger.app_state().unwrap();
+        if state.active_scan_id.is_none()
+            && state.last_finished_scan_id.as_deref() != previous_scan_id
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "scan timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn request_and_wait(scanner: &ScanHandle, ledger: &Ledger) -> String {
     let scan_id = match scanner.request(ScanTrigger::Manual).unwrap() {
         RequestDisposition::Started { scan_id, .. } => scan_id,
@@ -725,7 +742,13 @@ async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snap
     assert_eq!(status_response.status(), StatusCode::OK);
     let status = json_body(status_response).await;
     assert_eq!(status["scan_state"], "idle");
-    assert_eq!(status["source_binding_status"], "ready");
+    assert!(
+        status["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["source"] == "codex")
+    );
     assert!(status["last_finished_scan_id"].as_str().is_some());
 
     for (uri, code) in [
@@ -768,7 +791,7 @@ async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snap
     assert!(summary["usage"]["estimated_cost"].is_null());
     assert_eq!(summary["data_revision"], revision["data_revision"]);
 
-    let frozen = UsageLedger::new(&ledger)
+    let frozen = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .summary_snapshot(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
     let db_revision: i64 = Connection::open(&fixture.db)
@@ -829,21 +852,16 @@ async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snap
     );
 
     // An in-progress shadow build must not replace the active stable epoch.
-    let before = UsageLedger::new(&ledger)
+    let before = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .summary(empty_summary_query(TimeRange::new(0, i64::MAX).unwrap()))
         .unwrap();
-    let source_ids = {
-        let db = Connection::open(&fixture.db).unwrap();
-        let mut stmt = db
-            .prepare("SELECT source_file_id FROM source_files ORDER BY source_file_id")
-            .unwrap();
-        stmt.query_map([], |row| row.get::<_, i64>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect::<Vec<_>>()
-    };
-    UsageLedger::new(&ledger)
-        .begin_rebuild(usagi::usage::USAGE_PARSER_VERSION, source_ids, 100)
+    Connection::open(&fixture.db)
+        .unwrap()
+        .execute(
+            "UPDATE source_usage_epochs SET build_epoch=active_epoch+1,
+                    build_parser_version=?1 WHERE source='codex'",
+            [usagi::codex::normalization::USAGE_PARSER_VERSION],
+        )
         .unwrap();
     let during =
         json_body(call(&app, Method::GET, "/api/usage/summary?range=year", &[]).await).await;
@@ -1307,10 +1325,10 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
     assert!(grandchild_model_usage[0]["usage"]["estimated_cost"].is_null());
 
     // A root can be eligible solely because a descendant has usage in-range.
-    // Detail still returns the descendant aggregate with an empty Main block.
+    // Detail still recodex_turns the descendant aggregate with an empty Main block.
     let db = Connection::open(&fixture.db).unwrap();
     db.execute(
-        "DELETE FROM usage_event_occurrences
+        "DELETE FROM codex_usage_event_occurrences
          WHERE source='codex' AND (ledger_epoch, event_id) IN (
              SELECT source_epoch, event_id FROM usage_events
              WHERE source='codex' AND root_session_id=?1 AND thread_id=?1
@@ -1560,19 +1578,20 @@ async fn t_mu03_a03_metadata_v2_to_v3_rebuild_persists_canonical_title_for_detai
         ]),
     )
     .unwrap();
+    let child_path_db = fs::canonicalize(&child_path).unwrap();
     let db = Connection::open(&fixture.db).unwrap();
     db.execute(
-        "UPDATE source_checkpoints SET parser_version=2
+        "UPDATE codex_source_checkpoints SET parser_version=2
          WHERE consumer_kind='metadata' AND source_file_id=(
-             SELECT source_file_id FROM source_files WHERE current_path=?1
+             SELECT source_file_id FROM codex_source_files WHERE current_path=?1
          )",
-        [child_path.to_str().unwrap()],
+        [child_path_db.to_str().unwrap()],
     )
     .unwrap();
     db.execute(
-        "UPDATE rollout_metadata_facts SET metadata_parser_version=2
-         WHERE source_file_id=(SELECT source_file_id FROM source_files WHERE current_path=?1)",
-        [child_path.to_str().unwrap()],
+        "UPDATE codex_rollout_metadata_facts SET metadata_parser_version=2
+         WHERE source_file_id=(SELECT source_file_id FROM codex_source_files WHERE current_path=?1)",
+        [child_path_db.to_str().unwrap()],
     )
     .unwrap();
     drop(db);
@@ -1734,7 +1753,7 @@ async fn t_mu03_f01_real_structure_cost_effort_closes_db_aggregate_detail_chain(
     drop(db);
 
     let range = TimeRange::new(0, i64::MAX).unwrap();
-    let aggregate = UsageLedger::new(&ledger)
+    let aggregate = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
         .session_detail_snapshot(range, UsageFilter::default(), None, root_id.to_owned())
         .unwrap()
         .value;
@@ -1953,13 +1972,28 @@ async fn t_s05_013_source_changed_refresh_reaches_coordinator_before_adapter_fai
     let ledger = fixture.ledger();
     let scanner = fixture.start(Arc::clone(&ledger));
     wait_scan(&ledger, None);
-    let app = fixture.router(Arc::clone(&ledger), scanner.clone());
 
     let other_home = fixture._root.path().join("different-codex-home");
     fs::create_dir_all(&other_home).unwrap();
-    let _mismatch = Ledger::open(LedgerOptions::new(&fixture.db, &other_home)).unwrap();
+    scanner.shutdown().unwrap();
+    let previous_scan_id = ledger.app_state().unwrap().last_finished_scan_id.clone();
+    let mismatch_scanner = fixture.start_with_home(Arc::clone(&ledger), other_home);
+    wait_next_scan(&ledger, previous_scan_id.as_deref());
+    mismatch_scanner.shutdown().unwrap();
+    let previous_scan_id = ledger.app_state().unwrap().last_finished_scan_id.clone();
+    let scanner = fixture.start(Arc::clone(&ledger));
+    wait_next_scan(&ledger, previous_scan_id.as_deref());
+    let app = fixture.router(Arc::clone(&ledger), scanner.clone());
     let before = ledger.app_state().unwrap();
-    assert_eq!(before.scan.source_binding_status.as_str(), "source_changed");
+    let binding_status: String = Connection::open(&fixture.db)
+        .unwrap()
+        .query_row(
+            "SELECT binding_status FROM codex_adapter_state WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(binding_status, "source_changed");
     assert!(before.scan.active_scan_id.is_none());
     assert!(before.scan.followup_scan_id.is_none());
 

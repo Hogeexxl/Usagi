@@ -15,9 +15,9 @@ use tower::ServiceExt;
 use crate::{
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
-    ingestion::{IngestionConfig, IngestionCoordinator},
+    codex::{CodexAdapter, CodexConfig, CodexSessionErrorSidecar},
+    ingestion::{IngestionConfig, IngestionCoordinator, ScanHandle},
     platform::browser::{BrowserOpener, SystemBrowser},
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter, ScanHandle},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
@@ -93,15 +93,11 @@ impl ApiFixture {
         fs::create_dir_all(home.join("archived_sessions")).unwrap();
         fs::create_dir_all(&static_dir).unwrap();
         fs::write(static_dir.join("index.html"), "<html>spec05</html>").unwrap();
-        let ledger = Arc::new(
-            Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap(),
-        );
+        let ledger =
+            Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"))).unwrap());
         let mut registry = SourceRegistry::new();
         registry
-            .register(LegacyCodexSourceAdapter::new(
-                home.clone(),
-                CodexMetadata::from_home(home.clone()),
-            ))
+            .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
             .expect("register Codex source");
         let scanner = IngestionCoordinator::start(
             IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
@@ -119,6 +115,7 @@ impl ApiFixture {
                 scanner: scanner.clone(),
                 source_registry: registry,
                 codex_quota_service,
+                codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service,
                 browser_opener,
             },

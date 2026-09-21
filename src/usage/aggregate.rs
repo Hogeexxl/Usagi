@@ -7,6 +7,28 @@ use rusqlite::{params_from_iter, types::Value};
 
 use crate::{cost::ModelRegistry, source::SourceId};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionErrorProjection {
+    pub root_session_id: String,
+    pub error_code: String,
+    pub last_activity_at_ms: i64,
+    pub title: Option<String>,
+    pub project_name: Option<String>,
+    pub project_path: Option<String>,
+    pub subagent_count: i64,
+    pub source: String,
+    pub native_session_id: String,
+}
+
+pub trait SessionErrorSidecar: Send + Sync {
+    fn error_roots(
+        &self,
+        connection: &Connection,
+        range: TimeRange,
+        filter: &UsageFilter,
+    ) -> Result<Vec<SessionErrorProjection>, AggregateError>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeRange {
     pub start_ms: i64,
@@ -529,19 +551,25 @@ impl fmt::Display for AggregateError {
 }
 impl std::error::Error for AggregateError {}
 
-pub struct AggregateReader<'connection> {
+pub struct AggregateReader<'connection, 'sidecars> {
     connection: &'connection Connection,
+    sidecars: &'sidecars [&'sidecars dyn SessionErrorSidecar],
 }
 
-impl<'connection> AggregateReader<'connection> {
-    pub const fn new(connection: &'connection Connection) -> Self {
-        Self { connection }
+impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
+    pub const fn new(
+        connection: &'connection Connection,
+        sidecars: &'sidecars [&'sidecars dyn SessionErrorSidecar],
+    ) -> Self {
+        Self {
+            connection,
+            sidecars,
+        }
     }
 
     pub fn summary(&self, query: SummaryQuery) -> Result<UsageSummary, AggregateError> {
         let range = query.range();
         validate_range(range)?;
-        let codex_epoch = self.codex_epoch()?;
         let (totals, values) = self.aggregate_for_summary(&query)?;
         let session_count: i64 = self
             .connection
@@ -577,11 +605,8 @@ impl<'connection> AggregateReader<'connection> {
             .map_err(map_sql_error)?;
         let complete_session_cost_per_million_tokens =
             self.complete_session_cost_per_million_tokens(&query, &values)?;
-        let error_sessions = i64::try_from(
-            self.quarantined_roots(codex_epoch, range, query.filter())?
-                .len(),
-        )
-        .map_err(|_| AggregateError::ArithmeticOverflow)?;
+        let error_sessions = i64::try_from(self.error_roots(range, query.filter())?.len())
+            .map_err(|_| AggregateError::ArithmeticOverflow)?;
         let complete_sessions = session_count
             .checked_sub(incomplete_sessions)
             .ok_or(AggregateError::InvariantViolation)?;
@@ -639,7 +664,7 @@ impl<'connection> AggregateReader<'connection> {
              )
              SELECT roots.root_session_id, roots.last_activity_at_ms,
                     threads.title, threads.project_name, threads.project_path,
-                    COALESCE(threads.source, 'codex'),
+                    COALESCE(threads.source, ''),
                     COALESCE(threads.native_session_id, roots.root_session_id)
              FROM roots LEFT JOIN threads ON threads.thread_id=roots.root_session_id
              WHERE (?3 IS NULL OR roots.last_activity_at_ms<?3
@@ -768,7 +793,7 @@ impl<'connection> AggregateReader<'connection> {
 
         let metadata_sql = format!(
             "SELECT thread_id, project_name, project_path,
-                    COALESCE(source, 'codex'), COALESCE(native_session_id, thread_id)
+                    COALESCE(source, ''), COALESCE(native_session_id, thread_id)
              FROM threads WHERE thread_id IN ({metadata_placeholders})"
         );
         let mut metadata_statement = self
@@ -892,28 +917,27 @@ impl<'connection> AggregateReader<'connection> {
         seed_sort_order: SessionSortOrder,
     ) -> Result<SessionSnapshot, AggregateError> {
         validate_range(range)?;
-        let codex_epoch = self.codex_epoch()?;
         let roots = self.eligible_roots(range, filter)?;
         let aggregates = self.session_sort_aggregates(range, &roots)?;
         let mut sort_index = aggregates
             .iter()
             .map(|aggregate| aggregate.sort_index_item())
             .collect::<Vec<_>>();
-        let quarantined = self.quarantined_roots(codex_epoch, range, filter)?;
-        sort_index.extend(quarantined.iter().map(QuarantinedRoot::sort_index_item));
+        let error_roots = self.error_roots(range, filter)?;
+        sort_index.extend(error_roots.iter().map(error_sort_index_item));
         let mut seed_index = sort_index.clone();
         seed_index.sort_by(|left, right| {
             compare_sort_index_items(left, right, seed_sort_field, seed_sort_order)
         });
         seed_index.truncate(MAX_SESSION_ROWS);
-        let error_roots = quarantined
+        let error_roots = error_roots
             .into_iter()
             .map(|root| (root.root_session_id.clone(), root))
             .collect::<BTreeMap<_, _>>();
         let seed_rows = seed_index
             .iter()
             .map(|item| match error_roots.get(&item.root_session_id) {
-                Some(root) => Ok(root.session_row()),
+                Some(root) => Ok(error_session_row(root)),
                 None => self.session_row_for_root(range, &item.root_session_id),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -942,13 +966,12 @@ impl<'connection> AggregateReader<'connection> {
         {
             return Err(AggregateError::InvalidSessionIds);
         }
-        let codex_epoch = self.codex_epoch()?;
         let mut eligible = self
             .eligible_roots(range, filter)?
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
         let error_roots = self
-            .quarantined_roots(codex_epoch, range, filter)?
+            .error_roots(range, filter)?
             .into_iter()
             .map(|root| {
                 eligible.insert(root.root_session_id.clone());
@@ -961,7 +984,7 @@ impl<'connection> AggregateReader<'connection> {
         root_session_ids
             .iter()
             .map(|root| match error_roots.get(root) {
-                Some(error) => Ok(error.session_row()),
+                Some(error) => Ok(error_session_row(error)),
                 None => self.session_row_for_root(range, root),
             })
             .collect()
@@ -1008,7 +1031,7 @@ impl<'connection> AggregateReader<'connection> {
             .connection
             .prepare(
                 "SELECT thread_id, parent_thread_id, title,
-                        COALESCE(source, 'codex'), COALESCE(native_session_id, thread_id)
+                        COALESCE(source, ''), COALESCE(native_session_id, thread_id)
                  FROM threads WHERE root_session_id=?1 OR thread_id=?1",
             )
             .map_err(map_sql_error)?;
@@ -1211,12 +1234,9 @@ impl<'connection> AggregateReader<'connection> {
             .collect::<rusqlite::Result<Vec<String>>>()
             .map_err(map_sql_error)?
             .into_iter()
-            .map(|source| {
-                let display_name = resolve_source_display_name(&source);
-                SourceFilterOption {
-                    source,
-                    display_name,
-                }
+            .map(|source| SourceFilterOption {
+                display_name: source.clone(),
+                source,
             })
             .collect();
 
@@ -1334,19 +1354,6 @@ impl<'connection> AggregateReader<'connection> {
         Ok(())
     }
 
-    /// Read the Codex epoch only for Codex-private quarantine state. Canonical
-    /// usage queries never use this value; they join every source's active
-    /// epoch through `source_usage_epochs`.
-    fn codex_epoch(&self) -> Result<i64, AggregateError> {
-        self.connection
-            .query_row(
-                "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(map_sql_error)
-    }
-
     fn eligible_roots(
         &self,
         range: TimeRange,
@@ -1371,7 +1378,7 @@ impl<'connection> AggregateReader<'connection> {
             .query_row(
                 "SELECT root.title, root.project_name, root.project_path,
                         MAX(ue.occurred_at_ms),
-                        COALESCE(root.source, 'codex'),
+                        COALESCE(root.source, ''),
                         COALESCE(root.native_session_id, root.thread_id)
                  FROM source_usage_epochs sue
                  CROSS JOIN usage_events ue
@@ -1428,106 +1435,39 @@ impl<'connection> AggregateReader<'connection> {
         })
     }
 
-    fn quarantined_roots(
+    fn error_roots(
         &self,
-        epoch: i64,
         range: TimeRange,
         filter: &UsageFilter,
-    ) -> Result<Vec<QuarantinedRoot>, AggregateError> {
-        // A quarantined Session has no trustworthy usage/model ledger. Never
-        // guess model-filter membership; under an active model filter it is
-        // intentionally omitted from the scoped denominator/list.
+    ) -> Result<Vec<SessionErrorProjection>, AggregateError> {
         if !filter.models.is_empty() {
             return Ok(Vec::new());
         }
-        let quarantine_count: i64 = self
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM usage_session_quarantine WHERE ledger_epoch=?1",
-                [epoch],
-                |row| row.get(0),
-            )
-            .map_err(map_sql_error)?;
-        if quarantine_count == 0 {
-            return Ok(Vec::new());
+        let mut merged = BTreeMap::<(String, String), SessionErrorProjection>::new();
+        for sidecar in self.sidecars {
+            for projection in sidecar.error_roots(self.connection, range, filter)? {
+                if projection.root_session_id.is_empty()
+                    || projection.source.is_empty()
+                    || projection.error_code.is_empty()
+                    || projection.last_activity_at_ms < 0
+                    || projection.subagent_count < 0
+                {
+                    return Err(AggregateError::InvariantViolation);
+                }
+                let key = (
+                    projection.source.clone(),
+                    projection.root_session_id.clone(),
+                );
+                if let Some(existing) = merged.get(&key) {
+                    if existing != &projection {
+                        return Err(AggregateError::InvariantViolation);
+                    }
+                } else {
+                    merged.insert(key, projection);
+                }
+            }
         }
-        let mut clauses = vec![
-            "q.ledger_epoch=?1".to_owned(),
-            "q.last_activity_at_ms>=?2".to_owned(),
-            "q.last_activity_at_ms<?3".to_owned(),
-            "root.source='codex'".to_owned(),
-        ];
-        let mut values = vec![
-            Value::Integer(epoch),
-            Value::Integer(range.start_ms),
-            Value::Integer(range.end_ms),
-        ];
-        let mut next = 4_usize;
-        if !filter.sources.is_empty() {
-            let placeholders = (next..next + filter.sources.len())
-                .map(|value| format!("?{value}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            clauses.push(format!("root.source IN ({placeholders})"));
-            values.extend(
-                filter
-                    .sources
-                    .iter()
-                    .map(|source| Value::Text(source.as_str().to_owned())),
-            );
-            next += filter.sources.len();
-        }
-        let mut projects = Vec::new();
-        if !filter.project_paths.is_empty() {
-            let placeholders = (next..next + filter.project_paths.len())
-                .map(|value| format!("?{value}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            projects.push(format!(
-                "(root.project_kind='project' AND root.project_path IN ({placeholders}))"
-            ));
-            values.extend(filter.project_paths.iter().cloned().map(Value::Text));
-        }
-        if filter.include_projectless {
-            projects.push("root.project_kind='projectless'".to_owned());
-        }
-        if filter.include_unknown_project {
-            projects.push("root.project_kind='unknown'".to_owned());
-        }
-        if !projects.is_empty() {
-            clauses.push(format!("({})", projects.join(" OR ")));
-        }
-        let sql = format!(
-            "SELECT q.root_session_id,q.primary_error_code,q.last_activity_at_ms,
-                    root.title,root.project_name,root.project_path,
-                    (SELECT COUNT(*) FROM threads child
-                     WHERE child.root_session_id=q.root_session_id
-                       AND child.thread_id<>q.root_session_id),
-                    COALESCE(root.source, 'codex'),
-                    COALESCE(root.native_session_id, q.root_session_id)
-             FROM usage_session_quarantine q
-             JOIN threads root ON root.thread_id=q.root_session_id
-             WHERE {} ORDER BY q.root_session_id",
-            clauses.join(" AND ")
-        );
-        let mut statement = self.connection.prepare(&sql).map_err(map_sql_error)?;
-        statement
-            .query_map(params_from_iter(values.iter()), |row| {
-                Ok(QuarantinedRoot {
-                    root_session_id: row.get(0)?,
-                    error_code: row.get(1)?,
-                    last_activity_at_ms: row.get(2)?,
-                    title: row.get(3)?,
-                    project_name: row.get(4)?,
-                    project_path: row.get(5)?,
-                    subagent_count: row.get(6)?,
-                    source: row.get(7)?,
-                    native_session_id: row.get(8)?,
-                })
-            })
-            .map_err(map_sql_error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_sql_error)
+        Ok(merged.into_values().collect())
     }
 
     fn aggregate_for_root(
@@ -1876,67 +1816,42 @@ fn same_totals(left: &TokenTotals, right: &TokenTotals) -> bool {
         && left.cost_completeness == right.cost_completeness
 }
 
-#[derive(Clone, Debug)]
-struct QuarantinedRoot {
-    root_session_id: String,
-    source: String,
-    native_session_id: String,
-    error_code: String,
-    last_activity_at_ms: i64,
-    title: Option<String>,
-    project_name: Option<String>,
-    project_path: Option<String>,
-    subagent_count: i64,
-}
-
-impl QuarantinedRoot {
-    fn sort_index_item(&self) -> SessionSortIndexItem {
-        SessionSortIndexItem {
-            root_session_id: self.root_session_id.clone(),
-            source: self.source.clone(),
-            native_session_id: self.native_session_id.clone(),
-            last_activity_at_ms: self.last_activity_at_ms,
-            project_sort_key: self
-                .project_name
-                .clone()
-                .or_else(|| self.project_path.clone()),
-            model_sort_key: None,
-            total_tokens: None,
-            combined_total_tokens: None,
-            combined_estimated_cost_nanos_usd: None,
-            cache_hit_rate: None,
-            data_status: SessionDataStatus::Error,
-            error_code: Some(self.error_code.clone()),
-        }
-    }
-
-    fn session_row(&self) -> SessionUsageRow {
-        SessionUsageRow {
-            root_session_id: self.root_session_id.clone(),
-            source: self.source.clone(),
-            native_session_id: self.native_session_id.clone(),
-            title: self.title.clone(),
-            project_name: self.project_name.clone(),
-            project_path: self.project_path.clone(),
-            inclusive_usage: TokenTotals::zero(),
-            self_usage: TokenTotals::zero(),
-            subagent_usage: TokenTotals::zero(),
-            subagent_count: self.subagent_count,
-            last_activity_at_ms: self.last_activity_at_ms,
-            models_used: Vec::new(),
-            data_status: SessionDataStatus::Error,
-            error_code: Some(self.error_code.clone()),
-        }
+fn error_sort_index_item(error: &SessionErrorProjection) -> SessionSortIndexItem {
+    SessionSortIndexItem {
+        root_session_id: error.root_session_id.clone(),
+        source: error.source.clone(),
+        native_session_id: error.native_session_id.clone(),
+        last_activity_at_ms: error.last_activity_at_ms,
+        project_sort_key: error
+            .project_name
+            .clone()
+            .or_else(|| error.project_path.clone()),
+        model_sort_key: None,
+        total_tokens: None,
+        combined_total_tokens: None,
+        combined_estimated_cost_nanos_usd: None,
+        cache_hit_rate: None,
+        data_status: SessionDataStatus::Error,
+        error_code: Some(error.error_code.clone()),
     }
 }
 
-fn resolve_source_display_name(source: &str) -> String {
-    if source == crate::source::SourceId::CODEX.as_str() {
-        crate::source::SourceDescriptor::codex()
-            .display_name
-            .to_owned()
-    } else {
-        source.to_owned()
+fn error_session_row(error: &SessionErrorProjection) -> SessionUsageRow {
+    SessionUsageRow {
+        root_session_id: error.root_session_id.clone(),
+        source: error.source.clone(),
+        native_session_id: error.native_session_id.clone(),
+        title: error.title.clone(),
+        project_name: error.project_name.clone(),
+        project_path: error.project_path.clone(),
+        inclusive_usage: TokenTotals::zero(),
+        self_usage: TokenTotals::zero(),
+        subagent_usage: TokenTotals::zero(),
+        subagent_count: error.subagent_count,
+        last_activity_at_ms: error.last_activity_at_ms,
+        models_used: Vec::new(),
+        data_status: SessionDataStatus::Error,
+        error_code: Some(error.error_code.clone()),
     }
 }
 
@@ -2221,6 +2136,64 @@ mod tests {
             .into_owned()
     }
 
+    struct TestErrorSidecar;
+
+    impl SessionErrorSidecar for TestErrorSidecar {
+        fn error_roots(
+            &self,
+            connection: &Connection,
+            range: TimeRange,
+            filter: &UsageFilter,
+        ) -> Result<Vec<SessionErrorProjection>, AggregateError> {
+            if !filter.models().is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut statement = connection
+                .prepare(
+                    "SELECT error.root_session_id,error.primary_error_code,error.last_activity_at_ms,
+                            root.title,root.project_name,root.project_path,root.source,
+                            root.native_session_id,
+                            (SELECT COUNT(*) FROM threads child
+                             WHERE child.root_session_id=error.root_session_id
+                               AND child.thread_id<>error.root_session_id)
+                     FROM test_session_errors error
+                     JOIN threads root ON root.thread_id=error.root_session_id
+                     WHERE error.last_activity_at_ms>=?1 AND error.last_activity_at_ms<?2
+                     ORDER BY error.root_session_id",
+                )
+                .map_err(map_sql_error)?;
+            let rows = statement
+                .query_map([range.start_ms, range.end_ms], |row| {
+                    Ok(SessionErrorProjection {
+                        root_session_id: row.get(0)?,
+                        error_code: row.get(1)?,
+                        last_activity_at_ms: row.get(2)?,
+                        title: row.get(3)?,
+                        project_name: row.get(4)?,
+                        project_path: row.get(5)?,
+                        source: row.get(6)?,
+                        native_session_id: row.get(7)?,
+                        subagent_count: row.get(8)?,
+                    })
+                })
+                .map_err(map_sql_error)?;
+            rows.filter_map(|row| match row.map_err(map_sql_error) {
+                Ok(projection)
+                    if filter.sources().is_empty()
+                        || filter
+                            .sources()
+                            .iter()
+                            .any(|source| source.as_str() == projection.source) =>
+                {
+                    Some(Ok(projection))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+        }
+    }
+
     /// Promote the compact legacy-shaped fixture to the v11 canonical query
     /// contract after its rows have been populated.
     fn promote_to_v11(connection: &Connection, active_epoch: i64) {
@@ -2260,7 +2233,7 @@ mod tests {
                     agent_role TEXT NOT NULL DEFAULT 'main', title TEXT, project_name TEXT, project_path TEXT,
                     project_kind TEXT NOT NULL DEFAULT 'project'
                  );
-                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                 CREATE TABLE IF NOT EXISTS test_session_errors (
                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -2276,7 +2249,7 @@ mod tests {
                     source_file_id INTEGER, file_generation INTEGER,
                     source_start_offset INTEGER, source_end_offset INTEGER
                  );
-                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                 CREATE TABLE IF NOT EXISTS test_session_errors (
                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -2460,7 +2433,7 @@ mod tests {
                 .unwrap();
             connection
                 .execute(
-                    "INSERT INTO usage_session_quarantine(
+                    "INSERT INTO test_session_errors(
                         ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,
                         first_seen_at_ms,updated_at_ms
                      ) VALUES (7,'root-error','TEST_ERROR',350,350,350)",
@@ -2522,7 +2495,7 @@ mod tests {
                     thread_id TEXT PRIMARY KEY, title TEXT, project_name TEXT, project_path TEXT,
                     project_kind TEXT NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                 CREATE TABLE IF NOT EXISTS test_session_errors (
                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -2653,7 +2626,7 @@ mod tests {
                     agent_role TEXT NOT NULL, title TEXT, project_name TEXT, project_path TEXT,
                     project_kind TEXT NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                 CREATE TABLE IF NOT EXISTS test_session_errors (
                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -2726,7 +2699,7 @@ mod tests {
     }
 
     fn summary_for(
-        reader: &AggregateReader<'_>,
+        reader: &AggregateReader<'_, '_>,
         range: TimeRange,
         models: &[&str],
         project_paths: &[&str],
@@ -2749,7 +2722,7 @@ mod tests {
     #[test]
     fn t_dc_031_summary_and_models_propagate_unknown_and_weight_hit_rate() {
         let connection = fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let range = TimeRange::new(100, 400).unwrap();
         let summary = reader
             .summary(SummaryQuery::new(range, UsageFilter::default()))
@@ -2786,7 +2759,7 @@ mod tests {
         known.execute_batch(
             "CREATE TABLE app_meta (id INTEGER PRIMARY KEY, usage_active_epoch INTEGER NOT NULL);
              CREATE TABLE threads (thread_id TEXT PRIMARY KEY, project_path TEXT, project_kind TEXT);
-             CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+             CREATE TABLE IF NOT EXISTS test_session_errors (
                     ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                     primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                     first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -2805,7 +2778,7 @@ mod tests {
              ) VALUES (7,'b',2,'r','r','m',9000,900,1000,900,180,9900,NULL,NULL);",
         ).unwrap();
         promote_to_v11(&known, 7);
-        let exact = AggregateReader::new(&known)
+        let exact = AggregateReader::new(&known, &[])
             .summary(SummaryQuery::new(
                 TimeRange::new(0, 3).unwrap(),
                 UsageFilter::default(),
@@ -2834,7 +2807,9 @@ mod tests {
             (true, true, 1_i64, 1_i64, 2_i64, 4_i64),
         ] {
             let connection = summary_cost_fixture(incomplete, error);
-            let summary = AggregateReader::new(&connection)
+            let sidecar = TestErrorSidecar;
+            let sidecars: [&dyn SessionErrorSidecar; 1] = [&sidecar];
+            let summary = AggregateReader::new(&connection, &sidecars)
                 .summary(SummaryQuery::new(
                     TimeRange::new(0, 400).unwrap(),
                     UsageFilter::default(),
@@ -2862,7 +2837,7 @@ mod tests {
     #[test]
     fn complete_session_cost_per_million_tokens_uses_only_complete_filtered_sessions() {
         let connection = cost_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
 
         let all = reader
             .summary(SummaryQuery::new(
@@ -2903,7 +2878,7 @@ mod tests {
     #[test]
     fn t_mu03_b06_backend_cost_aggregation_uses_event_values_only() {
         let connection = cost_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let known_range = TimeRange::new(0, 4).unwrap();
         let known = reader
             .summary(SummaryQuery::new(
@@ -3087,7 +3062,7 @@ mod tests {
 
         promote_to_v11(&connection, 7);
 
-        let detail = AggregateReader::new(&connection)
+        let detail = AggregateReader::new(&connection, &[])
             .session_detail(
                 TimeRange::new(0, 10).unwrap(),
                 &UsageFilter::default(),
@@ -3234,7 +3209,7 @@ mod tests {
     #[test]
     fn t_mu03_c05_backend_detail_groups_model_and_effort_buckets() {
         let connection = cost_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let detail = reader
             .session_detail(
                 TimeRange::new(0, 9).unwrap(),
@@ -3290,7 +3265,7 @@ mod tests {
     #[test]
     fn t_mu04_c02_cross_view_aggregates_share_cost_completeness() {
         let connection = cost_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let range = TimeRange::new(0, 9).unwrap();
         let summary = reader
             .summary(SummaryQuery::new(range, UsageFilter::default()))
@@ -3445,7 +3420,7 @@ mod tests {
     #[test]
     fn t_dc_032_session_scopes_recompute_inclusive_derived_values() {
         let connection = fixture();
-        let page = AggregateReader::new(&connection)
+        let page = AggregateReader::new(&connection, &[])
             .sessions(
                 TimeRange::new(100, 400).unwrap(),
                 SessionPageRequest::new(10),
@@ -3471,7 +3446,7 @@ mod tests {
         assert_eq!(root.subagent_count, 1);
         assert_eq!(root.models_used, vec!["gpt-a", "gpt-b"]);
         assert!(
-            AggregateReader::new(&connection)
+            AggregateReader::new(&connection, &[])
                 .verify_invariants(TimeRange::new(100, 400).unwrap())
                 .is_ok()
         );
@@ -3508,7 +3483,7 @@ mod tests {
             )
             .unwrap();
 
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let range = TimeRange::new(100, 400).unwrap();
         let page = reader.sessions(range, SessionPageRequest::new(10)).unwrap();
         assert_eq!(page.rows.len(), 2);
@@ -3542,7 +3517,7 @@ mod tests {
     #[test]
     fn aggregate_sql_sum_overflow_is_a_structured_error() {
         let connection = fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         insert_event(
             &connection,
             "overflow",
@@ -3575,7 +3550,7 @@ mod tests {
     #[test]
     fn aggregate_rejects_invalid_ranges_and_pages() {
         let connection = fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         assert_eq!(TimeRange::new(10, 1), Err(AggregateError::InvalidRange));
         assert_eq!(
             reader.sessions(TimeRange::new(0, 400).unwrap(), SessionPageRequest::new(0)),
@@ -3593,7 +3568,7 @@ mod tests {
     #[test]
     fn t_s04_001_model_filter_is_event_granular_and_canonical() {
         let connection = filter_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let range = TimeRange::new(0, 500).unwrap();
 
         let single = summary_for(&reader, range, &["gpt-b"], &[], false, false);
@@ -3638,7 +3613,7 @@ mod tests {
     #[test]
     fn t_s04_002_project_filter_uses_root_typed_join_and_specials() {
         let connection = filter_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let range = TimeRange::new(0, 500).unwrap();
         let project_a_path = fixture_path("project/a");
         let project_b_path = fixture_path("project/b");
@@ -3696,7 +3671,7 @@ mod tests {
     #[test]
     fn t_s04_003_filter_dimensions_and_date_are_anded_without_session_effects() {
         let connection = filter_fixture();
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let all_range = TimeRange::new(0, 500).unwrap();
         let project_a_path = fixture_path("project/a");
         let project_b_path = fixture_path("project/b");
@@ -3817,13 +3792,15 @@ mod tests {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .unwrap();
-        let options = AggregateReader::new(&transaction).filter_options().unwrap();
+        let options = AggregateReader::new(&transaction, &[])
+            .filter_options()
+            .unwrap();
         assert_eq!(metadata, (17, 7));
         assert_eq!(
             options.sources,
             vec![SourceFilterOption {
                 source: "codex".to_owned(),
-                display_name: "Codex".to_owned(),
+                display_name: "codex".to_owned(),
             }]
         );
         assert_eq!(
@@ -3914,7 +3891,9 @@ mod tests {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .unwrap();
-        let options = AggregateReader::new(&transaction).filter_options().unwrap();
+        let options = AggregateReader::new(&transaction, &[])
+            .filter_options()
+            .unwrap();
         assert!(
             options
                 .models
@@ -3980,7 +3959,7 @@ mod tests {
             )
             .unwrap();
 
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let before_activation = reader
             .summary(SummaryQuery::new(
                 TimeRange::new(0, 400).unwrap(),
@@ -4004,7 +3983,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let after_activation = AggregateReader::new(&connection)
+        let after_activation = AggregateReader::new(&connection, &[])
             .models(TimeRange::new(0, 400).unwrap())
             .unwrap();
         assert!(after_activation.iter().any(|row| row.model == "fake-model"));
@@ -4280,7 +4259,7 @@ mod tests {
             )
             .unwrap();
 
-        let reader = AggregateReader::new(&connection);
+        let reader = AggregateReader::new(&connection, &[]);
         let options = reader.filter_options().unwrap();
 
         assert_eq!(
@@ -4288,7 +4267,7 @@ mod tests {
             vec![
                 SourceFilterOption {
                     source: "codex".to_string(),
-                    display_name: "Codex".to_string(),
+                    display_name: "codex".to_string(),
                 },
                 SourceFilterOption {
                     source: "legacy-source".to_string(),
@@ -4327,7 +4306,7 @@ mod tests {
                      source_file_id INTEGER, file_generation INTEGER,
                      source_start_offset INTEGER, source_end_offset INTEGER
                  );
-                 CREATE TABLE IF NOT EXISTS usage_session_quarantine (
+                 CREATE TABLE IF NOT EXISTS test_session_errors (
                      ledger_epoch INTEGER NOT NULL, root_session_id TEXT NOT NULL,
                      primary_error_code TEXT NOT NULL, last_activity_at_ms INTEGER NOT NULL,
                      first_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
@@ -4348,7 +4327,7 @@ mod tests {
                  -- Quarantined Root 3: codex source, native = 'native-root-3'
                  INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,title,project_kind)
                      VALUES ('root-3','codex','native-root-3',NULL,'root-3','main','Main Thread 3','project');
-                 INSERT INTO usage_session_quarantine(ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,first_seen_at_ms,updated_at_ms)
+                 INSERT INTO test_session_errors(ledger_epoch,root_session_id,primary_error_code,last_activity_at_ms,first_seen_at_ms,updated_at_ms)
                      VALUES (1,'root-3','ERR_FORMAT',500,100,500);
 
                  -- Events for Root 1 and child 1
@@ -4361,7 +4340,9 @@ mod tests {
             )
             .unwrap();
 
-        let reader = AggregateReader::new(&connection);
+        let sidecar = TestErrorSidecar;
+        let sidecars: [&dyn SessionErrorSidecar; 1] = [&sidecar];
+        let reader = AggregateReader::new(&connection, &sidecars);
         let range = TimeRange::new(0, 1000).unwrap();
 
         // 1. SessionUsageRow has source & native_session_id
@@ -4442,7 +4423,7 @@ mod tests {
         let codex_only = reader
             .session_snapshot(
                 range,
-                &UsageFilter::default().with_sources(vec![SourceId::CODEX]),
+                &UsageFilter::default().with_sources(vec![SourceId::new("codex").unwrap()]),
                 SessionSortField::LastActivity,
                 SessionSortOrder::Desc,
             )
@@ -4477,7 +4458,7 @@ mod tests {
             )
             .unwrap();
 
-        let detail = AggregateReader::new(&connection)
+        let detail = AggregateReader::new(&connection, &[])
             .session_detail(
                 TimeRange::new(0, 400).unwrap(),
                 &UsageFilter::default(),

@@ -373,12 +373,14 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       }
 
       if (stateRef.current.refresh_state === "requesting") return;
-      if (status.source_binding_status === "source_changed" || status.scan_state === "source_changed") {
+      const codexSourceChanged = status.sources.some(
+        (source) =>
+          source.source === "codex" &&
+          source.state === "failed" &&
+          source.error_code === "SOURCE_CHANGED",
+      );
+      if (codexSourceChanged) {
         commit((value) => ({ ...value, refresh_state: "source_changed", error_code: "SOURCE_CHANGED" }));
-        return;
-      }
-      if (status.source_binding_status !== "ready") {
-        commit((value) => ({ ...value, refresh_state: "idle", error_code: STATUS_NOT_READY }));
         return;
       }
       const followup = status.followup;
@@ -564,7 +566,6 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       targetRef.current ||
       !current.status_ready ||
       !status ||
-      status.source_binding_status !== "ready" ||
       (status.scan_state !== "idle" && status.scan_state !== "failed") ||
       status.active_scan_id !== null ||
       status.followup?.state === "queued"

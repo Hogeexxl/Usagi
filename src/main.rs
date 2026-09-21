@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use usagi::{
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
+    codex::{CodexAdapter, CodexConfig, CodexConfigResolution, CodexSessionErrorSidecar},
     ingestion::{IngestionConfig, IngestionCoordinator},
     launcher::{self, BindOutcome},
     platform::browser::{self, BrowserOpener, SystemBrowser},
-    scanner::{CodexMetadata, LegacyCodexSourceAdapter},
     source::SourceRegistry,
     storage::{Ledger, LedgerOptions},
     update::UpdateService,
@@ -39,27 +39,33 @@ fn main() {
 }
 
 async fn run(browser_opener: impl BrowserOpener + Clone + 'static) -> Result<(), String> {
-    run_with_update_factory(browser_opener, LedgerOptions::default(), || {
-        UpdateService::new_github().map_err(|error| error.to_string())
-    })
+    run_with_update_factory(
+        browser_opener,
+        LedgerOptions::default(),
+        CodexConfig::resolve_default,
+        || UpdateService::new_github().map_err(|error| error.to_string()),
+    )
     .await
 }
 
 /// Run the production startup lifecycle with a small update-service factory
 /// seam.  The factory is called only after the listener, Ledger, Scanner, and
 /// HTTP router are ready, so a slow provider can never hold up startup.
-async fn run_with_update_factory<B, F>(
+async fn run_with_update_factory<B, F, C>(
     browser_opener: B,
     ledger_options: LedgerOptions,
+    codex_resolution_factory: C,
     update_factory: F,
 ) -> Result<(), String>
 where
     B: BrowserOpener + Clone + 'static,
     F: FnOnce() -> Result<Arc<UpdateService>, String> + Send + 'static,
+    C: FnOnce() -> CodexConfigResolution + Send + 'static,
 {
     run_with_update_factory_and_ready(
         browser_opener,
         ledger_options,
+        codex_resolution_factory,
         update_factory,
         false,
         |_| {},
@@ -67,9 +73,10 @@ where
     .await
 }
 
-async fn run_with_update_factory_and_ready<B, F, R>(
+async fn run_with_update_factory_and_ready<B, F, C, R>(
     browser_opener: B,
     ledger_options: LedgerOptions,
+    codex_resolution_factory: C,
     update_factory: F,
     allow_port_fallback: bool,
     on_ready: R,
@@ -77,6 +84,7 @@ async fn run_with_update_factory_and_ready<B, F, R>(
 where
     B: BrowserOpener + Clone + 'static,
     F: FnOnce() -> Result<Arc<UpdateService>, String> + Send + 'static,
+    C: FnOnce() -> CodexConfigResolution + Send + 'static,
     R: FnOnce(std::net::SocketAddr) + Send + 'static,
 {
     let browser_opener: Arc<dyn BrowserOpener> = Arc::new(browser_opener);
@@ -109,12 +117,11 @@ where
         Ledger::open(ledger_options)
             .map_err(|error| format!("could not open Usagi ledger: {error}"))?,
     );
+    let codex_resolution = codex_resolution_factory();
+    let codex_session_error_sidecar = Arc::new(CodexSessionErrorSidecar);
     let mut source_registry = SourceRegistry::new();
     source_registry
-        .register(LegacyCodexSourceAdapter::new(
-            ledger.codex_home().to_path_buf(),
-            CodexMetadata::from_home(ledger.codex_home()),
-        ))
+        .register(CodexAdapter::new(codex_resolution.clone()))
         .map_err(|error| format!("could not register Codex source: {error}"))?;
     let scanner = IngestionCoordinator::start(
         IngestionConfig::default(),
@@ -123,13 +130,13 @@ where
     )
     .map_err(|error| format!("could not start Usagi scanner: {error:?}"))?;
     let codex_quota_service = match CodexQuotaService::new_with_diagnostic(
-        ledger.codex_home(),
+        codex_resolution.quota_home(),
         report_codex_auth_save_failure,
     ) {
         Ok(service) => service,
         Err(error) => {
             eprintln!("Usagi Codex quota unavailable: {error}");
-            CodexQuotaService::unavailable(ledger.codex_home())
+            CodexQuotaService::unavailable(codex_resolution.quota_home())
         }
     };
     let (process_shutdown, mut shutdown_requested) = ProcessShutdown::channel();
@@ -148,6 +155,7 @@ where
             scanner,
             source_registry: source_registry.clone(),
             codex_quota_service: Arc::clone(&codex_quota_service),
+            codex_session_error_sidecar: Arc::clone(&codex_session_error_sidecar),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),
         },
@@ -163,6 +171,7 @@ where
             scanner,
             source_registry,
             codex_quota_service: Arc::clone(&codex_quota_service),
+            codex_session_error_sidecar: Arc::clone(&codex_session_error_sidecar),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),
         },
@@ -219,6 +228,7 @@ where
     run_with_update_factory_and_ready(
         SystemBrowser,
         LedgerOptions::default(),
+        CodexConfig::resolve_default,
         || UpdateService::new_github().map_err(|error| error.to_string()),
         true,
         on_ready,
@@ -310,8 +320,8 @@ mod tests {
         let codex_home = root.path().join("codex");
         fs::create_dir_all(codex_home.join("sessions")).unwrap();
         fs::create_dir_all(codex_home.join("archived_sessions")).unwrap();
-        let ledger_options =
-            usagi::storage::LedgerOptions::new(root.path().join("mu.sqlite3"), codex_home);
+        let ledger_options = usagi::storage::LedgerOptions::new(root.path().join("mu.sqlite3"));
+        let codex_resolution = usagi::codex::CodexConfig::from_home(codex_home);
 
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -321,9 +331,12 @@ mod tests {
         });
         let update_service = Arc::new(UpdateService::new(provider));
         let startup = tokio::spawn(async move {
-            run_with_update_factory(TestBrowser, ledger_options, move || {
-                Ok(Arc::clone(&update_service))
-            })
+            run_with_update_factory(
+                TestBrowser,
+                ledger_options,
+                move || codex_resolution,
+                move || Ok(Arc::clone(&update_service)),
+            )
             .await
         });
 

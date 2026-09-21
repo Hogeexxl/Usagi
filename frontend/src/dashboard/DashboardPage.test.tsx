@@ -48,7 +48,7 @@ const status = {
   last_scan_completed_at_ms: null,
   last_scan_failed_at_ms: null,
   last_scan_error_code: null,
-  source_binding_status: "ready" as const,
+  sources: [],
 };
 
 const sessionSnapshot = {

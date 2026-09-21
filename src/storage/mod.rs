@@ -1,8 +1,7 @@
 //! SQLite storage bootstrap for Usagi.
 //!
 //! This module owns the connection, PRAGMA setup, schema migration, source
-//! observation/checkpoint writes, metadata commits, scan lifecycle, and the
-//! `CODEX_HOME` binding.  SQL and transactions remain private to storage.
+//! observation/checkpoint writes, metadata commits, and scan lifecycle.
 
 use std::{
     fmt, fs, io,
@@ -16,18 +15,16 @@ use crate::domain::{
 };
 use crate::platform::paths;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 pub(crate) mod cost;
 mod lifecycle;
-mod metadata;
-pub(crate) use metadata::apply_codex_metadata_group;
 mod migrations;
-pub(crate) mod source;
-pub(crate) mod usage;
 
-pub use crate::domain::{AppState, CodexScanStatusSnapshot, SourceBindingStatus};
+#[cfg(test)]
+pub(crate) use migrations::seed_v11_binding_rows;
+
+pub use crate::domain::AppState;
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
@@ -36,22 +33,23 @@ const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5_000;
 const REQUIRED_TABLES: &[&str] = &[
     "app_meta",
     "scan_runs",
-    "source_files",
-    "source_checkpoints",
-    "rollout_metadata_facts",
+    "source_scan_runs",
     "threads",
     "usage_events",
-    "usage_event_occurrences",
     "source_usage_epochs",
-    "source_scan_runs",
-    "turns",
-    "ingest_anomalies",
-    "usage_source_states",
-    "usage_build_sources",
-    "skill_usage_events",
+    "codex_adapter_state",
+    "codex_source_files",
+    "codex_source_checkpoints",
+    "codex_rollout_metadata_facts",
+    "codex_usage_event_occurrences",
+    "codex_turns",
+    "codex_ingest_anomalies",
+    "codex_usage_source_states",
+    "codex_usage_build_sources",
+    "codex_usage_session_quarantine",
+    "codex_usage_session_quarantine_sources",
+    "codex_skill_usage_events",
 ];
-
-type BindingRow = (Option<String>, String, i64, Option<String>, Option<String>);
 
 /// Stable, opaque categories suitable for API error mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,8 +59,6 @@ pub enum StorageErrorKind {
     DatabaseCorrupt,
     Io,
     SchemaTooNew,
-    SourceChanged,
-    SourceUnbound,
     InvalidState,
     LockPoisoned,
 }
@@ -118,19 +114,6 @@ impl StorageError {
         Self::with_source(StorageErrorKind::DatabaseCorrupt, error)
     }
 
-    pub(crate) fn source_changed(expected: impl Into<String>, actual: impl Into<String>) -> Self {
-        let diagnostic = InternalStorageError(format!(
-            "CODEX_HOME fingerprint changed from {} to {}",
-            expected.into(),
-            actual.into()
-        ));
-        Self::with_source(StorageErrorKind::SourceChanged, diagnostic)
-    }
-
-    pub(crate) fn source_unbound() -> Self {
-        Self::without_source(StorageErrorKind::SourceUnbound)
-    }
-
     pub(crate) fn invalid_state(message: impl Into<String>) -> Self {
         Self::with_source(
             StorageErrorKind::InvalidState,
@@ -177,6 +160,22 @@ impl StorageError {
     }
 }
 
+impl From<crate::source::SourceStorageError> for StorageError {
+    fn from(error: crate::source::SourceStorageError) -> Self {
+        match error {
+            crate::source::SourceStorageError::Storage(kind) => Self::without_source(kind),
+            crate::source::SourceStorageError::NotImplemented
+            | crate::source::SourceStorageError::TransactionClosed
+            | crate::source::SourceStorageError::TransactionPoisoned
+            | crate::source::SourceStorageError::SourceMismatch
+            | crate::source::SourceStorageError::UnsupportedOperation(_)
+            | crate::source::SourceStorageError::InvalidRequest(_) => {
+                Self::invalid_state("source storage operation failed")
+            }
+        }
+    }
+}
+
 impl fmt::Debug for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -218,14 +217,6 @@ impl fmt::Display for StorageError {
                 kind: StorageErrorKind::SchemaTooNew,
                 ..
             } => formatter.write_str("database schema is newer than supported"),
-            Self {
-                kind: StorageErrorKind::SourceChanged,
-                ..
-            } => formatter.write_str("CODEX_HOME does not match the database binding"),
-            Self {
-                kind: StorageErrorKind::SourceUnbound,
-                ..
-            } => formatter.write_str("database has no CODEX_HOME binding"),
             Self {
                 kind: StorageErrorKind::InvalidState,
                 ..
@@ -338,24 +329,18 @@ pub struct LedgerOptions {
     /// used (`~/Library/Application Support/Usagi/mu.sqlite3` on macOS and
     /// the platform local application-data directory on Windows).
     pub db_path: Option<PathBuf>,
-    /// Optional Codex home to bind. If omitted, `CODEX_HOME` or the platform
-    /// user's Home/.codex path is used. This directory is never created by the
-    /// opener.
-    pub codex_home: Option<PathBuf>,
 }
 
 impl LedgerOptions {
-    pub fn new(db_path: impl Into<PathBuf>, codex_home: impl Into<PathBuf>) -> Self {
+    pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: Some(db_path.into()),
-            codex_home: Some(codex_home.into()),
         }
     }
 
     pub fn for_database(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: Some(db_path.into()),
-            codex_home: None,
         }
     }
 
@@ -368,21 +353,11 @@ impl LedgerOptions {
         self.with_database_path(db_path)
     }
 
-    pub fn with_codex_home(mut self, codex_home: impl Into<PathBuf>) -> Self {
-        self.codex_home = Some(codex_home.into());
-        self
-    }
-
     pub fn database_path(&self) -> Result<PathBuf> {
         self.db_path
             .clone()
             .map(|path| paths::normalize_path(path).map_err(StorageError::from))
             .unwrap_or_else(default_database_path_with_legacy_migration)
-    }
-
-    pub fn codex_home_path(&self) -> Result<PathBuf> {
-        paths::normalize_path(paths::resolve_codex_home(self.codex_home.clone()))
-            .map_err(StorageError::from)
     }
 }
 
@@ -426,8 +401,6 @@ impl RevisionPublisher {
 /// The MU SQLite ledger.  Connections and SQL remain private to this module.
 pub struct Ledger {
     db_path: PathBuf,
-    codex_home: PathBuf,
-    codex_home_fingerprint: String,
     connection: Mutex<Connection>,
     revision_sender: watch::Sender<RevisionTuple>,
 }
@@ -437,21 +410,14 @@ impl fmt::Debug for Ledger {
         formatter
             .debug_struct("Ledger")
             .field("db_path", &self.db_path)
-            .field("codex_home", &self.codex_home)
-            .field("codex_home_fingerprint", &self.codex_home_fingerprint)
             .finish_non_exhaustive()
     }
 }
 
 impl Ledger {
-    /// Open/create a ledger, configure SQLite, run migrations, and bind the
-    /// normalized Codex home.  A mismatch is persisted as `source_changed` and
-    /// still returns a readable Ledger; mutating consumers must call
-    /// [`Ledger::ensure_source_ready`] before writing.
+    /// Open/create a ledger, configure SQLite, and run migrations.
     pub fn open(options: LedgerOptions) -> Result<Self> {
         let db_path = options.database_path()?;
-        let codex_home = options.codex_home_path()?;
-        let codex_home_fingerprint = fingerprint_for_path(&codex_home);
 
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
@@ -470,15 +436,12 @@ impl Ledger {
         configure_connection(&connection).map_err(classify_sqlite)?;
         migrations::migrate(&mut connection, current_version).map_err(classify_sqlite)?;
         validate_schema(&connection, &db_path).map_err(classify_sqlite)?;
-        bind_codex_home(&mut connection, &codex_home_fingerprint).map_err(classify_sqlite)?;
         cost::refresh_usage_costs_if_needed(&mut connection)?;
         let initial_revision = read_revision_tuple(&connection).map_err(classify_sqlite)?;
         let (revision_sender, _) = watch::channel(initial_revision);
 
         Ok(Self {
             db_path,
-            codex_home,
-            codex_home_fingerprint,
             connection: Mutex::new(connection),
             revision_sender,
         })
@@ -486,14 +449,6 @@ impl Ledger {
 
     pub fn database_path(&self) -> &Path {
         &self.db_path
-    }
-
-    pub fn codex_home(&self) -> &Path {
-        &self.codex_home
-    }
-
-    pub fn expected_codex_home_fingerprint(&self) -> &str {
-        &self.codex_home_fingerprint
     }
 
     pub fn schema_version(&self) -> Result<u32> {
@@ -526,9 +481,7 @@ impl Ledger {
                 followup_trigger,
                 followup_requested_at_ms,
                 followup_enqueued_status_revision,
-                followup_error_code,
-                codex_home_fingerprint,
-                source_binding_status
+                followup_error_code
              FROM app_meta
                 WHERE id = 1",
                 [],
@@ -539,7 +492,6 @@ impl Ledger {
                     let last_finished_scan_result: Option<String> = row.get(5)?;
                     let followup_state: Option<String> = row.get(11)?;
                     let followup_trigger: Option<String> = row.get(12)?;
-                    let source_binding_status: String = row.get(17)?;
                     let followup_enqueued_status_revision: Option<i64> = row.get(14)?;
                     let scan_state = ScanLifecycleState::try_from(scan_state.as_str())
                         .map_err(to_domain_sql_error)?;
@@ -558,9 +510,6 @@ impl Ledger {
                         .map(ScanTrigger::try_from)
                         .transpose()
                         .map_err(to_domain_sql_error)?;
-                    let source_binding_status =
-                        SourceBindingStatus::try_from(source_binding_status.as_str())
-                            .map_err(to_domain_sql_error)?;
                     AppState::new(
                         data_revision,
                         ScanState {
@@ -579,7 +528,6 @@ impl Ledger {
                             followup_requested_at_ms: row.get(13)?,
                             followup_enqueued_status_revision,
                             followup_error_code: row.get(15)?,
-                            source_binding_status,
                         },
                     )
                     .map_err(to_domain_sql_error)
@@ -589,61 +537,6 @@ impl Ledger {
             .map_err(StorageError::sqlite)?
             .ok_or_else(|| StorageError::invalid_state("app_meta row id=1 is missing"))?;
         Ok(row)
-    }
-
-    pub fn source_binding_status(&self) -> Result<SourceBindingStatus> {
-        Ok(self.app_state()?.source_binding_status)
-    }
-
-    /// Return an error for consumers that would write source-derived facts.
-    /// A `source_changed` Ledger remains usable for read-only queries.
-    pub fn ensure_source_ready(&self) -> Result<()> {
-        match self.source_binding_status()? {
-            SourceBindingStatus::Ready => {
-                let connection = self.connection()?;
-                let stored_fingerprint: Option<String> = connection
-                    .query_row(
-                        "SELECT codex_home_fingerprint FROM app_meta WHERE id = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                match stored_fingerprint {
-                    Some(expected) if expected == self.codex_home_fingerprint => Ok(()),
-                    Some(expected) => Err(StorageError::source_changed(
-                        expected,
-                        self.codex_home_fingerprint.clone(),
-                    )),
-                    None => Err(StorageError::invalid_state(
-                        "ready CODEX_HOME binding has no fingerprint",
-                    )),
-                }
-            }
-            SourceBindingStatus::Unbound => Err(StorageError::source_unbound()),
-            SourceBindingStatus::SourceChanged => {
-                let connection = self.connection()?;
-                let stored_fingerprint: Option<String> = connection
-                    .query_row(
-                        "SELECT codex_home_fingerprint FROM app_meta WHERE id = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-                Err(StorageError::source_changed(
-                    stored_fingerprint.unwrap_or_default(),
-                    self.codex_home_fingerprint.clone(),
-                ))
-            }
-        }
-    }
-
-    /// Stable fingerprint for a path after absolute/lexical normalization.
-    pub fn codex_home_fingerprint(path: impl AsRef<Path>) -> String {
-        fingerprint_for_path(
-            &paths::normalize_path(path.as_ref().to_path_buf())
-                .unwrap_or_else(|_| path.as_ref().to_path_buf()),
-        )
     }
 
     /// Subscribe to the latest committed `(data_revision,status_revision)`.
@@ -675,6 +568,86 @@ impl Ledger {
         self.connection
             .lock()
             .map_err(|_| StorageError::lock_poisoned())
+    }
+
+    /// Execute a read-only operation in one deferred SQLite transaction.
+    /// `query_only` is restored explicitly on every normal return path and
+    /// best-effort during unwinding.
+    pub(crate) fn with_read_transaction<T, E>(
+        &self,
+        operation: impl FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        let connection = self.connection().map_err(E::from)?;
+        let mut guard = QueryOnlyGuard::new(&connection).map_err(E::from)?;
+        let result = {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(StorageError::sqlite)
+                .map_err(E::from)?;
+            let operation_result = operation(&transaction);
+            match operation_result {
+                Ok(value) => transaction
+                    .commit()
+                    .map(|()| value)
+                    .map_err(StorageError::sqlite)
+                    .map_err(E::from),
+                Err(error) => {
+                    let _ = transaction.rollback();
+                    Err(error)
+                }
+            }
+        };
+        let restore = guard.restore();
+        match restore {
+            Ok(()) => result,
+            Err(error) => Err(E::from(error)),
+        }
+    }
+}
+
+struct QueryOnlyGuard<'a> {
+    connection: &'a Connection,
+    previous: bool,
+    armed: bool,
+}
+
+impl<'a> QueryOnlyGuard<'a> {
+    fn new(connection: &'a Connection) -> Result<Self> {
+        let previous: i64 = connection
+            .pragma_query_value(None, "query_only", |row| row.get(0))
+            .map_err(StorageError::sqlite)?;
+        connection
+            .pragma_update(None, "query_only", true)
+            .map_err(StorageError::sqlite)?;
+        Ok(Self {
+            connection,
+            previous: previous != 0,
+            armed: true,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.armed {
+            self.connection
+                .pragma_update(None, "query_only", self.previous)
+                .map_err(StorageError::sqlite)?;
+            self.armed = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for QueryOnlyGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed && std::thread::panicking() {
+            let _ = self
+                .connection
+                .pragma_update(None, "query_only", self.previous);
+            self.armed = false;
+        }
     }
 }
 
@@ -748,6 +721,60 @@ pub(crate) fn validate_schema(connection: &Connection, db_path: &Path) -> rusqli
         }
     }
 
+    for table in [
+        "source_files",
+        "source_checkpoints",
+        "rollout_metadata_facts",
+        "usage_event_occurrences",
+        "turns",
+        "ingest_anomalies",
+        "usage_source_states",
+        "usage_build_sources",
+        "usage_session_quarantine",
+        "usage_session_quarantine_sources",
+        "skill_usage_events",
+    ] {
+        let found: i64 = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
+            )",
+            [table],
+            |row| row.get(0),
+        )?;
+        if found != 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "legacy private table {table} is still present"
+            )));
+        }
+    }
+
+    require_primary_key(connection, "codex_adapter_state", &["id"])?;
+    require_check_fragment(connection, "codex_adapter_state", "id=1")?;
+    require_check_fragment(
+        connection,
+        "codex_adapter_state",
+        "binding_statusin('unbound','ready','source_changed')",
+    )?;
+    require_trigger(connection, "codex_source_checkpoints_offset_insert")?;
+    require_trigger(connection, "codex_source_checkpoints_offset_update")?;
+    for trigger in [
+        "source_checkpoints_offset_insert",
+        "source_checkpoints_offset_update",
+    ] {
+        let found: i64 = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1
+            )",
+            [trigger],
+            |row| row.get(0),
+        )?;
+        if found != 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "legacy checkpoint trigger {trigger} is still present"
+            )));
+        }
+    }
+
     require_not_null_columns(connection, "threads", &["source", "native_session_id"])?;
     require_non_empty_check(connection, "threads", "source")?;
     require_non_empty_check(connection, "threads", "native_session_id")?;
@@ -779,11 +806,15 @@ pub(crate) fn validate_schema(connection: &Connection, db_path: &Path) -> rusqli
         &[("source", "source")],
     )?;
 
-    require_not_null_columns(connection, "usage_event_occurrences", &["source"])?;
-    require_check_fragment(connection, "usage_event_occurrences", "source='codex'")?;
+    require_not_null_columns(connection, "codex_usage_event_occurrences", &["source"])?;
+    require_check_fragment(
+        connection,
+        "codex_usage_event_occurrences",
+        "source='codex'",
+    )?;
     require_primary_key(
         connection,
-        "usage_event_occurrences",
+        "codex_usage_event_occurrences",
         &[
             "source",
             "ledger_epoch",
@@ -794,7 +825,7 @@ pub(crate) fn validate_schema(connection: &Connection, db_path: &Path) -> rusqli
     )?;
     require_foreign_key(
         connection,
-        "usage_event_occurrences",
+        "codex_usage_event_occurrences",
         "usage_events",
         &[
             ("source", "source"),
@@ -971,109 +1002,20 @@ fn require_check_fragment(
     )))
 }
 
-fn bind_codex_home(connection: &mut Connection, fingerprint: &str) -> rusqlite::Result<()> {
-    let transaction =
-        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let current: Option<BindingRow> = transaction
-        .query_row(
-            "SELECT
-                codex_home_fingerprint,
-                source_binding_status,
-                status_revision,
-                followup_state,
-                followup_scan_id
-             FROM app_meta
-             WHERE id = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let (stored_fingerprint, status, status_revision, followup_state, followup_scan_id) = current
-        .ok_or_else(
-        || rusqlite::Error::InvalidParameterName("app_meta row id=1 is missing".to_owned()),
+fn require_trigger(connection: &Connection, trigger: &str) -> rusqlite::Result<()> {
+    let found: i64 = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1
+        )",
+        [trigger],
+        |row| row.get(0),
     )?;
-
-    match (stored_fingerprint, status.as_str()) {
-        (None, "unbound") => {
-            transaction.execute(
-                "UPDATE app_meta
-                 SET codex_home_fingerprint = ?1, source_binding_status = 'ready'
-                 WHERE id = 1",
-                [fingerprint],
-            )?;
-        }
-        (Some(stored), "ready") if stored == fingerprint => {}
-        (Some(stored), "ready") => {
-            let next_revision = status_revision.checked_add(1).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName("status_revision overflow".to_owned())
-            })?;
-            if followup_state.as_deref() == Some("queued") {
-                let followup_scan_id = followup_scan_id.ok_or_else(|| {
-                    rusqlite::Error::InvalidParameterName(
-                        "queued follow-up is missing its scan id".to_owned(),
-                    )
-                })?;
-                let changed = transaction.execute(
-                    "UPDATE scan_runs
-                     SET state = 'start_failed',
-                         finished_at_ms = ?2,
-                         terminal_status_revision = ?3,
-                         error_code = 'SOURCE_CHANGED'
-                     WHERE scan_id = ?1 AND state = 'queued'",
-                    params![followup_scan_id, current_time_ms(), next_revision],
-                )?;
-                if changed != 1 {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        "queued follow-up has no matching scan run".to_owned(),
-                    ));
-                }
-                transaction.execute(
-                    "UPDATE app_meta
-                     SET source_binding_status = 'source_changed',
-                         status_revision = ?1,
-                         followup_state = 'start_failed',
-                         followup_error_code = 'SOURCE_CHANGED'
-                     WHERE id = 1",
-                    [next_revision],
-                )?;
-            } else {
-                transaction.execute(
-                    "UPDATE app_meta
-                     SET source_binding_status = 'source_changed',
-                         status_revision = ?1
-                     WHERE id = 1",
-                    [next_revision],
-                )?;
-            }
-            // Keep the original fingerprint in app_meta.  It is the expected
-            // source identity and lets the caller diagnose the mismatch.
-            let _ = stored;
-        }
-        (Some(stored), "source_changed") if stored == fingerprint => {
-            // Recovery is deliberately explicit; reopening with the old home
-            // must not silently clear source_changed.
-        }
-        (Some(_), "source_changed") => {}
-        (None, _) | (Some(_), "unbound") => {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "inconsistent app_meta source binding".to_owned(),
-            ));
-        }
-        (_, other) => {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "unknown source binding status {other:?}"
-            )));
-        }
+    if found == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "required trigger {trigger} is missing"
+        )));
     }
-    transaction.commit()
+    Ok(())
 }
 
 fn to_domain_sql_error(error: DomainError) -> rusqlite::Error {
@@ -1115,11 +1057,6 @@ fn classify_sqlite(error: rusqlite::Error) -> StorageError {
     }
 }
 
-fn fingerprint_for_path(path: &Path) -> String {
-    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn current_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1130,687 +1067,5 @@ fn current_time_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use rusqlite::{Connection, params};
-
-    use super::{
-        Ledger, LedgerOptions, PragmaState, SourceBindingStatus, StorageErrorKind,
-        migrate_legacy_database_if_needed, usage_event_count,
-    };
-    use crate::domain::{AppState, FollowupState, ScanTrigger};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("usagi-storage-{unique}"));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn options(root: &TempDir) -> LedgerOptions {
-        LedgerOptions::new(
-            root.path().join("nested/db/mu.sqlite3"),
-            root.path().join("codex"),
-        )
-    }
-
-    fn seed_usage_database(path: &Path, rows: usize) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        let connection = Connection::open(path).unwrap();
-        connection
-            .execute_batch("CREATE TABLE usage_events (event_id TEXT PRIMARY KEY);")
-            .unwrap();
-        for index in 0..rows {
-            connection
-                .execute(
-                    "INSERT INTO usage_events(event_id) VALUES (?1)",
-                    [format!("event-{index}")],
-                )
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn rename_migration_moves_legacy_directory_when_new_database_is_missing() {
-        let root = TempDir::new();
-        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
-        let current = root.path().join("Usagi").join("mu.sqlite3");
-        seed_usage_database(&legacy, 2);
-        fs::write(legacy.parent().unwrap().join("sidecar-state"), b"keep").unwrap();
-
-        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
-
-        assert_eq!(usage_event_count(&current).unwrap(), 2);
-        assert_eq!(
-            fs::read(current.parent().unwrap().join("sidecar-state")).unwrap(),
-            b"keep"
-        );
-        assert!(!legacy.parent().unwrap().exists());
-    }
-
-    #[test]
-    fn rename_migration_replaces_empty_database_created_by_broken_rename_build() {
-        let root = TempDir::new();
-        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
-        let current = root.path().join("Usagi").join("mu.sqlite3");
-        seed_usage_database(&legacy, 3);
-        seed_usage_database(&current, 0);
-
-        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
-
-        assert_eq!(usage_event_count(&current).unwrap(), 3);
-        assert!(!legacy.parent().unwrap().exists());
-    }
-
-    #[test]
-    fn rename_migration_never_overwrites_nonempty_usagi_database() {
-        let root = TempDir::new();
-        let legacy = root.path().join("legacy-name").join("mu.sqlite3");
-        let current = root.path().join("Usagi").join("mu.sqlite3");
-        seed_usage_database(&legacy, 3);
-        seed_usage_database(&current, 1);
-
-        migrate_legacy_database_if_needed(&current, &legacy).unwrap();
-
-        assert_eq!(usage_event_count(&current).unwrap(), 1);
-        assert_eq!(usage_event_count(&legacy).unwrap(), 3);
-    }
-
-    #[test]
-    fn opens_nested_database_and_verifies_pragmas() {
-        let root = TempDir::new();
-        let ledger = Ledger::open(options(&root)).unwrap();
-        assert!(ledger.database_path().exists());
-        assert_eq!(ledger.schema_version().unwrap(), 11);
-        assert_eq!(
-            ledger.pragma_state().unwrap(),
-            PragmaState {
-                journal_mode_wal: true,
-                synchronous_normal: true,
-                foreign_keys: true,
-                busy_timeout_ms: 5_000,
-            }
-        );
-        let state = ledger.app_state().unwrap();
-        assert_eq!(state.data_revision, 0);
-        assert_eq!(state.status_revision, 0);
-        assert_eq!(state.source_binding_status, SourceBindingStatus::Ready);
-        assert!(!root.path().join("codex").is_dir());
-    }
-
-    #[test]
-    fn reopening_preserves_binding_and_schema() {
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let fingerprint = first.expected_codex_home_fingerprint().to_owned();
-        drop(first);
-        let second = Ledger::open(opts).unwrap();
-        assert_eq!(second.expected_codex_home_fingerprint(), fingerprint);
-        assert_eq!(second.schema_version().unwrap(), 11);
-        assert_eq!(second.app_state().unwrap().status_revision, 0);
-    }
-
-    #[test]
-    fn mismatched_home_is_readable_but_not_writable() {
-        let root = TempDir::new();
-        let db = root.path().join("mu.sqlite3");
-        let home_a = root.path().join("codex-a");
-        let home_b = root.path().join("codex-b");
-        let first = Ledger::open(LedgerOptions::new(&db, &home_a)).unwrap();
-        drop(first);
-
-        let changed = Ledger::open(LedgerOptions::new(&db, &home_b)).unwrap();
-        assert_eq!(
-            changed.app_state().unwrap().source_binding_status,
-            SourceBindingStatus::SourceChanged
-        );
-        assert_eq!(changed.app_state().unwrap().status_revision, 1);
-        assert_eq!(
-            changed.ensure_source_ready().unwrap_err().kind(),
-            StorageErrorKind::SourceChanged
-        );
-        drop(changed);
-
-        // Reopening with the original source remains readable, while explicit
-        // recovery is still required to clear source_changed.
-        let original = Ledger::open(LedgerOptions::new(db, home_a)).unwrap();
-        assert_eq!(
-            original.app_state().unwrap().source_binding_status,
-            SourceBindingStatus::SourceChanged
-        );
-    }
-
-    #[test]
-    fn app_state_uses_domain_projection_and_source_change_fails_queued_followup() {
-        let root = TempDir::new();
-        let db = root.path().join("mu.sqlite3");
-        let home_a = root.path().join("codex-a");
-        let home_b = root.path().join("codex-b");
-        let first = Ledger::open(LedgerOptions::new(&db, &home_a)).unwrap();
-
-        let _: AppState = first.app_state().unwrap();
-        let connection = first.connection().unwrap();
-        connection
-            .execute(
-                "INSERT INTO scan_runs (
-                    scan_id, trigger, request_kind, state, requested_at_ms,
-                    enqueued_status_revision
-                 ) VALUES ('followup-1', 'Manual', 'followup', 'queued', 100, 0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE app_meta
-                 SET followup_scan_id = 'followup-1',
-                     followup_state = 'queued',
-                     followup_trigger = 'Manual',
-                     followup_requested_at_ms = 100,
-                     followup_enqueued_status_revision = 0
-                 WHERE id = 1",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        drop(first);
-
-        let changed = Ledger::open(LedgerOptions::new(&db, &home_b)).unwrap();
-        let state = changed.app_state().unwrap();
-        assert_eq!(
-            state.source_binding_status,
-            SourceBindingStatus::SourceChanged
-        );
-        assert_eq!(state.status_revision, 1);
-        assert_eq!(state.followup_state, Some(FollowupState::StartFailed));
-        assert_eq!(state.followup_trigger, Some(ScanTrigger::Manual));
-        assert_eq!(state.followup_error_code.as_deref(), Some("SOURCE_CHANGED"));
-
-        let connection = changed.connection().unwrap();
-        let row: (String, Option<i64>, Option<i64>, Option<String>) = connection
-            .query_row(
-                "SELECT state, started_at_ms, terminal_status_revision, error_code
-                 FROM scan_runs WHERE scan_id = 'followup-1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(row.0, "start_failed");
-        assert!(row.1.is_none());
-        assert_eq!(row.2, Some(1));
-        assert_eq!(row.3.as_deref(), Some("SOURCE_CHANGED"));
-    }
-
-    #[test]
-    fn newer_schema_is_rejected_without_deleting_database() {
-        let root = TempDir::new();
-        let db = root.path().join("future.sqlite3");
-        let connection = Connection::open(&db).unwrap();
-        connection
-            .pragma_update(None, "user_version", 99_i64)
-            .unwrap();
-        drop(connection);
-        let before = fs::read(&db).unwrap();
-        let error = Ledger::open(LedgerOptions::new(&db, root.path().join("codex"))).unwrap_err();
-        assert_eq!(error.kind(), StorageErrorKind::SchemaTooNew);
-        assert_eq!(error.schema_versions(), Some((99, 11)));
-        assert_eq!(fs::read(&db).unwrap(), before);
-    }
-
-    #[test]
-    fn corrupt_database_is_not_removed() {
-        let root = TempDir::new();
-        let db = root.path().join("corrupt.sqlite3");
-        let bytes = b"not a sqlite database";
-        fs::write(&db, bytes).unwrap();
-        let error = Ledger::open(LedgerOptions::new(&db, root.path().join("codex"))).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            StorageErrorKind::DatabaseCorrupt | StorageErrorKind::Database
-        ));
-        assert_eq!(fs::read(&db).unwrap(), bytes);
-    }
-
-    #[test]
-    fn migration_failure_rolls_back_schema_and_version() {
-        let root = TempDir::new();
-        let db = root.path().join("migration-failure.sqlite3");
-        let connection = Connection::open(&db).unwrap();
-        connection
-            .execute_batch("CREATE TABLE source_files (sentinel INTEGER); PRAGMA user_version = 0;")
-            .unwrap();
-        drop(connection);
-
-        assert!(Ledger::open(LedgerOptions::new(&db, root.path().join("codex"))).is_err());
-        let connection = Connection::open(&db).unwrap();
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 0);
-        let sentinel: i64 = connection
-            .query_row("SELECT count(*) FROM source_files", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(sentinel, 0);
-        assert!(
-            connection
-                .query_row::<i64, _, _>("SELECT count(*) FROM app_meta", [], |row| row.get(0))
-                .is_err()
-        );
-    }
-
-    fn seed_cost_events(ledger: &Ledger, overflow: bool) -> i64 {
-        let connection = ledger.connection().unwrap();
-        connection
-            .execute(
-                "UPDATE source_usage_epochs
-                 SET active_epoch=1,active_parser_version=7
-                 WHERE source='codex'",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO threads(
-                    thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,archived,
-                    project_kind,metadata_quality_status,metadata_resolved_at_ms
-                 ) VALUES ('cost-root','codex','cost-root',NULL,'cost-root','main',0,'unknown','complete',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO source_files(
-                    source_file_id,thread_id,current_path,source_area,device_id,inode,
-                    file_generation,observed_size,observed_mtime_ns,file_status,last_seen_at_ms
-                 ) VALUES (1,'cost-root','/tmp/usagi-cost.jsonl','sessions',1,1,1,100,0,'present',0)",
-                [],
-            )
-            .unwrap();
-        if overflow {
-            connection
-                .execute(
-                    "INSERT INTO usage_events(
-                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
-                        turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
-                        input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
-                        total_tokens,quality_status,created_at_ms
-                     ) VALUES ('codex',1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review',NULL,NULL,
-                               1000,200,100,50,20,1050,'complete',0),
-                              ('codex',1,'overflow','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol',NULL,NULL,
-                               9000000000000000,0,0,0,0,9000000000000000,'complete',0)",
-                    [],
-                )
-                .unwrap();
-        } else {
-            connection
-                .execute(
-                    "INSERT INTO usage_events(
-                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
-                        turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
-                        input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
-                        total_tokens,quality_status,created_at_ms
-                     ) VALUES ('codex',1,'known','normal',0,'cost-root','cost-root',NULL,'gpt-5.6-sol','high',NULL,
-                               1000,200,100,50,20,1050,'complete',0),
-                              ('codex',1,'auto-review','normal',0,'cost-root','cost-root',NULL,'codex-auto-review','high',NULL,
-                               1000,200,100,50,20,1050,'complete',0),
-                              ('codex',1,'unknown','recovered',0,'cost-root','cost-root',NULL,'unknown-model',NULL,NULL,
-                               1000,200,100,50,20,1050,'complete',0)",
-                    [],
-                )
-                .unwrap();
-        }
-        let revision: i64 = connection
-            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE app_meta SET cost_algorithm_version=0,pricing_catalog_version=0 WHERE id=1",
-                [],
-            )
-            .unwrap();
-        revision
-    }
-
-    fn insert_cost_event(
-        connection: &Connection,
-        source: &str,
-        source_epoch: i64,
-        event_id: &str,
-        model: &str,
-        estimated_cost_nanos_usd: Option<i64>,
-    ) {
-        connection
-            .execute(
-                "INSERT INTO usage_events(
-                    source,source_epoch,event_id,event_kind,occurred_at_ms,
-                    thread_id,root_session_id,turn_key,model,reasoning_effort,
-                    estimated_cost_nanos_usd,input_tokens,cached_tokens,cache_write_tokens,
-                    output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
-                 ) VALUES (?1,?2,?3,'normal',0,'cost-root','cost-root',NULL,?4,NULL,?5,
-                           1000,200,100,50,20,1050,'complete',0)",
-                params![
-                    source,
-                    source_epoch,
-                    event_id,
-                    model,
-                    estimated_cost_nanos_usd,
-                ],
-            )
-            .unwrap();
-    }
-
-    fn mark_cost_versions_stale(connection: &Connection) {
-        connection
-            .execute(
-                "UPDATE app_meta
-                 SET cost_algorithm_version=0,pricing_catalog_version=0
-                 WHERE id=1",
-                [],
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn t_mu04_a02_open_reprices_pricing_catalog_atomically() {
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, false);
-        let parser_version_before: i64 = first
-            .connection()
-            .unwrap()
-            .query_row(
-                "SELECT active_parser_version FROM source_usage_epochs WHERE source='codex'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        drop(first);
-
-        let reopened = Ledger::open(opts).unwrap();
-        let connection = reopened.connection().unwrap();
-        type RepricedCosts = (
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-            i64,
-        );
-        let costs: RepricedCosts = connection
-            .query_row(
-                "SELECT
-                    (SELECT estimated_cost_nanos_usd FROM usage_events WHERE event_id='known'),
-                    (SELECT estimated_cost_nanos_usd FROM usage_events WHERE event_id='unknown'),
-                    (SELECT estimated_cost_nanos_usd FROM usage_events WHERE event_id='auto-review'),
-                    (SELECT model FROM usage_events WHERE event_id='auto-review'),
-                    (SELECT cost_algorithm_version FROM app_meta WHERE id=1),
-                    (SELECT pricing_catalog_version FROM app_meta WHERE id=1),
-                    (SELECT data_revision FROM app_meta WHERE id=1),
-                    (SELECT active_parser_version FROM source_usage_epochs WHERE source='codex')",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            costs,
-            (
-                Some(4_380_000),
-                None,
-                Some(229_000),
-                Some("codex-auto-review".to_owned()),
-                1,
-                4,
-                before_revision + 1,
-                parser_version_before,
-            )
-        );
-        drop(connection);
-        assert_eq!(
-            reopened.current_revision().data_revision,
-            before_revision + 1
-        );
-    }
-
-    #[test]
-    fn t_mu03_b05_open_reprice_rolls_back_on_overflow() {
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, true);
-        drop(first);
-
-        assert!(Ledger::open(opts.clone()).is_err());
-        let connection = Connection::open(root.path().join("nested/db/mu.sqlite3")).unwrap();
-        let state: (Option<i64>, Option<i64>, i64, i64, i64) = connection
-            .query_row(
-                "SELECT
-                        (SELECT estimated_cost_nanos_usd FROM usage_events
-                         WHERE event_id='auto-review'),
-                        (SELECT estimated_cost_nanos_usd FROM usage_events
-                         WHERE event_id='overflow'),
-                        cost_algorithm_version,
-                        pricing_catalog_version,data_revision
-                 FROM usage_events JOIN app_meta ON app_meta.id=1
-                 WHERE usage_events.event_id='overflow'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(state, (None, None, 0, 0, before_revision));
-    }
-
-    #[test]
-    fn t_q08_cost_repricing_revision_matrix() {
-        // (1) Inactive and build history is repriced, but no active row is
-        // visible, so the dashboard revision remains unchanged.
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, false);
-        let connection = first.connection().unwrap();
-        connection
-            .execute(
-                "UPDATE source_usage_epochs
-                 SET active_epoch=2,build_epoch=3,build_parser_version=7
-                 WHERE source='codex'",
-                [],
-            )
-            .unwrap();
-        insert_cost_event(
-            &connection,
-            "codex",
-            3,
-            "build-only",
-            "gpt-5.6-sol",
-            Some(0),
-        );
-        connection
-            .execute(
-                "UPDATE usage_events SET estimated_cost_nanos_usd=0
-                 WHERE source='codex' AND event_id IN ('known','build-only')",
-                [],
-            )
-            .unwrap();
-        mark_cost_versions_stale(&connection);
-        drop(connection);
-        drop(first);
-
-        let reopened = Ledger::open(opts).unwrap();
-        let connection = reopened.connection().unwrap();
-        let (inactive, build, revision): (Option<i64>, Option<i64>, i64) = connection
-            .query_row(
-                "SELECT
-                    (SELECT estimated_cost_nanos_usd FROM usage_events
-                     WHERE source='codex' AND source_epoch=1 AND event_id='known'),
-                    (SELECT estimated_cost_nanos_usd FROM usage_events
-                     WHERE source='codex' AND source_epoch=3 AND event_id='build-only'),
-                    (SELECT data_revision FROM app_meta WHERE id=1)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(inactive, Some(4_380_000));
-        assert_eq!(build, Some(4_380_000));
-        assert_eq!(revision, before_revision);
-
-        // (2) An actual active-cost change bumps the global revision once.
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, false);
-        let connection = first.connection().unwrap();
-        connection
-            .execute(
-                "UPDATE usage_events SET estimated_cost_nanos_usd=0
-                 WHERE source='codex' AND event_id='known'",
-                [],
-            )
-            .unwrap();
-        mark_cost_versions_stale(&connection);
-        drop(connection);
-        drop(first);
-        let reopened = Ledger::open(opts).unwrap();
-        let connection = reopened.connection().unwrap();
-        let (known, revision): (Option<i64>, i64) = connection
-            .query_row(
-                "SELECT
-                    (SELECT estimated_cost_nanos_usd FROM usage_events
-                     WHERE source='codex' AND source_epoch=1 AND event_id='known'),
-                    (SELECT data_revision FROM app_meta WHERE id=1)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(known, Some(4_380_000));
-        assert_eq!(revision, before_revision + 1);
-
-        // (3) Repricing an active row to its existing value does not bump.
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, false);
-        let connection = first.connection().unwrap();
-        connection
-            .execute(
-                "UPDATE usage_events SET estimated_cost_nanos_usd=CASE event_id
-                     WHEN 'known' THEN 4380000
-                     WHEN 'auto-review' THEN 229000
-                     ELSE NULL END
-                 WHERE source='codex'",
-                [],
-            )
-            .unwrap();
-        mark_cost_versions_stale(&connection);
-        drop(connection);
-        drop(first);
-        let reopened = Ledger::open(opts).unwrap();
-        assert_eq!(reopened.current_revision().data_revision, before_revision);
-
-        // (4) The complete source-aware key prevents same-event-id rows from
-        // different sources from being cross-updated.
-        let root = TempDir::new();
-        let opts = options(&root);
-        let first = Ledger::open(opts.clone()).unwrap();
-        let before_revision = seed_cost_events(&first, false);
-        let connection = first.connection().unwrap();
-        connection
-            .execute(
-                "INSERT INTO source_usage_epochs(
-                    source,active_epoch,active_parser_version
-                 ) VALUES ('fake-source',8,1)",
-                [],
-            )
-            .unwrap();
-        insert_cost_event(
-            &connection,
-            "fake-source",
-            8,
-            "known",
-            "codex-auto-review",
-            Some(0),
-        );
-        connection
-            .execute(
-                "UPDATE usage_events SET estimated_cost_nanos_usd=0
-                 WHERE event_id='known'",
-                [],
-            )
-            .unwrap();
-        mark_cost_versions_stale(&connection);
-        drop(connection);
-        drop(first);
-        let reopened = Ledger::open(opts).unwrap();
-        let connection = reopened.connection().unwrap();
-        let rows = connection
-            .prepare(
-                "SELECT source,estimated_cost_nanos_usd FROM usage_events
-                 WHERE event_id='known' ORDER BY source",
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![
-                ("codex".to_owned(), Some(4_380_000)),
-                ("fake-source".to_owned(), Some(229_000)),
-            ]
-        );
-        assert_eq!(
-            reopened.current_revision().data_revision,
-            before_revision + 1
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

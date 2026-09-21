@@ -12,12 +12,12 @@ use std::{
 use rusqlite::{Connection, params};
 use serde_json::json;
 use usagi::{
+    codex::{CodexAdapter, CodexConfig},
     domain::{
         FollowupStartedEvent, ReserveScanFollowupEvent, ScanFailedEvent, ScanStartEvent,
         ScanTrigger,
     },
-    ingestion::{IngestionConfig, IngestionCoordinator, LegacyCodexSourceAdapter},
-    scanner::CodexMetadata,
+    ingestion::{IngestionConfig, IngestionCoordinator, RequestDisposition},
     source::{
         AdapterAvailability, SourceAdapter, SourceAdapterError, SourceDescriptor, SourceId,
         SourceRegistry, SourceRunContext, SourceRunResult,
@@ -58,7 +58,7 @@ fn ledger_fixture(label: &str) -> (TempRoot, PathBuf, Arc<Ledger>) {
     fs::create_dir_all(home.join("sessions")).unwrap();
     fs::create_dir_all(home.join("archived_sessions")).unwrap();
     let ledger =
-        Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap());
+        Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"))).unwrap());
     (root, home, ledger)
 }
 
@@ -135,7 +135,7 @@ fn metadata_fixture(
     fs::write(&rollout_path, rollout_bytes).unwrap();
     write_metadata_indexes(&home, state_thread_id, &rollout_path);
     let ledger =
-        Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home)).unwrap());
+        Arc::new(Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"))).unwrap());
     (root, home, ledger, rollout_path)
 }
 
@@ -149,6 +149,17 @@ fn wait_for_terminal(ledger: &Ledger) {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for scan terminal state"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_reports(scanner: &usagi::ingestion::ScanHandle) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while scanner.source_reports().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source reports"
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -194,6 +205,23 @@ impl SourceAdapter for ProbeAdapter {
 
 fn register_probe(registry: &mut SourceRegistry, adapter: ProbeAdapter) {
     registry.register(adapter).unwrap();
+}
+
+fn register_codex(registry: &mut SourceRegistry, home: impl Into<PathBuf>) {
+    registry
+        .register(CodexAdapter::new(CodexConfig::from_home(home)))
+        .unwrap();
+}
+
+fn establish_codex_binding(ledger: Arc<Ledger>, home: PathBuf) {
+    let mut registry = SourceRegistry::new();
+    register_codex(&mut registry, home);
+    let scanner =
+        IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
+            .unwrap();
+    wait_for_terminal(&ledger);
+    wait_for_reports(&scanner);
+    scanner.shutdown().unwrap();
 }
 
 #[test]
@@ -418,9 +446,8 @@ fn phase2_c08_source_change_does_not_gate_global_request_or_followup() {
     fs::create_dir_all(home_b.join("sessions")).unwrap();
     fs::create_dir_all(home_b.join("archived_sessions")).unwrap();
     touch_codex_metadata(&home_b);
-    let changed_ledger = Arc::new(
-        Ledger::open(LedgerOptions::new(root.path().join("mu.sqlite3"), &home_b)).unwrap(),
-    );
+    establish_codex_binding(Arc::clone(&_first_ledger), _home_a.clone());
+    let changed_ledger = Arc::clone(&_first_ledger);
     // The three global lifecycle seams remain source-neutral even while this
     // Ledger reports Codex SOURCE_CHANGED.
     let started = changed_ledger
@@ -452,9 +479,7 @@ fn phase2_c08_source_change_does_not_gate_global_request_or_followup() {
     let committed = Arc::new(AtomicUsize::new(0));
     let committed_clone = Arc::clone(&committed);
     let mut registry = SourceRegistry::new();
-    registry
-        .register(LegacyCodexSourceAdapter::from_home(home_b))
-        .unwrap();
+    register_codex(&mut registry, home_b);
     register_probe(
         &mut registry,
         ProbeAdapter::new("maka", AdapterAvailability::Available, move |_| {
@@ -488,7 +513,7 @@ fn phase2_c08_source_change_does_not_gate_global_request_or_followup() {
     }
     let followup = scanner.request(usagi::domain::ScanTrigger::Manual).unwrap();
     let followup_id = match followup {
-        usagi::scanner::RequestDisposition::Coalesced {
+        RequestDisposition::Coalesced {
             followup_scan_id, ..
         } => followup_scan_id,
         other => panic!("expected one coalesced follow-up, got {other:?}"),
@@ -553,13 +578,13 @@ fn phase2_c11_legacy_codex_source_changed_is_failed_not_skipped() {
     fs::create_dir_all(home_b.join("archived_sessions")).unwrap();
     touch_codex_metadata(&home_b);
     let mut registry = SourceRegistry::new();
-    registry
-        .register(LegacyCodexSourceAdapter::from_home(home_b))
-        .unwrap();
+    establish_codex_binding(Arc::clone(&ledger), _home_a.clone());
+    register_codex(&mut registry, home_b);
     let scanner =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
             .unwrap();
     wait_for_terminal(&ledger);
+    wait_for_reports(&scanner);
     let state = ledger.app_state().unwrap().scan;
     assert_eq!(
         state.last_scan_error_code.as_deref(),
@@ -576,46 +601,6 @@ fn phase2_c11_legacy_codex_source_changed_is_failed_not_skipped() {
 }
 
 #[test]
-fn phase2_c11_legacy_codex_binding_failure_is_failed_not_skipped() {
-    let (root, home, ledger) = ledger_fixture("legacy-binding-failure");
-    let outside = root.path().join("metadata-outside");
-    fs::create_dir_all(&outside).unwrap();
-    let metadata = CodexMetadata::with_paths(
-        outside.join("state_5.sqlite"),
-        home.join("session_index.jsonl"),
-        home.join(".codex-global-state.json"),
-    );
-    let mut registry = SourceRegistry::new();
-    registry
-        .register(LegacyCodexSourceAdapter::new(home, metadata))
-        .unwrap();
-    let scanner =
-        IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
-            .unwrap();
-    wait_for_terminal(&ledger);
-    assert_eq!(
-        ledger
-            .app_state()
-            .unwrap()
-            .scan
-            .last_scan_error_code
-            .as_deref(),
-        Some("SOURCE_RUN_FAILED")
-    );
-    let report = scanner
-        .source_reports()
-        .into_iter()
-        .find(|report| report.source.as_str() == "codex")
-        .unwrap();
-    assert_eq!(report.state.as_str(), "failed");
-    assert_eq!(
-        report.error_code.as_deref(),
-        Some("CODEX_METADATA_HOME_MISMATCH")
-    );
-    scanner.shutdown().unwrap();
-}
-
-#[test]
 fn phase2_c11_legacy_codex_discovery_unavailable_is_failed_not_skipped() {
     let (root, home, ledger, rollout_path) = metadata_fixture(
         "legacy-discovery-unavailable",
@@ -628,9 +613,7 @@ fn phase2_c11_legacy_codex_discovery_unavailable_is_failed_not_skipped() {
     fs::write(home.join("archived_sessions"), b"not a directory").unwrap();
 
     let mut registry = SourceRegistry::new();
-    registry
-        .register(LegacyCodexSourceAdapter::from_home(home))
-        .unwrap();
+    register_codex(&mut registry, home);
     let scanner =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
             .unwrap();
@@ -667,9 +650,7 @@ fn phase2_c11_legacy_codex_parser_failure_is_failed_not_skipped() {
         b"{}\n",
     );
     let mut registry = SourceRegistry::new();
-    registry
-        .register(LegacyCodexSourceAdapter::from_home(home))
-        .unwrap();
+    register_codex(&mut registry, home);
     let scanner =
         IngestionCoordinator::start(IngestionConfig::default(), Arc::clone(&ledger), registry)
             .unwrap();

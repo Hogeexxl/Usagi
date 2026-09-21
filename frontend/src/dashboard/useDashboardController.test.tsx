@@ -19,7 +19,7 @@ const status = (overrides: Partial<StatusResponse> = {}): StatusResponse => ({
   last_scan_completed_at_ms: null,
   last_scan_failed_at_ms: null,
   last_scan_error_code: null,
-  source_binding_status: "ready",
+  sources: [],
   ...overrides,
 });
 
@@ -759,9 +759,12 @@ describe("useDashboardController", () => {
     ["failed", status({ scan_state: "failed" }), true],
     ["startup", status({ scan_state: "startup" }), false],
     ["running", status({ scan_state: "running" }), false],
-    ["source_changed scan", status({ scan_state: "source_changed" }), false],
-    ["source_changed binding", status({ source_binding_status: "source_changed" }), false],
-    ["unbound", status({ source_binding_status: "unbound" }), false],
+    [
+      "source_changed codex child",
+      status({ sources: [{ source: "codex", state: "failed", error_code: "SOURCE_CHANGED" }] }),
+      false,
+    ],
+    ["unbound", status({ sources: [] }), true],
     [
       "active target",
       status({ active_scan_id: "active-1" }),
