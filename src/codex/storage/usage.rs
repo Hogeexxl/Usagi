@@ -4180,6 +4180,11 @@ pub(super) fn reconcile_usage_metadata_change(
                 .map_err(StorageError::from)
         })?;
 
+    if root_changed && (active_epoch > 0 || build_epoch.is_some()) {
+        let next_root = next_root.expect("root_changed requires a confirmed next root");
+        ensure_usage_root_materialized(source_tx, next_root)?;
+    }
+
     // Active facts are stable user-visible data and may be reconciled in
     // place because only the confirmed root relation changed. This is in the
     // caller's metadata transaction, so revision advances at most once.
@@ -4187,7 +4192,7 @@ pub(super) fn reconcile_usage_metadata_change(
         let next_root = next_root.expect("root_changed requires a confirmed next root");
         source_tx
             .rebind_usage_root_no_revision(UsageWriteTarget::Active, thread_id, next_root)
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+            .map_err(storage_error_from_codex)?;
         source_tx.with_private_state(|transaction| {
             transaction.execute(
                 "UPDATE codex_skill_usage_events SET root_session_id=?1
@@ -4204,7 +4209,7 @@ pub(super) fn reconcile_usage_metadata_change(
     }
 
     if let Some(build_epoch) = build_epoch {
-        source_tx.with_private_state(|transaction| {
+        source_tx.with_private_state(|transaction| -> Result<(), StorageError> {
         let parser =
             build_parser.ok_or_else(|| StorageError::invalid_state("invalid build pair"))?;
         let active_epoch_for_build = active_epoch;
@@ -4243,14 +4248,57 @@ pub(super) fn reconcile_usage_metadata_change(
                 &invalidated,
                 now_ms_for_transaction(),
             )
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+            .map_err(rebuild_storage_error)?;
         }
         Ok::<_, StorageError>(())
         })?;
         crate::codex::storage::rebuild::delete_orphan_build_events(source_tx, build_epoch)
-            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+            .map_err(storage_error_from_codex)?;
     }
     Ok(())
+}
+
+fn storage_error_from_codex(error: CodexStorageError) -> StorageError {
+    match error {
+        CodexStorageError::Storage(error) => error,
+        CodexStorageError::Sqlite(error) => StorageError::sqlite(error),
+        CodexStorageError::Source(error) => StorageError::from(error),
+        other => StorageError::invalid_state(other.to_string()),
+    }
+}
+
+fn ensure_usage_root_materialized(
+    source_tx: &mut CodexWriteTxn<'_>,
+    root_session_id: &str,
+) -> StorageResult<()> {
+    source_tx.with_private_state(|transaction| {
+        let related_source: Option<String> = transaction
+            .query_row(
+                "SELECT source FROM threads WHERE thread_id=?1",
+                [root_session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match related_source.as_deref() {
+            Some("codex") => Ok(()),
+            Some(source) => Err(StorageError::invalid_state(format!(
+                "usage root {root_session_id} belongs to source {source}"
+            ))),
+            None => Err(StorageError::invalid_state(format!(
+                "usage root {root_session_id} is not materialized"
+            ))),
+        }
+    })
+}
+
+fn rebuild_storage_error(error: crate::codex::storage::rebuild::RebuildError) -> StorageError {
+    match error {
+        crate::codex::storage::rebuild::RebuildError::Sql(error) => StorageError::sqlite(error),
+        crate::codex::storage::rebuild::RebuildError::Invalid(message)
+        | crate::codex::storage::rebuild::RebuildError::Cas(message) => {
+            StorageError::usage_conflict(message)
+        }
+    }
 }
 
 fn now_ms_for_transaction() -> i64 {

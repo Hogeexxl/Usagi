@@ -25,6 +25,7 @@ use crate::{
         ExistingThread, FinalContinuation, GlobalStateSnapshot, ResolutionInput, ResolutionResult,
         ResumeState, RolloutThreadFact, SessionNameSnapshot, StateSnapshot, ThreadMetadataResolver,
     },
+    domain::{MetadataQualityStatus, Patch, ResolvedThreadPatch},
 };
 
 use super::discovery::{DiscoveredFile, DiscoverySnapshot};
@@ -226,7 +227,14 @@ impl fmt::Display for PipelineError {
     }
 }
 
-impl std::error::Error for PipelineError {}
+impl std::error::Error for PipelineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(_) => None,
+            Self::Storage(error) => Some(error),
+        }
+    }
+}
 
 impl From<CodexStorageError> for PipelineError {
     fn from(error: CodexStorageError) -> Self {
@@ -629,7 +637,12 @@ impl MetadataPipeline {
             .iter()
             .map(|entry| entry.source.clone())
             .collect::<Vec<_>>();
-        let resolution = ThreadMetadataResolver::resolve(ResolutionInput {
+        let existing_thread_ids = input
+            .existing_threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut resolution = ThreadMetadataResolver::resolve(ResolutionInput {
             state_snapshot: input.state_snapshot,
             session_name_snapshot: input.session_name_snapshot,
             global_state_snapshot: input.global_state_snapshot,
@@ -683,6 +696,31 @@ impl MetadataPipeline {
             });
         }
         groups.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+
+        // A resolver can legitimately discover a relationship before the
+        // related Thread row exists. That is useful for metadata-only writes,
+        // but it is not safe to hand an unresolved root to usage reconciliation
+        // when active usage already has a real foreign key to `threads`.
+        // Treat a root as materializable only when this batch contains a
+        // complete group with a Thread patch for it; otherwise preserve the
+        // existing root and mark the child partial for a later scan.
+        let materializable_thread_ids = groups
+            .iter()
+            .filter(|group| group.completeness.is_complete())
+            .filter(|group| {
+                resolution
+                    .patches
+                    .iter()
+                    .any(|patch| patch.thread_id == group.thread_id)
+            })
+            .map(|group| group.thread_id.clone())
+            .collect::<BTreeSet<_>>();
+        normalize_unmaterialized_roots(
+            &mut resolution.patches,
+            &existing_thread_ids,
+            &materializable_thread_ids,
+            &mut diagnostics,
+        );
 
         let mut commits = Vec::new();
         for group in &groups {
@@ -773,6 +811,7 @@ impl MetadataPipeline {
                     .map_err(|error| PipelineError::Invalid(error.to_string()))?,
             );
         }
+        let commits = order_metadata_commits(commits)?;
         let commit_batch = if commits.is_empty() {
             None
         } else {
@@ -845,6 +884,105 @@ impl MetadataPipeline {
     }
 }
 
+fn normalize_unmaterialized_roots(
+    patches: &mut [ResolvedThreadPatch],
+    existing_thread_ids: &BTreeSet<String>,
+    materializable_thread_ids: &BTreeSet<String>,
+    diagnostics: &mut Vec<PipelineDiagnostic>,
+) {
+    for patch in patches {
+        let Some(root_id) = (match &patch.root_session_id {
+            Patch::Set(root_id) => Some(root_id.clone()),
+            Patch::Keep | Patch::Clear => None,
+        }) else {
+            continue;
+        };
+        if existing_thread_ids.contains(&root_id) || materializable_thread_ids.contains(&root_id) {
+            continue;
+        }
+
+        patch.root_session_id = Patch::Keep;
+        if patch.metadata_quality_status == MetadataQualityStatus::Complete {
+            patch.metadata_quality_status = MetadataQualityStatus::Partial;
+        }
+        diagnostics.push(PipelineDiagnostic {
+            code: "ROOT_NOT_MATERIALIZED",
+            source_file_id: None,
+            path: None,
+            thread_id: Some(patch.thread_id.clone()),
+        });
+    }
+}
+
+/// Order metadata groups by relationships that can be materialized in this
+/// batch. A child must never be committed before a root/parent group that is
+/// about to create the related Thread row, because usage reconciliation has a
+/// real foreign key to `threads` even though metadata itself permits a
+/// not-yet-seen relationship.
+fn order_metadata_commits(
+    groups: Vec<MetadataThreadCommit>,
+) -> Result<Vec<MetadataThreadCommit>, PipelineError> {
+    let mut materializable = BTreeMap::<String, usize>::new();
+    for (index, group) in groups.iter().enumerate() {
+        if group.resolved_patch.is_some()
+            && materializable
+                .insert(group.thread_id.clone(), index)
+                .is_some()
+        {
+            return Err(PipelineError::Invalid(
+                "duplicate metadata relationship dependency group".to_owned(),
+            ));
+        }
+    }
+
+    let mut dependencies = vec![BTreeSet::<usize>::new(); groups.len()];
+    for (index, group) in groups.iter().enumerate() {
+        let Some(patch) = group.resolved_patch.as_ref() else {
+            continue;
+        };
+        for relationship in [&patch.parent_thread_id, &patch.root_session_id] {
+            let Patch::Set(related_id) = relationship else {
+                continue;
+            };
+            if related_id == &group.thread_id {
+                continue;
+            }
+            if let Some(&dependency) = materializable.get(related_id) {
+                dependencies[index].insert(dependency);
+            }
+        }
+    }
+
+    let mut ready = BTreeSet::<(String, usize)>::new();
+    for (index, group) in groups.iter().enumerate() {
+        if dependencies[index].is_empty() {
+            ready.insert((group.thread_id.clone(), index));
+        }
+    }
+
+    let mut order = Vec::with_capacity(groups.len());
+    while let Some((thread_id, index)) = ready.iter().next().cloned() {
+        ready.remove(&(thread_id, index));
+        order.push(index);
+        for candidate in 0..groups.len() {
+            if dependencies[candidate].remove(&index) && dependencies[candidate].is_empty() {
+                ready.insert((groups[candidate].thread_id.clone(), candidate));
+            }
+        }
+    }
+
+    if order.len() != groups.len() {
+        return Err(PipelineError::Invalid(
+            "metadata relationship dependency cycle".to_owned(),
+        ));
+    }
+
+    Ok(order
+        .into_iter()
+        .map(|index| groups[index].clone())
+        .collect())
+}
+
 fn matching_stable_fact(
     entry: &MetadataScanStateEntry,
 ) -> Option<&crate::codex::domain::RolloutMetadataFact> {
@@ -896,6 +1034,7 @@ mod tests {
             RolloutMetadataFact, SafeFactMismatchReason, SourceObservationResult,
         },
         codex::storage::CodexStorage,
+        domain::AgentRole,
         source::{SourceId, SourceStorage},
         storage::{Ledger, LedgerOptions},
     };
@@ -1527,5 +1666,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn relationship_patch(
+        thread_id: &str,
+        role: AgentRole,
+        parent_thread_id: Option<&str>,
+        root_session_id: &str,
+    ) -> ResolvedThreadPatch {
+        let identity =
+            crate::domain::SessionIdentity::new(thread_id, SourceId::CODEX, thread_id).unwrap();
+        let mut patch = ResolvedThreadPatch::new(&identity, 10).unwrap();
+        patch.agent_role = Patch::Set(role);
+        patch.parent_thread_id = parent_thread_id
+            .map(|parent| Patch::Set(parent.to_owned()))
+            .unwrap_or(Patch::Keep);
+        patch.root_session_id = Patch::Set(root_session_id.to_owned());
+        patch
+    }
+
+    #[test]
+    fn unmaterialized_root_is_kept_and_marks_thread_partial() {
+        let mut patches = vec![relationship_patch(
+            "child",
+            AgentRole::Subagent,
+            Some("parent-not-yet-seen"),
+            "root-not-yet-seen",
+        )];
+        let mut diagnostics = Vec::new();
+        normalize_unmaterialized_roots(
+            &mut patches,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(patches[0].root_session_id, Patch::Keep);
+        assert_eq!(
+            patches[0].metadata_quality_status,
+            MetadataQualityStatus::Partial
+        );
+        assert_eq!(diagnostics[0].code, "ROOT_NOT_MATERIALIZED");
+        assert_eq!(diagnostics[0].thread_id.as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn relationship_groups_are_ordered_by_materialization_dependency() {
+        let root = MetadataThreadCommit::new(
+            "z-root",
+            Some(relationship_patch(
+                "z-root",
+                AgentRole::Main,
+                None,
+                "z-root",
+            )),
+            Vec::new(),
+        )
+        .unwrap();
+        let child = MetadataThreadCommit::new(
+            "a-child",
+            Some(relationship_patch(
+                "a-child",
+                AgentRole::Subagent,
+                Some("z-root"),
+                "z-root",
+            )),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let ordered = order_metadata_commits(vec![child, root]).unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|group| group.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z-root", "a-child"]
+        );
     }
 }

@@ -1544,6 +1544,60 @@ mod tests {
     }
 
     #[test]
+    fn root_reconcile_requires_a_materialized_active_usage_root() {
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 11);
+        with_codex(&fixture.ledger, |storage| {
+            storage.commit_group(batch(
+                "child",
+                "root",
+                source_commit(1, 11, "child", "root", 'a', false),
+            ))
+        })
+        .unwrap();
+
+        let result: Result<(), CodexStorageError> = with_codex(&fixture.ledger, |storage| {
+            let mut transaction = storage.begin_write_txn()?;
+            transaction.with_private_state(|connection| {
+                connection
+                    .execute(
+                        "UPDATE threads SET root_session_id='root-not-yet-seen'
+                         WHERE thread_id='child'",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(CodexStorageError::from)
+            })?;
+            reconcile_usage_metadata_change(
+                &mut transaction,
+                "child",
+                Some("root"),
+                Some("root-not-yet-seen"),
+                &[],
+            )
+            .map_err(CodexStorageError::from)?;
+            transaction.commit()
+        });
+
+        assert!(matches!(
+            result,
+            Err(CodexStorageError::Storage(error))
+                if error.kind() == crate::storage::StorageErrorKind::InvalidState
+        ));
+        let connection = fixture.ledger.connection().unwrap();
+        let roots: (String, String) = connection
+            .query_row(
+                "SELECT
+                    (SELECT root_session_id FROM threads WHERE thread_id='child'),
+                    (SELECT root_session_id FROM usage_events WHERE thread_id='child')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(roots, ("root".to_owned(), "root".to_owned()));
+    }
+
+    #[test]
     fn root_reconcile_with_build_replaces_only_affected_source_and_preserves_other_progress() {
         let fixture = Fixture::new();
         fixture.add_source(1, Some("child"), 11);

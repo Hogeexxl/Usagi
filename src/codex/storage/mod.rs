@@ -57,7 +57,19 @@ impl fmt::Display for CodexStorageError {
     }
 }
 
-impl std::error::Error for CodexStorageError {}
+impl std::error::Error for CodexStorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Storage(error) => Some(error),
+            Self::Sqlite(error) => Some(error),
+            Self::SourceMismatch
+            | Self::BindingUnbound
+            | Self::BindingSourceChanged
+            | Self::InvalidBindingState => None,
+        }
+    }
+}
 
 impl CodexStorageError {
     pub(crate) fn requires_rebuild(&self) -> bool {

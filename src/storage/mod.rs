@@ -166,13 +166,23 @@ impl From<crate::source::SourceStorageError> for StorageError {
     fn from(error: crate::source::SourceStorageError) -> Self {
         match error {
             crate::source::SourceStorageError::Storage(kind) => Self::without_source(kind),
-            crate::source::SourceStorageError::NotImplemented
-            | crate::source::SourceStorageError::TransactionClosed
-            | crate::source::SourceStorageError::TransactionPoisoned
-            | crate::source::SourceStorageError::SourceMismatch
-            | crate::source::SourceStorageError::UnsupportedOperation(_)
-            | crate::source::SourceStorageError::InvalidRequest(_) => {
-                Self::invalid_state("source storage operation failed")
+            crate::source::SourceStorageError::InvalidRequest(message) => {
+                Self::invalid_state(message)
+            }
+            crate::source::SourceStorageError::UnsupportedOperation(operation) => {
+                Self::invalid_state(format!("unsupported source operation: {operation}"))
+            }
+            crate::source::SourceStorageError::NotImplemented => {
+                Self::invalid_state("source storage is unavailable")
+            }
+            crate::source::SourceStorageError::TransactionClosed => {
+                Self::invalid_state("source write transaction is closed")
+            }
+            crate::source::SourceStorageError::TransactionPoisoned => {
+                Self::invalid_state("source write transaction is poisoned")
+            }
+            crate::source::SourceStorageError::SourceMismatch => {
+                Self::invalid_state("source-bound storage mismatch")
             }
         }
     }
@@ -231,7 +241,13 @@ impl fmt::Display for StorageError {
     }
 }
 
-impl std::error::Error for StorageError {}
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self._source
+            .as_ref()
+            .map(|source| source.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
 
 impl From<io::Error> for StorageError {
     fn from(error: io::Error) -> Self {

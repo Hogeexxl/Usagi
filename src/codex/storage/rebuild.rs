@@ -918,7 +918,14 @@ impl fmt::Display for RebuildError {
     }
 }
 
-impl std::error::Error for RebuildError {}
+impl std::error::Error for RebuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sql(error) => Some(error),
+            Self::Invalid(_) | Self::Cas(_) => None,
+        }
+    }
+}
 
 impl From<rusqlite::Error> for RebuildError {
     fn from(error: rusqlite::Error) -> Self {

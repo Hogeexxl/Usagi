@@ -150,6 +150,9 @@ impl CodexIngestion {
                 existing_threads,
             })
             .map_err(|_| "METADATA_RESOLUTION_FAILED")?;
+        for diagnostic in &resolution.diagnostics {
+            report.error(diagnostic.code);
+        }
         pipeline
             .commit(storage, &resolution)
             .map_err(|_| "METADATA_COMMIT_FAILED")?;
