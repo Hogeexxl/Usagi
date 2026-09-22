@@ -123,7 +123,10 @@ pub fn evaluate_summary_workspace(workspace_uris: Option<&str>) -> WorkspaceEval
 /// Evaluate DB fallback from `trajectory_metadata_blob`.
 pub fn evaluate_blob_workspace(workspace_uri: Option<&str>) -> WorkspaceEvaluation {
     match workspace_uri {
-        None => WorkspaceEvaluation::Projectless,
+        // A missing/NULL fallback row is unavailable, not an explicit empty
+        // workspace.  Keep the existing projection in that case; only an
+        // explicitly present empty value means Projectless.
+        None => WorkspaceEvaluation::Keep,
         Some(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -172,28 +175,28 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            // Valid POSIX file URI
-            let res = evaluate_workspace_uri("file:///Users/hogee/Desktop/Usagi");
+            // Valid POSIX file URI with percent-decoded Unicode basename
+            let res = evaluate_workspace_uri("file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE");
             match res {
                 WorkspaceEvaluation::Project {
                     project_name,
                     project_path,
                 } => {
-                    assert_eq!(project_name, "Usagi");
-                    assert_eq!(project_path, "/Users/hogee/Desktop/Usagi");
+                    assert_eq!(project_name, "Antigravity 项目");
+                    assert_eq!(project_path, "/synthetic/Antigravity 项目");
                 }
                 other => panic!("expected Project, got {other:?}"),
             }
 
             // Percent-encoded URI
-            let res_encoded = evaluate_workspace_uri("file:///Users/hogee/Desktop/My%20Project");
+            let res_encoded = evaluate_workspace_uri("file:///synthetic/My%20Project");
             match res_encoded {
                 WorkspaceEvaluation::Project {
                     project_name,
                     project_path,
                 } => {
                     assert_eq!(project_name, "My Project");
-                    assert_eq!(project_path, "/Users/hogee/Desktop/My Project");
+                    assert_eq!(project_path, "/synthetic/My Project");
                 }
                 other => panic!("expected Project, got {other:?}"),
             }
@@ -208,14 +211,15 @@ mod tests {
         #[cfg(windows)]
         {
             // Valid Windows drive URI
-            let res = evaluate_workspace_uri("file:///C:/Users/hogee/Desktop/Usagi");
+            let res =
+                evaluate_workspace_uri("file:///C:/synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE");
             match res {
                 WorkspaceEvaluation::Project {
                     project_name,
                     project_path,
                 } => {
-                    assert_eq!(project_name, "Usagi");
-                    assert!(project_path.contains("Usagi"));
+                    assert_eq!(project_name, "Antigravity 项目");
+                    assert!(project_path.contains("Antigravity"));
                 }
                 other => panic!("expected Project, got {other:?}"),
             }
@@ -238,10 +242,12 @@ mod tests {
         #[cfg(not(windows))]
         {
             assert_eq!(
-                evaluate_summary_workspace(Some("[\"file:///Users/hogee/Desktop/Usagi\"]")),
+                evaluate_summary_workspace(Some(
+                    "[\"file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE\"]"
+                )),
                 WorkspaceEvaluation::Project {
-                    project_name: "Usagi".into(),
-                    project_path: "/Users/hogee/Desktop/Usagi".into()
+                    project_name: "Antigravity 项目".into(),
+                    project_path: "/synthetic/Antigravity 项目".into()
                 }
             );
         }
@@ -262,10 +268,7 @@ mod tests {
         assert_eq!(evaluate_summary_workspace(None), WorkspaceEvaluation::Keep);
 
         // 6. Summary missing, blob explicit empty -> Projectless
-        assert_eq!(
-            evaluate_blob_workspace(None),
-            WorkspaceEvaluation::Projectless
-        );
+        assert_eq!(evaluate_blob_workspace(None), WorkspaceEvaluation::Keep);
         assert_eq!(
             evaluate_blob_workspace(Some("")),
             WorkspaceEvaluation::Projectless
@@ -275,10 +278,10 @@ mod tests {
         #[cfg(not(windows))]
         {
             assert_eq!(
-                evaluate_blob_workspace(Some("file:///Users/hogee/Desktop/Usagi")),
+                evaluate_blob_workspace(Some("file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE")),
                 WorkspaceEvaluation::Project {
-                    project_name: "Usagi".into(),
-                    project_path: "/Users/hogee/Desktop/Usagi".into()
+                    project_name: "Antigravity 项目".into(),
+                    project_path: "/synthetic/Antigravity 项目".into()
                 }
             );
         }

@@ -44,6 +44,7 @@ pub enum ProtoError {
     InvalidUtf8,
     StringTooLong(usize),
     InvalidTimestamp,
+    DuplicateWorkspace,
 }
 
 impl fmt::Display for ProtoError {
@@ -68,6 +69,9 @@ impl fmt::Display for ProtoError {
                 write!(formatter, "string exceeds maximum allowed bytes: {len}")
             }
             Self::InvalidTimestamp => formatter.write_str("invalid timestamp in step metadata"),
+            Self::DuplicateWorkspace => {
+                formatter.write_str("multiple workspace URI fields in trajectory metadata")
+            }
         }
     }
 }
@@ -162,7 +166,8 @@ impl<'a> ProtoReader<'a> {
     }
 
     pub fn read_bytes(&mut self) -> Result<&'a [u8], ProtoError> {
-        let len = self.read_varint()? as usize;
+        let len = usize::try_from(self.read_varint()?)
+            .map_err(|_| ProtoError::OversizedLength(usize::MAX))?;
         if len > MAX_LENGTH_DELIMITED_BYTES {
             return Err(ProtoError::OversizedLength(len));
         }
@@ -208,7 +213,8 @@ impl<'a> ProtoReader<'a> {
                 self.offset += 8;
             }
             WireType::LengthDelimited => {
-                let len = self.read_varint()? as usize;
+                let len = usize::try_from(self.read_varint()?)
+                    .map_err(|_| ProtoError::OversizedLength(usize::MAX))?;
                 if len > MAX_LENGTH_DELIMITED_BYTES {
                     return Err(ProtoError::OversizedLength(len));
                 }
@@ -568,7 +574,10 @@ pub fn parse_step_metadata(data: &[u8]) -> Result<DecodedStepMetadata, ProtoErro
                 ts_bytes = Some(reader.read_bytes()?);
             }
             (3, WireType::Varint) => {
-                source = Some(reader.read_varint()? as u32);
+                source = Some(
+                    u32::try_from(reader.read_varint()?)
+                        .map_err(|_| ProtoError::InvalidWireType(0))?,
+                );
             }
             (_, w) => {
                 reader.skip_field(w)?;
@@ -633,12 +642,16 @@ pub fn parse_trajectory_metadata_blob_workspace(data: &[u8]) -> Result<Option<St
     while !reader.is_empty() {
         let (tag, wire) = reader.read_tag()?;
         if tag == 7 && wire == WireType::LengthDelimited {
+            if workspace_uri.is_some() {
+                return Err(ProtoError::DuplicateWorkspace);
+            }
             let bytes = reader.read_bytes()?;
             let s = std::str::from_utf8(bytes).map_err(|_| ProtoError::InvalidUtf8)?;
             let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                workspace_uri = Some(trimmed.to_string());
-            }
+            // Preserve an explicitly empty field as Some("") so the
+            // metadata resolver can distinguish Projectless from an absent
+            // fallback row (None => Keep).
+            workspace_uri = Some(trimmed.to_string());
         } else {
             reader.skip_field(wire)?;
         }

@@ -277,8 +277,39 @@ mod tests {
     use crate::antigravity::config::AntigravityConfig;
     use crate::source::adapter::SourceStorageFactory;
     use crate::storage::{Ledger, LedgerOptions};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    fn materialize_fixture_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let ty = entry.file_type().unwrap();
+            let source_name = entry.file_name();
+            let source_name = source_name
+                .to_str()
+                .expect("fixture filenames must be valid UTF-8");
+            if source_name.ends_with(".db") {
+                panic!(
+                    "fixture database payloads must use .db.fixture: {}",
+                    entry.path().display()
+                );
+            }
+            let runtime_name = source_name.strip_suffix(".fixture").unwrap_or(source_name);
+            let target = dst.join(runtime_name);
+            if ty.is_dir() {
+                materialize_fixture_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    fn materialize_standalone_fixture(dst: &Path) {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
+        materialize_fixture_tree(&source, dst);
+    }
 
     #[test]
     fn test_adapter_availability() {
@@ -288,13 +319,15 @@ mod tests {
             AdapterAvailability::NotInstalled
         );
 
-        let fixture_home =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
+        let fixture_root = std::env::temp_dir().join(format!("usagi-ag-availability-{}", now_ms()));
+        let fixture_home = fixture_root.join("standalone");
+        materialize_standalone_fixture(&fixture_home);
         let ready = AntigravityAdapter::new(AntigravityConfig::from_home(&fixture_home));
         assert_eq!(
             ready.availability().unwrap(),
             AdapterAvailability::Available
         );
+        let _ = std::fs::remove_dir_all(fixture_root);
     }
 
     #[test]
@@ -304,8 +337,8 @@ mod tests {
         let db_path = temp_dir.join("ledger.db");
         let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
 
-        let fixture_home =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
+        let fixture_home = temp_dir.join("standalone");
+        materialize_standalone_fixture(&fixture_home);
         let config = AntigravityConfig::from_home(&fixture_home);
 
         let adapter = Arc::new(AntigravityAdapter::new(config));

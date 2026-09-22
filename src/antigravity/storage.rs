@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fmt};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::antigravity::normalization::AntigravityQuarantineRecord;
 
@@ -243,7 +243,7 @@ pub fn validate_usage_epoch(conn: &Connection) -> Result<UsageEpochPlan, Antigra
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .ok();
+        .optional()?;
 
     match row {
         None => {

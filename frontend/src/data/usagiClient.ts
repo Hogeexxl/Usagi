@@ -438,6 +438,9 @@ function parseSubagentModelUsage(value: unknown): SessionDetailResponse["subagen
 
 function parseSessionDetail(value: unknown): SessionDetailResponse {
   const record = requiredRecord(value);
+  if (Object.prototype.hasOwnProperty.call(record, "project_name") || Object.prototype.hasOwnProperty.call(record, "project_path")) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
   const mainRecord = requiredRecord(record.main);
   const modelUsageValue = mainRecord.model_usage;
   const subagentsValue = record.subagents;

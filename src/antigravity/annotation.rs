@@ -119,6 +119,7 @@ pub fn parse_annotation_title_content(buffer: &[u8]) -> AnnotationTitleResult {
     };
 
     match extract_title_from_pbtxt(content) {
+        None if contains_title_field(content) => AnnotationTitleResult::Malformed,
         None => AnnotationTitleResult::Empty,
         Some(raw_title) => {
             let trimmed = raw_title.trim();
@@ -133,10 +134,54 @@ pub fn parse_annotation_title_content(buffer: &[u8]) -> AnnotationTitleResult {
     }
 }
 
+fn contains_title_field(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    for index in 0..bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            continue;
+        }
+        if bytes.get(index..index + 5) == Some(b"title") {
+            let prefix_is_identifier =
+                index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+            let suffix_is_identifier = bytes
+                .get(index + 5)
+                .is_some_and(|suffix| suffix.is_ascii_alphanumeric() || *suffix == b'_');
+            if !prefix_is_identifier && !suffix_is_identifier {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Extract title string from protobuf text format (e.g. `title: "..."` or `title:"..."`).
 fn extract_title_from_pbtxt(text: &str) -> Option<String> {
     let mut remaining = text;
     while let Some(idx) = remaining.find("title") {
+        // Match the field token, not an identifier that merely contains the
+        // word (for example `subtitle`).
+        if remaining[..idx]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            remaining = &remaining[idx + 5..];
+            continue;
+        }
         let after_key = &remaining[idx + 5..];
         let mut chars = after_key.char_indices();
         // Skip whitespace
@@ -261,6 +306,14 @@ mod tests {
             Some("With \"quotes\" and \\ slash".into())
         );
         assert_eq!(extract_title_from_pbtxt("last_view:{}"), None);
+        assert_eq!(
+            parse_annotation_title_content(b"title: \"unterminated"),
+            AnnotationTitleResult::Malformed
+        );
+        assert_eq!(
+            parse_annotation_title_content(b"subtitle: \"not a title\""),
+            AnnotationTitleResult::Empty
+        );
     }
 
     #[test]

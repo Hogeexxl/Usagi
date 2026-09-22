@@ -180,6 +180,49 @@ describe("FilterControls", () => {
     expect(onChange).toHaveBeenCalledWith({ sources: [], models: [], projects: [] });
   });
 
+  it("does not auto-expand Selected when no active model group exists", async () => {
+    const { rerender } = render(
+      <FilterControls
+        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
+        options={{ data_revision: 1, sources: [], models: [], projects: [] }}
+        optionsLoading={false}
+        optionsStale={false}
+        anyFilterActive={true}
+        onChange={vi.fn()}
+        onClear={vi.fn()}
+        onRetryOptions={vi.fn()}
+      />,
+    );
+
+    const dialog = await openPopover("模型筛选，已选1项");
+    const selectedToggle = within(dialog).getByRole("button", { name: "Selected" });
+    expect(selectedToggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialog).queryByRole("checkbox", { name: "orphan-rollout" })).not.toBeInTheDocument();
+
+    fireEvent.click(selectedToggle);
+    expect(selectedToggle).toHaveAttribute("aria-expanded", "true");
+    rerender(
+      <FilterControls
+        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
+        options={{
+          data_revision: 2,
+          sources: [],
+          models: [{ model: "gpt-4o", provider: "openai" }],
+          projects: [],
+        }}
+        optionsLoading={false}
+        optionsStale={false}
+        anyFilterActive={true}
+        onChange={vi.fn()}
+        onClear={vi.fn()}
+        onRetryOptions={vi.fn()}
+      />,
+    );
+    const updatedDialog = screen.getByRole("dialog");
+    expect(within(updatedDialog).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(updatedDialog).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("selects normal, projectless, and unknown projects using their labels", async () => {
     const onChange = vi.fn();
     renderControls({ options: projectOptions, onChange });

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build sanitized Antigravity test fixtures and deterministic SQLite WAL trios.
 
-This script extracts minimal schema, numeric field tags, and locator patterns from real samples
-in artifacts/Usagi_多终端会话样本.zip and generates:
-  1. tests/fixtures/antigravity/standalone/ (conversation_summaries.db, conversations/*.db, annotations/*.pbtxt)
-  2. tests/fixtures/antigravity/wal/ (conversations/*.db, .db-wal, .db-shm generated deterministically)
+This script extracts minimal schema, numeric field tags, and locator patterns from sanitized samples
+and generates:
+  1. tests/fixtures/antigravity/standalone/ (conversation_summaries.db.fixture, conversations/*.db.fixture, annotations/*.pbtxt)
+  2. tests/fixtures/antigravity/wal/ (conversations/*.db.fixture, .db-wal, .db-shm generated deterministically)
   3. tests/fixtures/antigravity/manifest.json
 """
 
@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+SYNTHETIC_WORKSPACE_URI = "file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE"
 
 def encode_varint(val: int) -> bytes:
     res = bytearray()
@@ -294,9 +295,9 @@ def build_wal_trio(
     wal_events: list[dict],
     workspace_uri: str | None = None,
 ):
-    """Deterministically create .db, .db-wal, and .db-shm with uncheckpointed commits."""
+    """Deterministically create .db.fixture, .db-wal, and .db-shm with uncheckpointed commits."""
     target_dir.mkdir(parents=True, exist_ok=True)
-    db_file = target_dir / f"{cascade_id}.db"
+    db_file = target_dir / f"{cascade_id}.db.fixture"
     wal_file = target_dir / f"{cascade_id}.db-wal"
     shm_file = target_dir / f"{cascade_id}.db-shm"
 
@@ -431,21 +432,21 @@ def main():
 
     # 1. Standalone fixture
     create_conversation_db(
-        standalone_dir / "conversations" / f"{effa_id}.db",
+        standalone_dir / "conversations" / f"{effa_id}.db.fixture",
         effa_id,
         effa_events,
-        workspace_uri="file:///Users/hogee/Desktop/Usagi",
+        workspace_uri=SYNTHETIC_WORKSPACE_URI,
     )
 
     create_summary_db(
-        standalone_dir / "conversation_summaries.db",
+        standalone_dir / "conversation_summaries.db.fixture",
         [
             {
                 "conversation_id": effa_id,
                 "title": "Sanitized Standalone Session",
                 "step_count": 199,
                 "last_modified_time": "2026-09-15 03:46:33.54883+00:00",
-                "workspace_uris": '["file:///Users/hogee/Desktop/Usagi"]',
+                "workspace_uris": json.dumps([SYNTHETIC_WORKSPACE_URI]),
             }
         ],
     )
@@ -464,18 +465,18 @@ def main():
         active_wal_id,
         wal_base_events,
         wal_incremental_events,
-        workspace_uri="file:///Users/hogee/Desktop/Usagi",
+        workspace_uri=SYNTHETIC_WORKSPACE_URI,
     )
 
     create_summary_db(
-        wal_dir / "conversation_summaries.db",
+        wal_dir / "conversation_summaries.db.fixture",
         [
             {
                 "conversation_id": active_wal_id,
                 "title": "Sanitized WAL Active Session",
                 "step_count": 10,
                 "last_modified_time": "2026-09-15 04:00:00.00000+00:00",
-                "workspace_uris": '["file:///Users/hogee/Desktop/Usagi"]',
+                "workspace_uris": json.dumps([SYNTHETIC_WORKSPACE_URI]),
             }
         ],
     )
@@ -488,20 +489,20 @@ def main():
         "fixtures": {
             "standalone": {
                 "conversation_id": effa_id,
-                "db_file": f"standalone/conversations/{effa_id}.db",
-                "summaries_file": "standalone/conversation_summaries.db",
+                "db_file": f"standalone/conversations/{effa_id}.db.fixture",
+                "summaries_file": "standalone/conversation_summaries.db.fixture",
                 "annotation_file": f"standalone/annotations/{effa_id}.pbtxt",
                 "expected_events_count": len(effa_events),
-                "workspace_uri": "file:///Users/hogee/Desktop/Usagi",
+                "workspace_uri": SYNTHETIC_WORKSPACE_URI,
                 "title": "Sanitized Standalone Session",
                 "events": effa_events,
             },
             "wal": {
                 "conversation_id": active_wal_id,
-                "db_file": f"wal/conversations/{active_wal_id}.db",
+                "db_file": f"wal/conversations/{active_wal_id}.db.fixture",
                 "wal_file": f"wal/conversations/{active_wal_id}.db-wal",
                 "shm_file": f"wal/conversations/{active_wal_id}.db-shm",
-                "summaries_file": "wal/conversation_summaries.db",
+                "summaries_file": "wal/conversation_summaries.db.fixture",
                 "expected_events_count": len(wal_base_events)
                 + len(wal_incremental_events),
                 "base_events": wal_base_events,

@@ -4,7 +4,11 @@
 //! schema probes, protobuf decodings, normalizations, and annotation reads happen
 //! here, prior to opening any Usagi write transaction.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::antigravity::annotation::read_annotation_title;
 use crate::antigravity::config::AntigravityConfig;
@@ -12,7 +16,7 @@ use crate::antigravity::discovery::discover_inventory;
 use crate::antigravity::normalization::{
     AntigravityQuarantineRecord, AntigravityUsageRecord, build_metadata_patch, normalize_candidates,
 };
-use crate::antigravity::reader::{open_external_db, read_conversation_snapshot};
+use crate::antigravity::reader::{ReaderError, open_external_db, read_conversation_snapshot};
 use crate::domain::{ResolvedThreadPatch, SessionIdentity};
 use crate::source::SourceId;
 use crate::source::adapter::{CanonicalUsageEventWrite, SourceAdapterError};
@@ -53,6 +57,7 @@ pub fn take_source_snapshot(
         .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
 
     let mut conversations = Vec::with_capacity(inventory.conversations.len());
+    let mut seen_identities: HashMap<String, PathBuf> = HashMap::new();
 
     for discovered in inventory.conversations {
         if cancellation.load(Ordering::Acquire) {
@@ -65,11 +70,29 @@ pub fn take_source_snapshot(
         let conn = open_external_db(&discovered.db_path)
             .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
 
-        let data = read_conversation_snapshot(&conn, &discovered.conversation_id, cancellation)
+        let data = read_conversation_snapshot(&conn, cancellation)
             .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
+        let conversation_id = data.conversation_id.clone();
+
+        // Identity collisions are checked after the identity is read from the
+        // same deferred transaction as usage and workspace data.
+        if let Some(existing_path) = seen_identities.get(&conversation_id) {
+            let error = ReaderError::ConversationIdConflict(format!(
+                "duplicate intrinsic conversation ID {conversation_id} in {} and {}",
+                existing_path.display(),
+                discovered.db_path.display()
+            ));
+            return Err(SourceAdapterError::with_code(
+                error.code(),
+                error.to_string(),
+            ));
+        }
+        seen_identities.insert(conversation_id.clone(), discovered.db_path.clone());
+
+        let summary_row = inventory.summary_map.rows.get(&conversation_id);
 
         let norm = normalize_candidates(
-            &discovered.conversation_id,
+            &conversation_id,
             data.candidates,
             data.initial_quarantines,
             &data.step_index,
@@ -77,7 +100,7 @@ pub fn take_source_snapshot(
 
         let max_time = norm.valid_records.iter().map(|r| r.occurred_at_ms).max();
 
-        let annotation_res = read_annotation_title(config, &discovered.conversation_id);
+        let annotation_res = read_annotation_title(config, &conversation_id);
         if let crate::antigravity::annotation::AnnotationTitleResult::SecurityEscape(ref err) =
             annotation_res
         {
@@ -88,8 +111,8 @@ pub fn take_source_snapshot(
         }
 
         let (patch, _quality) = build_metadata_patch(
-            &discovered.conversation_id,
-            discovered.summary_row.as_ref(),
+            &conversation_id,
+            summary_row,
             annotation_res,
             data.trajectory_workspace.as_deref(),
             max_time,
@@ -98,19 +121,18 @@ pub fn take_source_snapshot(
         let mut valid_records = Vec::with_capacity(norm.valid_records.len());
         for record in norm.valid_records {
             let event = record
-                .to_canonical_event(&discovered.conversation_id)
+                .to_canonical_event(&conversation_id)
                 .map_err(|e| SourceAdapterError::with_code("USAGE_CANONICAL_CONVERT_FAILED", e))?;
             valid_records.push((record, event));
         }
 
-        let identity =
-            SessionIdentity::namespaced(SourceId::ANTIGRAVITY, &discovered.conversation_id)
-                .map_err(|e| {
-                    SourceAdapterError::with_code("ANTIGRAVITY_IDENTITY_INVALID", e.to_string())
-                })?;
+        let identity = SessionIdentity::namespaced(SourceId::ANTIGRAVITY, &conversation_id)
+            .map_err(|e| {
+                SourceAdapterError::with_code("ANTIGRAVITY_IDENTITY_INVALID", e.to_string())
+            })?;
 
         conversations.push(ConversationSnapshot {
-            conversation_id: discovered.conversation_id,
+            conversation_id,
             identity,
             metadata_patch: Some(patch),
             valid_records,

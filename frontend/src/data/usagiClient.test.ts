@@ -735,6 +735,45 @@ describe("usagiClient DTO seam", () => {
         root_session_id: "root-ag",
       }),
     ).rejects.toBeInstanceOf(UsagiClientError);
+
+    // Case 3: a top-level duplicate is rejected even when the canonical main fields exist
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          range,
+          data_revision: 1,
+          source: "antigravity",
+          native_session_id: "root-ag",
+          root_session_id: "root-ag",
+          last_activity_at_ms: 100,
+          project_name: "Top Level Name",
+          project_path: "/top-level",
+          main: {
+            source: "antigravity",
+            native_session_id: "root-ag",
+            title: null,
+            project_name: "Main Name",
+            project_path: "/main",
+            thread_id: "root-ag",
+            root_session_id: "root-ag",
+            models_used: ["model-ag"],
+            model_usage: [],
+            self_usage: sessionUsage,
+            subagent_count: 0,
+            inclusive_usage: sessionUsage,
+          },
+          subagents: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      usagiClient.getSessionDetail({
+        range: { key: "today" },
+        filters: emptyFilters,
+        root_session_id: "root-ag",
+      }),
+    ).rejects.toBeInstanceOf(UsagiClientError);
   });
 
 });

@@ -5,11 +5,11 @@
   "fixtures": {
     "standalone": {
       "conversation_id": "effa6389-921a-497e-87e0-5a2962526c07",
-      "db_file": "standalone/conversations/effa6389-921a-497e-87e0-5a2962526c07.db",
-      "summaries_file": "standalone/conversation_summaries.db",
+      "db_file": "standalone/conversations/effa6389-921a-497e-87e0-5a2962526c07.db.fixture",
+      "summaries_file": "standalone/conversation_summaries.db.fixture",
       "annotation_file": "standalone/annotations/effa6389-921a-497e-87e0-5a2962526c07.pbtxt",
       "expected_events_count": 3,
-      "workspace_uri": "file:///Users/hogee/Desktop/Usagi",
+      "workspace_uri": "file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE",
       "title": "Sanitized Standalone Session",
       "events": [
         {
@@ -46,10 +46,10 @@
     },
     "wal": {
       "conversation_id": "49e69e84-d3f2-4f56-8c17-4ea8ded58b31",
-      "db_file": "wal/conversations/49e69e84-d3f2-4f56-8c17-4ea8ded58b31.db",
+      "db_file": "wal/conversations/49e69e84-d3f2-4f56-8c17-4ea8ded58b31.db.fixture",
       "wal_file": "wal/conversations/49e69e84-d3f2-4f56-8c17-4ea8ded58b31.db-wal",
       "shm_file": "wal/conversations/49e69e84-d3f2-4f56-8c17-4ea8ded58b31.db-shm",
-      "summaries_file": "wal/conversation_summaries.db",
+      "summaries_file": "wal/conversation_summaries.db.fixture",
       "expected_events_count": 2,
       "base_events": [
         {

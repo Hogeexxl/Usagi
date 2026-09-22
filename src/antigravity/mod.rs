@@ -1,15 +1,15 @@
 //! Antigravity source module.
 
-pub mod adapter;
-pub mod annotation;
-pub mod config;
-pub mod discovery;
-pub mod normalization;
-pub mod project;
-pub mod protobuf;
-pub mod reader;
-pub mod snapshot;
-pub mod storage;
+mod adapter;
+mod annotation;
+mod config;
+mod discovery;
+mod normalization;
+mod project;
+mod protobuf;
+mod reader;
+mod snapshot;
+mod storage;
 
 pub use adapter::AntigravityAdapter;
 pub use config::{

@@ -1,7 +1,6 @@
 //! Discovery and inventory of Antigravity conversations.
 
 use std::{
-    collections::HashMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -12,18 +11,21 @@ use crate::antigravity::reader::{
     DiscoveredSummaryMap, ReaderError, open_external_db, read_summary_snapshot,
 };
 
-/// A discovered conversation database and its validated intrinsic identity.
+/// A discovered conversation database.
+///
+/// The intrinsic identity is intentionally not read during discovery.  It is
+/// read by `read_conversation_snapshot` inside the same deferred transaction
+/// as the usage rows and trajectory workspace.
 #[derive(Clone, Debug)]
 pub struct DiscoveredConversation {
     pub db_path: PathBuf,
-    pub conversation_id: String,
-    pub summary_row: Option<crate::antigravity::normalization::DiscoveredSummaryRow>,
 }
 
 /// Inventory of discovered conversations for a scan run.
 #[derive(Clone, Debug)]
 pub struct DiscoveryInventory {
     pub conversations: Vec<DiscoveredConversation>,
+    pub summary_map: DiscoveredSummaryMap,
 }
 
 /// Discover all valid conversation databases in the configured Antigravity home.
@@ -38,7 +40,11 @@ pub fn discover_inventory(
     // 1. Read summary snapshot if summary DB exists
     let summary_map = if config.summaries_path().exists() {
         let conn = open_external_db(config.summaries_path())?;
-        read_summary_snapshot(&conn, cancellation)?
+        let map = read_summary_snapshot(&conn, cancellation)?;
+        if cancellation.load(Ordering::Acquire) {
+            return Err(ReaderError::Cancelled);
+        }
+        map
     } else {
         DiscoveredSummaryMap::default()
     };
@@ -47,6 +53,7 @@ pub fn discover_inventory(
     if !config.conversations_dir().exists() {
         return Ok(DiscoveryInventory {
             conversations: Vec::new(),
+            summary_map,
         });
     }
 
@@ -80,44 +87,32 @@ pub fn discover_inventory(
                     canonical.display()
                 )));
             }
-            if meta.is_file() {
-                discovered_files.push(path);
+            if meta.file_type().is_symlink() {
+                return Err(ReaderError::Invalid(format!(
+                    "conversation DB path cannot be a symlink: {}",
+                    path.display()
+                )));
             }
+            if !meta.is_file() {
+                return Err(ReaderError::Invalid(format!(
+                    "conversation DB path is not a file: {}",
+                    path.display()
+                )));
+            }
+            discovered_files.push(path);
         }
     }
 
     // Sort paths for deterministic discovery ordering
     discovered_files.sort();
 
-    let mut seen_identities: HashMap<String, PathBuf> = HashMap::new();
-    let mut conversations = Vec::new();
+    let conversations = discovered_files
+        .into_iter()
+        .map(|db_path| DiscoveredConversation { db_path })
+        .collect();
 
-    for db_path in discovered_files {
-        if cancellation.load(Ordering::Relaxed) {
-            return Err(ReaderError::Cancelled);
-        }
-
-        let conn = open_external_db(&db_path)?;
-        let intrinsic_id = crate::antigravity::reader::read_intrinsic_id(&conn)?;
-
-        // [INV-ID-03] Conversation identity conflict
-        if let Some(existing_path) = seen_identities.get(&intrinsic_id) {
-            return Err(ReaderError::ConversationIdConflict(format!(
-                "duplicate intrinsic conversation ID {intrinsic_id} in {} and {}",
-                existing_path.display(),
-                db_path.display()
-            )));
-        }
-        seen_identities.insert(intrinsic_id.clone(), db_path.clone());
-
-        let summary_row = summary_map.rows.get(&intrinsic_id).cloned();
-
-        conversations.push(DiscoveredConversation {
-            db_path,
-            conversation_id: intrinsic_id,
-            summary_row,
-        });
-    }
-
-    Ok(DiscoveryInventory { conversations })
+    Ok(DiscoveryInventory {
+        conversations,
+        summary_map,
+    })
 }

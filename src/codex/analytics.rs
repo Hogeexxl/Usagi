@@ -1,6 +1,6 @@
 //! Codex-specific read sidecars and Skills analytics.
 
-use rusqlite::{Connection, params, params_from_iter, types::Value};
+use rusqlite::{Connection, params_from_iter, types::Value};
 
 use crate::{
     range::ResolvedDay,

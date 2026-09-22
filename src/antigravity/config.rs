@@ -64,7 +64,14 @@ impl AntigravityConfig {
             ));
         }
 
-        // Check directory readability
+        // Check directory readability.  The mode check keeps this stable when
+        // tests run as root (where read_dir(000) would otherwise succeed).
+        if !directory_has_read_permission(home) {
+            return AntigravityConfigResolution::Invalid(AntigravityConfigError::new(
+                format!("home directory is not readable: {}", home.display()),
+                Some(home.to_path_buf()),
+            ));
+        }
         if let Err(err) = fs::read_dir(home) {
             return AntigravityConfigResolution::Invalid(AntigravityConfigError::new(
                 format!("failed to read home directory {}: {err}", home.display()),
@@ -176,6 +183,16 @@ fn validate_child_file_or_absent(
         ));
     }
 
+    if !fs::metadata(&canonical)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        return Err(AntigravityConfigError::new(
+            format!("canonical child is not a file: {}", canonical.display()),
+            Some(path.to_path_buf()),
+        ));
+    }
+
     Ok(())
 }
 
@@ -220,6 +237,12 @@ fn validate_child_dir_or_absent(
     }
 
     // Check directory readability
+    if !directory_has_read_permission(path) {
+        return Err(AntigravityConfigError::new(
+            format!("child directory is not readable: {}", path.display()),
+            Some(path.to_path_buf()),
+        ));
+    }
     if let Err(err) = fs::read_dir(path) {
         return Err(AntigravityConfigError::new(
             format!("child directory is not readable {}: {err}", path.display()),
@@ -228,6 +251,19 @@ fn validate_child_dir_or_absent(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn directory_has_read_permission(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o444 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn directory_has_read_permission(_path: &Path) -> bool {
+    true
 }
 
 /// Pure helper for classifying permission errors.

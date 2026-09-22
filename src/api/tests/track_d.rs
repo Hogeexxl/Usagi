@@ -39,7 +39,7 @@ fn now_ms() -> i64 {
 }
 
 #[tokio::test]
-async fn t_td_p4_health_01_root_union_and_overlap_precedence() {
+async fn t_track_d_health_root_union_and_overlap_precedence() {
     let fixture = support::ApiFixture::track_d("health-01");
     let db_path = fixture._root.path().join("mu.sqlite3");
     let ts = now_ms();
@@ -455,7 +455,7 @@ async fn t_td_p4_filter_rust_01_facade_isolates_db_sources() {
 }
 
 #[tokio::test]
-async fn t_td_p4_model_group_01_antigravity_and_route_models() {
+async fn t_track_d_model_semantics_model_group_antigravity_and_route_models() {
     let fixture = support::ApiFixture::track_d("model-group-01");
     let db_path = fixture._root.path().join("mu.sqlite3");
     let ts = now_ms();
@@ -547,7 +547,7 @@ async fn t_td_p4_model_group_01_antigravity_and_route_models() {
 }
 
 #[tokio::test]
-async fn t_td_p4_main_model_01_session_main_only() {
+async fn t_track_d_model_semantics_main_model_session_main_only() {
     let fixture = support::ApiFixture::track_d("main-model-01");
     let db_path = fixture._root.path().join("mu.sqlite3");
     let ts = now_ms();

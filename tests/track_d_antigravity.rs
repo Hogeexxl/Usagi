@@ -37,15 +37,27 @@ fn temp_paths(name: &str) -> (PathBuf, PathBuf) {
     (db_path, fixture_home)
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) {
+fn materialize_fixture_tree(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
         let ty = entry.file_type().unwrap();
+        let source_name = entry.file_name();
+        let source_name = source_name
+            .to_str()
+            .expect("fixture filenames must be valid UTF-8");
+        if source_name.ends_with(".db") {
+            panic!(
+                "fixture database payloads must use .db.fixture: {}",
+                entry.path().display()
+            );
+        }
+        let runtime_name = source_name.strip_suffix(".fixture").unwrap_or(source_name);
+        let target = dst.join(runtime_name);
         if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()));
+            materialize_fixture_tree(&entry.path(), &target);
         } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            std::fs::copy(entry.path(), target).unwrap();
         }
     }
 }
@@ -124,7 +136,7 @@ fn test_td_p3_import_01_complete_standalone_fixture() {
     let (db_path, ag_home) = temp_paths("import-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
@@ -267,7 +279,7 @@ fn test_td_p3_rescan_01_identical_snapshot() {
     let (db_path, ag_home) = temp_paths("rescan-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
@@ -333,7 +345,7 @@ fn test_td_p3_rename_01_physical_db_rename() {
     let (db_path, ag_home) = temp_paths("rename-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
@@ -393,7 +405,7 @@ fn test_td_p3_idx_reorder_01() {
     let (db_path, ag_home) = temp_paths("idx-reorder-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
@@ -446,7 +458,7 @@ fn test_td_p3_rewrite_01_mutation_conflict() {
     let (db_path, ag_home) = temp_paths("rewrite-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();
@@ -530,7 +542,7 @@ fn test_td_p3_history_01_conversation_deleted_preserved() {
     let (db_path, ag_home) = temp_paths("history-01");
     let standalone_src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity/standalone");
-    copy_dir_all(&standalone_src, &ag_home);
+    materialize_fixture_tree(&standalone_src, &ag_home);
 
     let ledger = Arc::new(Ledger::open(LedgerOptions::new(&db_path)).unwrap());
     let mut registry = SourceRegistry::new();

@@ -28,7 +28,7 @@ use crate::{
     ingestion::{CommitFailureKind, ScanHandle, ScanShutdownError},
     platform::browser::BrowserOpener,
     range::{RangeKey, resolve_day_buckets, resolve_system_custom_range, resolve_system_range},
-    source::{SourceId, SourceRegistry},
+    source::SourceRegistry,
     storage::{Ledger, RevisionTuple},
     update::{ReleaseInfo, UpdateService, UpdateSnapshot},
     usage::{SummaryQuery, ledger::UsageLedger},

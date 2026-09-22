@@ -9,7 +9,8 @@ use std::{
 };
 
 use chrono::DateTime;
-use rusqlite::{Connection, DatabaseName, OpenFlags};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, DatabaseName, OpenFlags, OptionalExtension, Transaction};
 use uuid::Uuid;
 
 use crate::antigravity::normalization::{
@@ -183,12 +184,18 @@ pub fn read_summary_snapshot(
         }
 
         let id_type: String = row.get(0).map_err(map_rusqlite_error)?;
-        if id_type != "text" {
-            // Ignore non-text summary ID
-            continue;
-        }
-
-        let raw_id: String = row.get(1).map_err(map_rusqlite_error)?;
+        let raw_id = match (
+            id_type.as_str(),
+            row.get_ref(1).map_err(map_rusqlite_error)?,
+        ) {
+            ("text", ValueRef::Text(bytes)) => match std::str::from_utf8(bytes) {
+                Ok(value) => value,
+                // Invalid UTF-8 summary identity is an invalid summary row,
+                // not an external database failure.
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
         let trimmed_id = raw_id.trim();
         if trimmed_id.is_empty() {
             continue;
@@ -201,30 +208,51 @@ pub fn read_summary_snapshot(
 
         // Title
         let title_type: String = row.get(2).map_err(map_rusqlite_error)?;
-        let title = if title_type == "text" {
-            Some(row.get::<_, String>(3).map_err(map_rusqlite_error)?)
-        } else {
-            None
+        let (title, title_invalid) = match title_type.as_str() {
+            "null" => (None, false),
+            "text" => match row.get_ref(3).map_err(map_rusqlite_error)? {
+                ValueRef::Text(bytes)
+                    if bytes.len() <= crate::antigravity::protobuf::MAX_TITLE_BYTES =>
+                {
+                    match String::from_utf8(bytes.to_vec()) {
+                        Ok(value) => (Some(value), false),
+                        Err(_) => (None, true),
+                    }
+                }
+                ValueRef::Text(_) => (None, true),
+                _ => (None, true),
+            },
+            _ => (None, true),
         };
 
         // Workspace URIs
         let ws_type: String = row.get(4).map_err(map_rusqlite_error)?;
-        let workspace_uris = if ws_type == "text" {
-            Some(row.get::<_, String>(5).map_err(map_rusqlite_error)?)
-        } else {
-            None
+        let (workspace_uris, workspace_invalid) = match ws_type.as_str() {
+            "null" => (None, false),
+            "text" => match row.get_ref(5).map_err(map_rusqlite_error)? {
+                ValueRef::Text(bytes) => match String::from_utf8(bytes.to_vec()) {
+                    Ok(value) => (Some(value), false),
+                    Err(_) => (None, true),
+                },
+                _ => (None, true),
+            },
+            _ => (None, false),
         };
 
         // Last modified time
         let time_type: String = row.get(6).map_err(map_rusqlite_error)?;
-        let last_modified_time_ms = if time_type == "text" {
-            let time_str: String = row.get(7).map_err(map_rusqlite_error)?;
-            parse_datetime_to_ms(&time_str)
-        } else if time_type == "integer" {
-            let time_int: i64 = row.get(7).map_err(map_rusqlite_error)?;
-            Some(time_int)
-        } else {
-            None
+        let last_modified_time_ms = match time_type.as_str() {
+            "text" => match row.get_ref(7).map_err(map_rusqlite_error)? {
+                ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(parse_datetime_to_ms),
+                _ => None,
+            },
+            "integer" => match row.get_ref(7).map_err(map_rusqlite_error)? {
+                ValueRef::Integer(value) => Some(value),
+                _ => None,
+            },
+            _ => None,
         };
 
         // Check summary uniqueness [INV-EXT-03]
@@ -240,6 +268,8 @@ pub fn read_summary_snapshot(
                 title,
                 workspace_uris,
                 last_modified_time_ms,
+                title_invalid,
+                workspace_invalid,
             },
         );
     }
@@ -297,25 +327,32 @@ fn parse_datetime_to_ms(s: &str) -> Option<i64> {
     None
 }
 
-/// Read the intrinsic conversation ID from `trajectory_meta`.
-pub fn read_intrinsic_id(conn: &Connection) -> Result<String, ReaderError> {
-    probe_conversation_schema(conn)?;
+fn read_intrinsic_id_in_transaction(tx: &Transaction<'_>) -> Result<String, ReaderError> {
+    // Count before decoding the value so the structural ambiguity error wins
+    // even if one of the rows also contains a malformed cascade id.
+    let row_count: i64 = tx
+        .query_row("SELECT count(*) FROM trajectory_meta", [], |row| row.get(0))
+        .map_err(map_rusqlite_error)?;
+    if row_count == 0 {
+        return Err(ReaderError::ConversationIdMissing(
+            "trajectory_meta table has 0 rows".into(),
+        ));
+    }
+    if row_count > 1 {
+        return Err(ReaderError::ConversationIdAmbiguous(
+            "trajectory_meta table has multiple rows".into(),
+        ));
+    }
 
-    let mut stmt = conn
+    let mut stmt = tx
         .prepare("SELECT typeof(cascade_id), cascade_id FROM trajectory_meta")
         .map_err(map_rusqlite_error)?;
 
     let mut rows = stmt.query([]).map_err(map_rusqlite_error)?;
 
-    let first = rows.next().map_err(map_rusqlite_error)?;
-    let row = match first {
-        None => {
-            return Err(ReaderError::ConversationIdMissing(
-                "trajectory_meta table has 0 rows".into(),
-            ));
-        }
-        Some(r) => r,
-    };
+    let row = rows.next().map_err(map_rusqlite_error)?.ok_or_else(|| {
+        ReaderError::ConversationIdMissing("trajectory_meta table has 0 rows".into())
+    })?;
 
     let col_type: String = row.get(0).map_err(map_rusqlite_error)?;
     if col_type != "text" {
@@ -324,7 +361,16 @@ pub fn read_intrinsic_id(conn: &Connection) -> Result<String, ReaderError> {
         )));
     }
 
-    let raw_id: String = row.get(1).map_err(map_rusqlite_error)?;
+    let raw_id = match row.get_ref(1).map_err(map_rusqlite_error)? {
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes).map_err(|_| {
+            ReaderError::ConversationIdInvalid("cascade_id is not valid UTF-8".into())
+        })?,
+        _ => {
+            return Err(ReaderError::ConversationIdInvalid(
+                "cascade_id has non-text SQLite value".into(),
+            ));
+        }
+    };
     let trimmed = raw_id.trim();
     if trimmed.is_empty() {
         return Err(ReaderError::ConversationIdInvalid(
@@ -335,13 +381,6 @@ pub fn read_intrinsic_id(conn: &Connection) -> Result<String, ReaderError> {
     let parsed_uuid = Uuid::parse_str(trimmed).map_err(|err| {
         ReaderError::ConversationIdInvalid(format!("cascade_id is not a valid UUID: {err}"))
     })?;
-
-    // Check if more than 1 row exists
-    if rows.next().map_err(map_rusqlite_error)?.is_some() {
-        return Err(ReaderError::ConversationIdAmbiguous(
-            "trajectory_meta table has multiple rows".into(),
-        ));
-    }
 
     Ok(parsed_uuid.hyphenated().to_string())
 }
@@ -385,11 +424,11 @@ pub fn probe_conversation_schema(conn: &Connection) -> Result<(), ReaderError> {
     // Verify gen_metadata is a rowid table
     let is_without_rowid: bool = conn
         .query_row(
-            "SELECT count(*) FROM pragma_table_list('gen_metadata') WHERE without_rowid = 1",
+            "SELECT count(*) FROM pragma_table_list('gen_metadata') WHERE wr = 1",
             [],
             |r| r.get::<_, i64>(0).map(|c| c > 0),
         )
-        .unwrap_or(false);
+        .map_err(map_rusqlite_error)?;
 
     if is_without_rowid {
         return Err(ReaderError::SchemaUnsupported(
@@ -403,6 +442,7 @@ pub fn probe_conversation_schema(conn: &Connection) -> Result<(), ReaderError> {
 /// Snapshot data extracted from a single conversation DB before transaction.
 #[derive(Clone, Debug)]
 pub struct RawConversationSnapshotData {
+    pub conversation_id: String,
     pub candidates: Vec<RawAntigravityUsageCandidate>,
     pub initial_quarantines: Vec<AntigravityQuarantineRecord>,
     pub step_index: BTreeMap<String, Vec<StepIndexEntry>>,
@@ -414,7 +454,6 @@ pub struct RawConversationSnapshotData {
 /// Read conversation data snapshot in a Deferred read transaction.
 pub fn read_conversation_snapshot(
     conn: &Connection,
-    conversation_id: &str,
     cancellation: &AtomicBool,
 ) -> Result<RawConversationSnapshotData, ReaderError> {
     if cancellation.load(Ordering::Relaxed) {
@@ -422,6 +461,8 @@ pub fn read_conversation_snapshot(
     }
 
     let tx = conn.unchecked_transaction().map_err(map_rusqlite_error)?;
+    probe_conversation_schema(&tx)?;
+    let conversation_id = read_intrinsic_id_in_transaction(&tx)?;
 
     // 1. Preflight steps table scalars in strict order per [INV-EXT-08]
     // First preflight: idx must be integer and >= 0
@@ -431,7 +472,8 @@ pub fn read_conversation_snapshot(
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(map_rusqlite_error)?;
     if bad_idx.is_some() {
         return Err(ReaderError::ExternalIndexInvalid(
             "steps table contains non-integer or negative idx".into(),
@@ -445,7 +487,8 @@ pub fn read_conversation_snapshot(
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(map_rusqlite_error)?;
     if bad_type.is_some() {
         return Err(ReaderError::StepIndexInvalid(
             "steps table contains non-integer step_type".into(),
@@ -459,7 +502,8 @@ pub fn read_conversation_snapshot(
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(map_rusqlite_error)?;
     if bad_gen_idx.is_some() {
         return Err(ReaderError::ExternalIndexInvalid(
             "gen_metadata table contains non-integer or negative idx".into(),
@@ -574,7 +618,7 @@ pub fn read_conversation_snapshot(
 
         if data_len > MAX_PROTO_MESSAGE_BYTES {
             // Incremental BLOB read in 64 KiB chunks [INV-PB-03]
-            let digest = stream_blob_digest(conn, rowid, data_len, cancellation)?;
+            let digest = stream_blob_digest(&tx, rowid, data_len, cancellation)?;
             initial_quarantines.push(AntigravityQuarantineRecord {
                 conversation_id: conversation_id.to_string(),
                 payload_digest: digest,
@@ -628,18 +672,36 @@ pub fn read_conversation_snapshot(
         // blob_bytes dropped here!
     }
 
-    // 4. Read trajectory_metadata_blob
+    // 4. Read trajectory_metadata_blob.  Probe the dynamic type and length
+    // before materializing the blob so NULL, non-BLOB, and oversized values
+    // remain an unavailable fallback rather than an allocation or source
+    // failure.
     let mut trajectory_workspace: Option<String> = None;
-    let blob_row: Result<(String, usize, Vec<u8>), _> = tx.query_row(
-        "SELECT typeof(data), length(data), data FROM trajectory_metadata_blob WHERE id = 'main'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    );
+    let blob_shape: Option<(String, Option<i64>)> = tx
+        .query_row(
+            "SELECT typeof(data), length(data)
+             FROM trajectory_metadata_blob WHERE id = 'main'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_rusqlite_error)?;
 
-    if let Ok((b_type, b_len, b_data)) = blob_row {
-        if b_type == "blob" && b_len <= MAX_PROTO_MESSAGE_BYTES {
-            if let Ok(ws) = parse_trajectory_metadata_blob_workspace(&b_data) {
-                trajectory_workspace = ws;
+    if let Some((blob_type, blob_len)) = blob_shape {
+        if blob_type == "blob"
+            && blob_len.is_some_and(|length| {
+                length >= 0 && (length as u64) <= MAX_PROTO_MESSAGE_BYTES as u64
+            })
+        {
+            let blob_data: Vec<u8> = tx
+                .query_row(
+                    "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(map_rusqlite_error)?;
+            if let Ok(workspace) = parse_trajectory_metadata_blob_workspace(&blob_data) {
+                trajectory_workspace = workspace;
             }
         }
     }
@@ -649,6 +711,7 @@ pub fn read_conversation_snapshot(
     }
 
     Ok(RawConversationSnapshotData {
+        conversation_id,
         candidates,
         initial_quarantines,
         step_index,
@@ -659,12 +722,12 @@ pub fn read_conversation_snapshot(
 }
 
 fn stream_blob_digest(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     rowid: i64,
     total_len: usize,
     cancellation: &AtomicBool,
 ) -> Result<String, ReaderError> {
-    let mut blob = conn
+    let mut blob = tx
         .blob_open(DatabaseName::Main, "gen_metadata", "data", rowid, true)
         .map_err(map_rusqlite_error)?;
 
@@ -717,6 +780,11 @@ mod tests {
         conn.execute("CREATE TABLE trajectory_meta (cascade_id TEXT)", [])
             .unwrap();
         conn.execute(
+            "INSERT INTO trajectory_meta VALUES ('49e69e84-d3f2-4f56-8c17-4ea8ded58b31')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)",
             [],
         )
@@ -727,7 +795,7 @@ mod tests {
             .unwrap();
         let ext_conn = open_external_db(&path).unwrap();
         let cancel = AtomicBool::new(false);
-        let res = read_conversation_snapshot(&ext_conn, "test-conv", &cancel);
+        let res = read_conversation_snapshot(&ext_conn, &cancel);
         assert_eq!(res.unwrap_err().code(), ANTIGRAVITY_EXTERNAL_INDEX_INVALID);
         let _ = fs::remove_file(&path);
     }
@@ -745,6 +813,11 @@ mod tests {
         conn.execute("CREATE TABLE trajectory_meta (cascade_id TEXT)", [])
             .unwrap();
         conn.execute(
+            "INSERT INTO trajectory_meta VALUES ('49e69e84-d3f2-4f56-8c17-4ea8ded58b31')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)",
             [],
         )
@@ -754,8 +827,54 @@ mod tests {
             .unwrap();
         let ext_conn = open_external_db(&path).unwrap();
         let cancel = AtomicBool::new(false);
-        let res = read_conversation_snapshot(&ext_conn, "test-conv", &cancel);
+        let res = read_conversation_snapshot(&ext_conn, &cancel);
         assert_eq!(res.unwrap_err().code(), ANTIGRAVITY_GEN_METADATA_DATA_NULL);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_td_wal_snapshot_identity_and_usage_share_deferred_transaction() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/antigravity/wal/conversations");
+        let temp_root = std::env::temp_dir().join(format!(
+            "ag-reader-wal-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let temp_conversations = temp_root.join("conversations");
+        fs::create_dir_all(&temp_conversations).expect("create temporary WAL fixture tree");
+
+        let fixture_id = "49e69e84-d3f2-4f56-8c17-4ea8ded58b31";
+        fs::copy(
+            source_dir.join(format!("{fixture_id}.db.fixture")),
+            temp_conversations.join(format!("{fixture_id}.db")),
+        )
+        .expect("materialize WAL database fixture");
+        for suffix in ["db-wal", "db-shm"] {
+            fs::copy(
+                source_dir.join(format!("{fixture_id}.{suffix}")),
+                temp_conversations.join(format!("{fixture_id}.{suffix}")),
+            )
+            .expect("materialize WAL sidecar fixture");
+        }
+
+        let path = temp_conversations.join(format!("{fixture_id}.db"));
+        let conn = open_external_db(path).expect("open WAL conversation fixture");
+        let cancellation = AtomicBool::new(false);
+
+        let snapshot = read_conversation_snapshot(&conn, &cancellation)
+            .expect("read WAL conversation snapshot");
+
+        assert_eq!(
+            snapshot.conversation_id,
+            "49e69e84-d3f2-4f56-8c17-4ea8ded58b31"
+        );
+        assert_eq!(snapshot.candidates.len(), 2);
+        assert!(snapshot.trajectory_workspace.is_some());
+
+        drop(conn);
+        fs::remove_dir_all(temp_root).expect("remove temporary WAL fixture tree");
     }
 }

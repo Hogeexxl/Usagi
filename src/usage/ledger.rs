@@ -3,10 +3,9 @@
 use crate::storage::{Ledger, StorageError};
 
 use super::aggregate::{
-    AggregateError, AggregateReader, FilterOptions, LegacyPublicUsageProjection, ModelUsageRows,
-    SessionDetail, SessionDetailWithProject, SessionPageRequest, SessionSortField,
-    SessionSortOrder, SessionUsagePage, SummaryQuery, TimeRange, UsageFilter, UsageSummary,
-    UsageSummaryWithLegacy,
+    AggregateError, AggregateReader, FilterOptions, ModelUsageRows, SessionDetail,
+    SessionDetailWithProject, SessionPageRequest, SessionSortField, SessionSortOrder,
+    SessionUsagePage, SummaryQuery, TimeRange, UsageFilter, UsageSummary, UsageSummaryWithLegacy,
 };
 
 #[derive(Debug)]

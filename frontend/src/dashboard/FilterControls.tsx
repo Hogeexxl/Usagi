@@ -104,7 +104,8 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
   useEffect(() => {
     if (modelGroupsInitialized.current || !options || groups.length === 0) return;
     modelGroupsInitialized.current = true;
-    const firstActive = groups.find((group) => group.key !== "selected") ?? groups[0];
+    const firstActive = groups.find((group) => group.key !== "selected");
+    if (!firstActive) return;
     setExpandedGroups({ [firstActive.key]: true });
   }, [groups, options]);
 

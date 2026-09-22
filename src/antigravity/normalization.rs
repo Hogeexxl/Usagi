@@ -7,7 +7,7 @@ use crate::antigravity::project::{
     WorkspaceEvaluation, evaluate_blob_workspace, evaluate_summary_workspace,
 };
 use crate::antigravity::protobuf::{
-    MAX_TITLE_BYTES, RawAntigravityUsageCandidate, RawModelField, parse_step_metadata,
+    MAX_TITLE_BYTES, ProtoError, RawAntigravityUsageCandidate, RawModelField, parse_step_metadata,
 };
 use crate::domain::{
     AgentRole, MetadataQualityStatus, Patch, ProjectKind, ResolvedThreadPatch, SessionIdentity,
@@ -237,6 +237,18 @@ pub fn normalize_candidates(
 
         let decoded_meta = match parse_step_metadata(metadata_bytes) {
             Ok(dm) => dm,
+            Err(ProtoError::InvalidTimestamp) => {
+                outcome
+                    .quarantine_records
+                    .push(AntigravityQuarantineRecord {
+                        conversation_id: conversation_id.to_string(),
+                        payload_digest: c.payload_digest,
+                        gen_idx: Some(c.gen_idx),
+                        response_id: Some(resp_id),
+                        reason_code: USAGE_TIMESTAMP_INVALID,
+                    });
+                continue;
+            }
             Err(_) => {
                 outcome
                     .quarantine_records
@@ -436,6 +448,8 @@ pub struct DiscoveredSummaryRow {
     pub title: Option<String>,
     pub workspace_uris: Option<String>,
     pub last_modified_time_ms: Option<i64>,
+    pub(crate) title_invalid: bool,
+    pub(crate) workspace_invalid: bool,
 }
 
 /// Construct `ResolvedThreadPatch` according to Sections 4.5 and 4.6 truth tables.
@@ -463,36 +477,43 @@ pub fn build_metadata_patch(
 
     // 2. Resolve Workspace
     let (project_name, project_path, project_kind, ws_quality_partial) = match summary {
-        Some(s) => match evaluate_summary_workspace(s.workspace_uris.as_deref()) {
-            WorkspaceEvaluation::Projectless => {
-                has_clear = true;
-                (
-                    Patch::Clear,
-                    Patch::Clear,
-                    Patch::Set(ProjectKind::Projectless),
+        Some(s) => {
+            let workspace = if s.workspace_invalid {
+                WorkspaceEvaluation::Unknown
+            } else {
+                evaluate_summary_workspace(s.workspace_uris.as_deref())
+            };
+            match workspace {
+                WorkspaceEvaluation::Projectless => {
+                    has_clear = true;
+                    (
+                        Patch::Clear,
+                        Patch::Clear,
+                        Patch::Set(ProjectKind::Projectless),
+                        false,
+                    )
+                }
+                WorkspaceEvaluation::Project {
+                    project_name,
+                    project_path,
+                } => (
+                    Patch::Set(project_name),
+                    Patch::Set(project_path),
+                    Patch::Set(ProjectKind::Project),
                     false,
-                )
+                ),
+                WorkspaceEvaluation::Unknown => {
+                    has_clear = true;
+                    (
+                        Patch::Clear,
+                        Patch::Clear,
+                        Patch::Set(ProjectKind::Unknown),
+                        true,
+                    )
+                }
+                WorkspaceEvaluation::Keep => (Patch::Keep, Patch::Keep, Patch::Keep, true),
             }
-            WorkspaceEvaluation::Project {
-                project_name,
-                project_path,
-            } => (
-                Patch::Set(project_name),
-                Patch::Set(project_path),
-                Patch::Set(ProjectKind::Project),
-                false,
-            ),
-            WorkspaceEvaluation::Unknown => {
-                has_clear = true;
-                (
-                    Patch::Clear,
-                    Patch::Clear,
-                    Patch::Set(ProjectKind::Unknown),
-                    true,
-                )
-            }
-            WorkspaceEvaluation::Keep => (Patch::Keep, Patch::Keep, Patch::Keep, true),
-        },
+        }
         None => {
             // DB fallback
             is_partial = true; // summary missing is always Partial
@@ -578,20 +599,24 @@ fn resolve_patch_title(
 ) -> (Patch<String>, bool) {
     match summary {
         Some(s) => {
-            let normalized_summary_title = match &s.title {
-                Some(t) => {
-                    let trimmed = t.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else if trimmed.len() > MAX_TITLE_BYTES
-                        || trimmed.chars().any(char::is_control)
-                    {
-                        Some(Err(())) // Invalid
-                    } else {
-                        Some(Ok(trimmed.to_string())) // Valid
+            let normalized_summary_title = if s.title_invalid {
+                Some(Err(()))
+            } else {
+                match &s.title {
+                    Some(t) => {
+                        let trimmed = t.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else if trimmed.len() > MAX_TITLE_BYTES
+                            || trimmed.chars().any(char::is_control)
+                        {
+                            Some(Err(())) // Invalid
+                        } else {
+                            Some(Ok(trimmed.to_string())) // Valid
+                        }
                     }
+                    None => None, // SQL NULL is a missing title, not corruption
                 }
-                None => Some(Err(())), // SQL NULL is invalid
             };
 
             match normalized_summary_title {
@@ -614,8 +639,8 @@ fn resolve_patch_title(
                         AnnotationTitleResult::Empty | AnnotationTitleResult::NotFound => {
                             (Patch::Clear, false)
                         }
-                        AnnotationTitleResult::Malformed
-                        | AnnotationTitleResult::SecurityEscape(_) => (Patch::Clear, true),
+                        AnnotationTitleResult::Malformed => (Patch::Clear, true),
+                        AnnotationTitleResult::SecurityEscape(_) => (Patch::Clear, true),
                     }
                 }
             }
@@ -721,6 +746,8 @@ mod tests {
             title: Some("Valid Title".into()),
             workspace_uris: Some("[]".into()),
             last_modified_time_ms: None, // Malformed time!
+            title_invalid: false,
+            workspace_invalid: false,
         };
 
         let (patch, quality) = build_metadata_patch(
@@ -736,5 +763,45 @@ mod tests {
         assert_eq!(patch.updated_at_ms, Patch::Keep); // updated_at_ms is Keep!
         assert_eq!(patch.resolved_at_ms, 123456789); // fallback to usage max!
         assert_eq!(quality, MetadataQualityStatus::Partial);
+    }
+
+    #[test]
+    fn test_td_p1_num_01_invalid_timestamp_has_timestamp_reason() {
+        let candidate = RawAntigravityUsageCandidate {
+            gen_idx: 0,
+            payload_digest: "digest".into(),
+            response_id: Some("response".into()),
+            model_display_name: RawModelField::Valid("model".into()),
+            response_model: RawModelField::Missing,
+            uncached_input_tokens: Some(1),
+            cached_tokens: Some(0),
+            output_tokens: Some(1),
+            reasoning_tokens: Some(0),
+        };
+        let mut timestamp = Vec::new();
+        timestamp.extend([0x0a, 0x02, 0x08, 0x01]); // timestamp has no nanos issue
+        timestamp.extend([0x18, 0x02]); // source = 2
+        // Replace timestamp payload with an invalid negative/overflow value.
+        timestamp.splice(
+            0..4,
+            [
+                0x0a, 0x0b, 0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+            ],
+        );
+        let mut steps = BTreeMap::new();
+        steps.insert(
+            "response".into(),
+            vec![StepIndexEntry {
+                step_idx: 1,
+                metadata_bytes: Some(timestamp),
+            }],
+        );
+        let outcome = normalize_candidates("conversation", vec![candidate], Vec::new(), &steps);
+        assert_eq!(outcome.valid_records.len(), 0);
+        assert_eq!(outcome.quarantine_records.len(), 1);
+        assert_eq!(
+            outcome.quarantine_records[0].reason_code,
+            USAGE_TIMESTAMP_INVALID
+        );
     }
 }
