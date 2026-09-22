@@ -72,6 +72,7 @@ fn empty_sessions() -> SessionNameSnapshot {
 fn existing(thread_id: &str) -> ExistingThread {
     ExistingThread {
         thread_id: thread_id.to_owned(),
+        source: crate::source::SourceId::CODEX,
         parent_thread_id: None,
         root_session_id: None,
         agent_role: AgentRole::Unknown,

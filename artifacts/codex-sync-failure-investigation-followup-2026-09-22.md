@@ -1,7 +1,7 @@
 # Usagi 同步失败二次调研报告
 
 - 调研时间：2026-09-22
-- 仓库：`/Users/hogee/Desktop/Usagi`
+- 仓库：`Usagi` checkout
 - 分支：`codex/spec01-multi-source-core`
 - 目标数据库：`~/Library/Application Support/Usagi/mu.sqlite3`
 - 运行版本：`0.2.6`
@@ -326,4 +326,26 @@ scan_state = failed
 - 今天 session 能看到：因为失败发生在后面的 group，前面的 group 已经部分提交。
 - UI 显示昨天 23:17:21：因为那是最近一次完整成功 scan 的完成时间，而今天的 scan 全部失败。
 
-本报告只记录调查结果；本次没有把 P0 source filter 修复直接写入代码，也没有修改或删除用户数据库。
+## 9. P0 修复与真实数据库验证
+
+随后已实现并验证：
+
+- `load_existing_threads()` 增加 `WHERE source='codex'`；
+- `ExistingThread` 保留 `source` 字段；
+- resolver 边界过滤非 Codex existing Thread；
+- patch 构造前增加 Codex canonical source guard；
+- 增加 storage projection 和 resolver mixed-source 回归测试；
+- metadata commit 错误携带 group/thread/source-file 上下文。
+
+真实数据库验证结果：
+
+```text
+启动扫描：antigravity completed / codex completed
+手动 POST /api/refresh：HTTP 202 Accepted
+手动 scan 最终：antigravity completed / codex completed
+scan_state：idle
+```
+
+本次修复没有删除、迁移或清洗任何 Antigravity rows；这些 rows 是合法数据，只是不应被 Codex pipeline 读取。
+
+P2 的 partial commit 时间语义仍未改成大事务；当前系统仍需后续明确 `last_successful_scan_at` 与 `last_data_progress_at` 的区别。

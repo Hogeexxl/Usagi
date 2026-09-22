@@ -37,7 +37,7 @@ pub(super) fn load_existing_threads(
                 thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role,
                 title, project_name, project_path, project_kind, metadata_model,
                 created_at_ms, updated_at_ms, archived, metadata_quality_status
-             FROM threads ORDER BY thread_id",
+             FROM threads WHERE source='codex' ORDER BY thread_id",
         )?;
         let mut rows = statement.query([])?;
         let mut projections = Vec::new();

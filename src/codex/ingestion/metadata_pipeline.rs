@@ -213,7 +213,12 @@ pub struct PipelineResolution {
 #[derive(Debug)]
 pub enum PipelineError {
     Invalid(String),
-    Storage(CodexStorageError),
+    Storage {
+        group_index: usize,
+        thread_id: String,
+        source_file_ids: Vec<i64>,
+        error: CodexStorageError,
+    },
 }
 
 impl fmt::Display for PipelineError {
@@ -222,7 +227,7 @@ impl fmt::Display for PipelineError {
             Self::Invalid(message) => {
                 write!(formatter, "invalid metadata pipeline input: {message}")
             }
-            Self::Storage(error) => error.fmt(formatter),
+            Self::Storage { error, .. } => error.fmt(formatter),
         }
     }
 }
@@ -231,14 +236,19 @@ impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Invalid(_) => None,
-            Self::Storage(error) => Some(error),
+            Self::Storage { error, .. } => Some(error),
         }
     }
 }
 
 impl From<CodexStorageError> for PipelineError {
     fn from(error: CodexStorageError) -> Self {
-        Self::Storage(error)
+        Self::Storage {
+            group_index: 0,
+            thread_id: "unknown".to_owned(),
+            source_file_ids: Vec::new(),
+            error,
+        }
     }
 }
 
@@ -854,7 +864,14 @@ impl MetadataPipeline {
         let mut data_revision = None;
         let mut data_changed = false;
         let mut first_error = None;
-        for group in batch.groups {
+        let mut first_error_context = None;
+        for (group_index, group) in batch.groups.into_iter().enumerate() {
+            let thread_id = group.thread_id.clone();
+            let source_file_ids = group
+                .sources
+                .iter()
+                .map(|source| source.source_file_id)
+                .collect::<Vec<_>>();
             let group_batch = MetadataCommitBatch::new(vec![group])
                 .map_err(|error| PipelineError::Invalid(error.to_string()))?;
             match storage.commit_metadata(group_batch) {
@@ -864,12 +881,22 @@ impl MetadataPipeline {
                     data_revision = Some(outcome.data_revision);
                     data_changed |= outcome.data_changed;
                 }
-                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(error);
+                    first_error_context = Some((group_index, thread_id, source_file_ids));
+                }
                 Err(_) => {}
             }
         }
-        if let Some(error) = first_error {
-            return Err(PipelineError::Storage(error));
+        if let (Some(error), Some((group_index, thread_id, source_file_ids))) =
+            (first_error, first_error_context)
+        {
+            return Err(PipelineError::Storage {
+                group_index,
+                thread_id,
+                source_file_ids,
+                error,
+            });
         }
         let data_revision = data_revision.ok_or_else(|| {
             PipelineError::Invalid("metadata commit contained no successful groups".to_owned())

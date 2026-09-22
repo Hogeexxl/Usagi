@@ -34,6 +34,7 @@ const MAX_PARENT_DEPTH: usize = 256;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExistingThread {
     pub thread_id: String,
+    pub source: SourceId,
     pub parent_thread_id: Option<String>,
     pub root_session_id: Option<String>,
     pub agent_role: AgentRole,
@@ -52,6 +53,7 @@ impl From<ExistingThreadProjection> for ExistingThread {
     fn from(projection: ExistingThreadProjection) -> Self {
         Self {
             thread_id: projection.thread_id,
+            source: projection.source,
             parent_thread_id: projection.parent_thread_id,
             root_session_id: projection.root_session_id,
             agent_role: projection.agent_role,
@@ -321,6 +323,9 @@ impl Resolver {
         }
 
         for thread in self.input.existing_threads.clone() {
+            if thread.source != SourceId::CODEX {
+                continue;
+            }
             self.affected.insert(thread.thread_id.clone());
             self.existing.insert(thread.thread_id.clone(), thread);
         }
@@ -637,6 +642,12 @@ impl Resolver {
         cycle_nodes: &BTreeSet<String>,
     ) -> Option<ResolvedThreadPatch> {
         let existing = self.existing.get(thread_id).cloned();
+        if existing
+            .as_ref()
+            .is_some_and(|thread| thread.source != SourceId::CODEX)
+        {
+            return None;
+        }
         let state = self.state_facts.get(thread_id).cloned();
         let rollouts = self
             .rollout_by_thread
@@ -1339,6 +1350,7 @@ mod tests {
     fn existing(id: &str) -> ExistingThread {
         ExistingThread {
             thread_id: id.to_owned(),
+            source: SourceId::CODEX,
             parent_thread_id: None,
             root_session_id: None,
             agent_role: AgentRole::Unknown,
@@ -1359,6 +1371,24 @@ mod tests {
             agent_role: AgentRole::Main,
             ..existing(id)
         }
+    }
+
+    #[test]
+    fn resolver_ignores_non_codex_existing_threads() {
+        let mut antigravity = existing_main("antigravity:thread");
+        antigravity.source = SourceId::ANTIGRAVITY;
+        let result = ThreadMetadataResolver::resolve(ResolutionInput {
+            state_snapshot: state(Vec::new(), Vec::new()),
+            session_name_snapshot: sessions(Vec::new()),
+            global_state_snapshot: global_state(),
+            rollout_facts: Vec::new(),
+            source_file_observations: Vec::new(),
+            existing_threads: vec![antigravity],
+            resolved_at_ms: 10,
+        });
+
+        assert!(result.patches.is_empty());
+        assert!(result.affected_thread_ids.is_empty());
     }
 
     fn patch<'a>(result: &'a ResolutionResult, id: &str) -> &'a ResolvedThreadPatch {

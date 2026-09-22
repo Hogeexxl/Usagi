@@ -428,6 +428,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_existing_thread_projection_is_source_scoped() {
+        let (db, home) = temp_paths("source-scoped-existing");
+        let ledger = Ledger::open(LedgerOptions::new(&db)).unwrap();
+        {
+            let connection = ledger.connection().unwrap();
+            for (thread_id, source) in [
+                ("codex-thread", "codex"),
+                ("antigravity:thread", "antigravity"),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO threads (
+                            thread_id, source, native_session_id, parent_thread_id, root_session_id,
+                            agent_role, project_kind, archived, metadata_quality_status,
+                            metadata_resolved_at_ms
+                         ) VALUES (?1, ?2, ?1, NULL, ?1, 'main', 'unknown', 0, 'complete', 1)",
+                        rusqlite::params![thread_id, source],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let projections = with_codex(&ledger, |storage| storage.load_existing_threads()).unwrap();
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].thread_id, "codex-thread");
+        assert_eq!(projections[0].source, SourceId::CODEX);
+
+        let _ = fs::remove_file(db);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn commits_first_binding_fact_checkpoint_and_patch_atomically() {
         let (db, home) = temp_paths("commit");
         let ledger = Ledger::open(LedgerOptions::new(&db)).unwrap();
