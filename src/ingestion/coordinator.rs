@@ -464,6 +464,7 @@ impl EventLoop {
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.availability.store(SHUTTING_DOWN, Ordering::Release);
+                    self.cancel_active();
                     if self
                         .retry_at
                         .is_some_and(|deadline| deadline <= Instant::now())
@@ -841,6 +842,8 @@ impl EventLoop {
             return false;
         }
 
+        self.cancel_active();
+
         if !self.shutdown_state_known {
             let state = match self.store.scan_state() {
                 Ok(state) => state,
@@ -906,6 +909,7 @@ impl EventLoop {
         self.availability.store(SHUTTING_DOWN, Ordering::Release);
         self.shutdown_reply = Some(reply);
         self.shutdown_state_known = false;
+        self.cancel_active();
         self.drive_shutdown()
     }
 
@@ -2109,5 +2113,71 @@ mod tests {
             }
             handle.shutdown().unwrap();
         }
+    }
+
+    #[test]
+    fn shutdown_cancels_active_worker_before_durable_state_access_without_deadlock() {
+        let (_temp, ledger, config) = setup("cancel-before-shutdown-access");
+
+        struct TransactionHoldingWorker {
+            ledger: Arc<Ledger>,
+            entered: mpsc::SyncSender<()>,
+            rolled_back: mpsc::SyncSender<()>,
+        }
+
+        impl ScanWorker for TransactionHoldingWorker {
+            fn run(&self, scan_id: &str, cancellation: &AtomicBool) -> WorkerResult {
+                let storage = crate::source::SourceStorage::with_ledger(
+                    scan_id,
+                    crate::source::SourceId::CODEX,
+                    Arc::clone(&self.ledger),
+                );
+                let write_txn = storage.begin_write_txn().expect("begin write txn");
+                self.entered.send(()).expect("signal worker entered");
+
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !cancellation.load(Ordering::Acquire) {
+                    if Instant::now() > deadline {
+                        panic!("cancellation was not published before timeout");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+
+                drop(write_txn);
+                self.rolled_back.send(()).expect("signal rollback");
+                WorkerResult::Failed("SCAN_CANCELLED")
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (rolled_back_tx, rolled_back_rx) = mpsc::sync_channel(1);
+        let worker = Arc::new(TransactionHoldingWorker {
+            ledger: Arc::clone(&ledger),
+            entered: entered_tx,
+            rolled_back: rolled_back_tx,
+        });
+
+        let handle =
+            ScanCoordinator::start(config, Arc::clone(&ledger), worker).expect("start coordinator");
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should enter and hold write txn");
+
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let handle_clone = handle.clone();
+        thread::spawn(move || {
+            let res = handle_clone.shutdown();
+            let _ = shutdown_tx.send(res);
+        });
+
+        rolled_back_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should observe cancellation and roll back within 5s");
+
+        let shutdown_res = shutdown_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("shutdown should complete within 5s");
+        assert_eq!(shutdown_res, Ok(()));
     }
 }

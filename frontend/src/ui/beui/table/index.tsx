@@ -66,6 +66,7 @@ function resolveColumnWidth(
   if (width.endsWith("px")) return value;
   // rem is the other absolute length the repo writes.
   if (width.endsWith("rem")) return value * rootFontSize;
+  if (width.endsWith("pt")) return (value * 96) / 72;
   return null;
 }
 
@@ -273,7 +274,7 @@ export function Table<T>({
           style={{
             tableLayout: "fixed",
             width: tableWidth,
-            minWidth: tableWidth,
+            minWidth: `${minTableWidth}px`,
           }}
         >
           <colgroup>

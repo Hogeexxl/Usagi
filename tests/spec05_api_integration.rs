@@ -1014,13 +1014,16 @@ async fn t_s01_001_gate_a_session_qualification_and_full_range_matrix() {
         .await,
     )
     .await;
-    assert_eq!(deep["total_items"], 1);
-    let row = &deep["items"][0];
+    assert_eq!(deep["total_items"], 0);
+    assert_eq!(deep["items"].as_array().unwrap().len(), 0);
+    let row = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["root_session_id"] == GATE_ROOT)
+        .expect("GATE_ROOT row");
     assert_eq!(row["root_session_id"], GATE_ROOT);
-    assert_eq!(
-        row["models_used"],
-        json!(["main-model-a", "main-model-b", "deep-model", "grand-model"])
-    );
+    assert_eq!(row["models_used"], json!(["main-model-a", "main-model-b"]));
     assert_eq!(row["self_usage"]["total_tokens"], 125);
     assert_eq!(row["subagent_usage"]["total_tokens"], 73);
     // The 2025 event in the rollout is outside the requested year range.
@@ -1224,7 +1227,7 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
         call(
             &app,
             Method::GET,
-            "/api/usage/sessions?range=year&model=deep-model",
+            "/api/usage/sessions?range=year&model=main-model-a",
             &[],
         )
         .await,
@@ -1238,7 +1241,7 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
             &app,
             Method::GET,
             &format!(
-                "/api/usage/session-rows?range=year&model=deep-model&expected_data_revision={revision}&root_session_id={GATE_ROOT}&root_session_id={GATE_ROOT}"
+                "/api/usage/session-rows?range=year&model=main-model-a&expected_data_revision={revision}&root_session_id={GATE_ROOT}&root_session_id={GATE_ROOT}"
             ),
             &[],
         )
@@ -1260,7 +1263,7 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
             &app,
             Method::GET,
             &format!(
-                "/api/usage/sessions/{GATE_ROOT}/detail?range=year&model=deep-model&expected_data_revision={revision}"
+                "/api/usage/sessions/{GATE_ROOT}/detail?range=year&model=main-model-a&expected_data_revision={revision}"
             ),
             &[],
         )
@@ -1347,7 +1350,7 @@ async fn t_s03_001_gate_a_batch_detail_revision_and_cursor_replacement_matrix() 
             &app,
             Method::GET,
             &format!(
-                "/api/usage/sessions/{GATE_ROOT}/detail?range=year&model=deep-model&expected_data_revision={revision}"
+                "/api/usage/sessions/{GATE_ROOT}/detail?range=year&expected_data_revision={revision}"
             ),
             &[],
         )

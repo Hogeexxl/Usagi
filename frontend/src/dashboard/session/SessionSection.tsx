@@ -4,7 +4,15 @@ import { SessionTableFooter } from "./SessionTableFooter";
 import type { SessionTableViewModel } from "./sessionTypes";
 import type { SessionDetailControllerViewModel } from "./useSessionDetailController";
 
-export function SessionSection({ view, detail }: { view: SessionTableViewModel; detail?: SessionDetailControllerViewModel }) {
+export function SessionSection({
+  view,
+  detail,
+  sourceDisplay,
+}: {
+  view: SessionTableViewModel;
+  detail?: SessionDetailControllerViewModel;
+  sourceDisplay?: (source: string) => string;
+}) {
   const refreshing = view.load_state === "refreshing";
   return (
     <section aria-labelledby="session-heading">
@@ -34,6 +42,7 @@ export function SessionSection({ view, detail }: { view: SessionTableViewModel; 
         sortBy={view.sort_by}
         sortOrder={view.sort_order}
         onSort={view.select_sort}
+        sourceDisplay={sourceDisplay}
       />
       {view.load_state === "error" ? <div className="mt-2 flex items-center gap-2 text-xs text-destructive" role="alert" aria-live="polite"><span>{view.error_code === "UPDATE_FAILED" || view.error_code === "REVISION_FAILED" ? "Session 记录更新失败" : "Session 记录加载失败"}</span><Button variant="ghost" size="sm" onClick={view.retry_load}>重试</Button></div> : null}
     </section>

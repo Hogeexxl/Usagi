@@ -243,6 +243,8 @@ pub struct MainSessionDetailDto {
     pub source: String,
     pub native_session_id: String,
     pub root_session_id: String,
+    pub project_name: Option<String>,
+    pub project_path: Option<String>,
     pub models_used: Vec<String>,
     pub model_usage: Vec<MainModelUsageDto>,
     pub self_usage: TokenUsageDto,
@@ -836,6 +838,13 @@ fn map_distribution_usage(
     })
 }
 
+fn validate_model_provider(provider: &str) -> Result<(), ApiError> {
+    match provider {
+        "openai" | "antigravity" | "route-models" => Ok(()),
+        _ => Err(ApiError::InternalError),
+    }
+}
+
 pub fn filter_options_response(
     snapshot: UsageSnapshot<FilterOptions>,
 ) -> Result<FilterOptionsResponse, ApiError> {
@@ -849,15 +858,14 @@ pub fn filter_options_response(
             display_name: source.display_name,
         })
         .collect();
-    let models = snapshot
-        .value
-        .models
-        .into_iter()
-        .map(|model| ModelFilterOptionDto {
+    let mut models = Vec::with_capacity(snapshot.value.models.len());
+    for model in snapshot.value.models {
+        validate_model_provider(&model.provider)?;
+        models.push(ModelFilterOptionDto {
             model: model.model,
             provider: model.provider,
-        })
-        .collect();
+        });
+    }
     let projects = snapshot
         .value
         .projects
@@ -870,6 +878,27 @@ pub fn filter_options_response(
         models,
         projects,
     })
+}
+
+pub(crate) fn registered_filter_options_response(
+    snapshot: UsageSnapshot<FilterOptions>,
+    registry: &crate::source::SourceRegistry,
+) -> Result<FilterOptionsResponse, ApiError> {
+    let mut response = filter_options_response(snapshot)?;
+    let mut descriptors: Vec<_> = registry.descriptors().cloned().collect();
+    descriptors.sort_by(|a, b| {
+        let order_a = crate::source::SourceRegistry::source_display_order(&a.id);
+        let order_b = crate::source::SourceRegistry::source_display_order(&b.id);
+        (order_a, &a.id).cmp(&(order_b, &b.id))
+    });
+    response.sources = descriptors
+        .into_iter()
+        .map(|descriptor| SourceFilterOptionDto {
+            source: descriptor.id.as_str().to_owned(),
+            display_name: descriptor.display_name.to_owned(),
+        })
+        .collect();
+    Ok(response)
 }
 
 pub fn session_snapshot_response(
@@ -918,7 +947,21 @@ pub fn session_detail_response(
     snapshot: SessionDetailSnapshot,
 ) -> Result<SessionDetailResponse, ApiError> {
     ensure_safe(snapshot.data_revision)?;
-    map_detail(range, snapshot.data_revision, snapshot.value)
+    map_detail(range, snapshot.data_revision, snapshot.value, None, None)
+}
+
+pub(crate) fn session_detail_with_project_response(
+    range: &ResolvedRange,
+    snapshot: UsageSnapshot<crate::usage::aggregate::SessionDetailWithProject>,
+) -> Result<SessionDetailResponse, ApiError> {
+    ensure_safe(snapshot.data_revision)?;
+    map_detail(
+        range,
+        snapshot.data_revision,
+        snapshot.value.detail,
+        snapshot.value.project_name,
+        snapshot.value.project_path,
+    )
 }
 
 fn map_session(row: SessionUsageRow) -> Result<SessionUsageDto, ApiError> {
@@ -995,6 +1038,8 @@ fn map_detail(
     range: &ResolvedRange,
     data_revision: i64,
     detail: SessionDetail,
+    project_name: Option<String>,
+    project_path: Option<String>,
 ) -> Result<SessionDetailResponse, ApiError> {
     ensure_safe(detail.last_activity_at_ms)?;
     ensure_safe(detail.main.subagent_count)?;
@@ -1045,6 +1090,8 @@ fn map_detail(
             source: main.source,
             native_session_id: main.native_session_id,
             root_session_id: main.root_session_id,
+            project_name,
+            project_path,
             models_used: main.models_used,
             model_usage: main_models,
             self_usage: map_totals(main.self_usage)?,

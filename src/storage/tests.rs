@@ -122,7 +122,7 @@ fn opens_nested_database_and_verifies_pragmas() {
     let root = TempDir::new();
     let ledger = Ledger::open(options(&root)).unwrap();
     assert!(ledger.database_path().exists());
-    assert_eq!(ledger.schema_version().unwrap(), 12);
+    assert_eq!(ledger.schema_version().unwrap(), 13);
     assert_eq!(
         ledger.pragma_state().unwrap(),
         PragmaState {
@@ -146,7 +146,7 @@ fn reopening_preserves_binding_and_schema() {
     let first = Ledger::open(opts.clone()).unwrap();
     drop(first);
     let second = Ledger::open(opts).unwrap();
-    assert_eq!(second.schema_version().unwrap(), 12);
+    assert_eq!(second.schema_version().unwrap(), 13);
     assert_eq!(second.app_state().unwrap().status_revision, 0);
 }
 
@@ -160,7 +160,7 @@ fn mismatched_home_is_readable_but_not_writable() {
     let changed = Ledger::open(LedgerOptions::new(&db)).unwrap();
     assert_eq!(codex_binding_status(&changed), CodexBindingStatus::Unbound);
     assert_eq!(changed.app_state().unwrap().status_revision, 0);
-    assert_eq!(changed.schema_version().unwrap(), 12);
+    assert_eq!(changed.schema_version().unwrap(), 13);
     drop(changed);
 
     // Reopening with the original source remains readable, while explicit
@@ -236,7 +236,7 @@ fn newer_schema_is_rejected_without_deleting_database() {
     let before = fs::read(&db).unwrap();
     let error = Ledger::open(LedgerOptions::new(&db)).unwrap_err();
     assert_eq!(error.kind(), StorageErrorKind::SchemaTooNew);
-    assert_eq!(error.schema_versions(), Some((99, 12)));
+    assert_eq!(error.schema_versions(), Some((99, 13)));
     assert_eq!(fs::read(&db).unwrap(), before);
 }
 
@@ -666,7 +666,7 @@ fn t_q08_cost_repricing_revision_matrix() {
         rows,
         vec![
             ("codex".to_owned(), Some(4_380_000)),
-            ("fake-source".to_owned(), Some(229_000)),
+            ("fake-source".to_owned(), None),
         ]
     );
     assert_eq!(

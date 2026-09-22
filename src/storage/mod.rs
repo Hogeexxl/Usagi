@@ -22,7 +22,7 @@ mod lifecycle;
 mod migrations;
 
 #[cfg(test)]
-pub(crate) use migrations::seed_v11_binding_rows;
+pub(crate) use migrations::{migrate, seed_v11_binding_rows};
 
 pub use crate::domain::AppState;
 
@@ -49,6 +49,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "codex_usage_session_quarantine",
     "codex_usage_session_quarantine_sources",
     "codex_skill_usage_events",
+    "antigravity_conversation_state",
+    "antigravity_usage_quarantine",
 ];
 
 /// Stable, opaque categories suitable for API error mapping.
@@ -851,6 +853,279 @@ pub(crate) fn validate_schema(connection: &Connection, db_path: &Path) -> rusqli
         require_check_fragment(connection, "source_scan_runs", check)?;
     }
 
+    // v13 Antigravity private storage validation
+    require_columns(
+        connection,
+        "antigravity_conversation_state",
+        &[
+            "conversation_id",
+            "observed_gen_max_idx",
+            "observed_step_max_idx",
+            "last_scanned_at_ms",
+        ],
+    )?;
+    require_not_null_columns(
+        connection,
+        "antigravity_conversation_state",
+        &[
+            "observed_gen_max_idx",
+            "observed_step_max_idx",
+            "last_scanned_at_ms",
+        ],
+    )?;
+    require_primary_key(
+        connection,
+        "antigravity_conversation_state",
+        &["conversation_id"],
+    )?;
+    require_non_empty_check(
+        connection,
+        "antigravity_conversation_state",
+        "conversation_id",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_conversation_state",
+        "observed_gen_max_idx>=-1",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_conversation_state",
+        "observed_step_max_idx>=-1",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_conversation_state",
+        "last_scanned_at_ms>=0",
+    )?;
+
+    require_columns(
+        connection,
+        "antigravity_usage_quarantine",
+        &[
+            "conversation_id",
+            "payload_digest",
+            "gen_idx",
+            "response_id",
+            "reason_code",
+            "first_seen_at_ms",
+            "last_seen_at_ms",
+        ],
+    )?;
+    require_not_null_columns(
+        connection,
+        "antigravity_usage_quarantine",
+        &[
+            "conversation_id",
+            "payload_digest",
+            "reason_code",
+            "first_seen_at_ms",
+            "last_seen_at_ms",
+        ],
+    )?;
+    require_primary_key(
+        connection,
+        "antigravity_usage_quarantine",
+        &["conversation_id", "payload_digest", "reason_code"],
+    )?;
+    require_foreign_key_with_action(
+        connection,
+        "antigravity_usage_quarantine",
+        "antigravity_conversation_state",
+        &[("conversation_id", "conversation_id")],
+        "CASCADE",
+        "NO ACTION",
+    )?;
+    require_non_empty_check(
+        connection,
+        "antigravity_usage_quarantine",
+        "conversation_id",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_usage_quarantine",
+        "length(payload_digest)=64",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_usage_quarantine",
+        "payload_digestnotglob'*[^0-9a-f]*'",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_usage_quarantine",
+        "gen_idxisnullorgen_idx>=0",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_usage_quarantine",
+        "first_seen_at_ms>=0",
+    )?;
+    require_check_fragment(
+        connection,
+        "antigravity_usage_quarantine",
+        "last_seen_at_ms>=first_seen_at_ms",
+    )?;
+    require_check_fragment(connection, "antigravity_usage_quarantine", "reason_codein(")?;
+    for reason in [
+        "'gen_metadata_malformed'",
+        "'usage_response_id_missing'",
+        "'usage_response_id_invalid'",
+        "'usage_response_id_conflict'",
+        "'usage_model_missing'",
+        "'usage_model_invalid'",
+        "'usage_step_not_found'",
+        "'usage_step_not_unique'",
+        "'usage_step_kind_mismatch'",
+        "'usage_step_metadata_invalid'",
+        "'usage_timestamp_invalid'",
+        "'usage_token_invalid'",
+        "'usage_event_mutation_conflict'",
+    ] {
+        require_check_fragment(connection, "antigravity_usage_quarantine", reason)?;
+    }
+
+    require_index(
+        connection,
+        "antigravity_usage_quarantine",
+        "antigravity_usage_quarantine_reason_seen_idx",
+        &["reason_code", "last_seen_at_ms"],
+        false,
+    )?;
+
+    require_no_triggers_on(
+        connection,
+        &[
+            "antigravity_conversation_state",
+            "antigravity_usage_quarantine",
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn require_columns(connection: &Connection, table: &str, columns: &[&str]) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info('{table}')"))?;
+    let found = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    for column in columns {
+        if !found.contains(*column) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "required column {table}.{column} is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_index(
+    connection: &Connection,
+    table: &str,
+    index_name: &str,
+    expected_columns: &[&str],
+    unique: bool,
+) -> rusqlite::Result<()> {
+    let mut indexes = connection.prepare(&format!("PRAGMA index_list('{table}')"))?;
+    let index_rows = indexes.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+    })?;
+    for index_row in index_rows {
+        let (name, is_unique) = index_row?;
+        if name == index_name {
+            if is_unique != unique {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "index {index_name} uniqueness mismatch: expected {unique}, got {is_unique}"
+                )));
+            }
+            let mut info = connection.prepare(&format!("PRAGMA index_info('{index_name}')"))?;
+            let columns = info
+                .query_map([], |row| row.get::<_, String>(2))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let expected_vec: Vec<String> = expected_columns
+                .iter()
+                .map(|col| (*col).to_owned())
+                .collect();
+            if columns != expected_vec {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "index {index_name} columns do not match expected column order"
+                )));
+            }
+            return Ok(());
+        }
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "required index {index_name} on {table} is missing"
+    )))
+}
+
+fn require_foreign_key_with_action(
+    connection: &Connection,
+    table: &str,
+    parent: &str,
+    expected: &[(&str, &str)],
+    on_delete: &str,
+    on_update: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list('{table}')"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids = rows
+        .iter()
+        .filter(|(_, table_name, _, _, upd, del)| {
+            table_name == parent
+                && upd.eq_ignore_ascii_case(on_update)
+                && del.eq_ignore_ascii_case(on_delete)
+        })
+        .map(|(id, _, _, _, _, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.iter().any(|id| {
+        expected.iter().all(|(from, to)| {
+            rows.iter()
+                .any(|(row_id, table_name, row_from, row_to, _, _)| {
+                    row_id == id && table_name == parent && row_from == from && row_to == to
+                })
+        })
+    }) {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "{table} is missing required foreign key to {parent} (ON DELETE {on_delete})"
+    )))
+}
+
+fn require_no_triggers_on(connection: &Connection, tables: &[&str]) -> rusqlite::Result<()> {
+    for table in tables {
+        let count: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name=?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        if count > 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "table {table} must not have triggers defined"
+            )));
+        }
+    }
+    let count_name: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'antigravity%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if count_name > 0 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "unexpected antigravity trigger found".to_owned(),
+        ));
+    }
     Ok(())
 }
 

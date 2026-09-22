@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
 import { createRevisionFeed, type RevisionFeed } from "../data/revisionFeed";
 import type { ServiceClient } from "../data/serviceClient";
@@ -14,6 +14,7 @@ import { RangeSelector } from "./RangeSelector";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "./scope";
 import { ServiceButton } from "./ServiceButton";
 import { SessionSection } from "./session/SessionSection";
+import { createSourceDisplayLookup } from "./shared/sourceDisplay";
 import { useSessionDetailController } from "./session/useSessionDetailController";
 import { useSessionTableController } from "./session/useSessionTableController";
 import { SyncButton } from "./SyncButton";
@@ -59,6 +60,10 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
     onStaleRevision: sessions.retry_load,
   });
   const charts = useDashboardChartsController({ range: view.range, filters: view.filters, dataRevision: view.data_revision, client: options?.client });
+  const sourceDisplay = useMemo(
+    () => createSourceDisplayLookup(view.filter_options?.sources),
+    [view.filter_options?.sources],
+  );
   useEffect(() => () => feedRef.current?.dispose(), []);
 
   const loading = view.load_state === "loading";
@@ -124,14 +129,14 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
             <MetricGrid usage={view.metrics} modelFilterActive={view.modelFilterActive} quota={quota} />
           </section>
-          <SessionSection view={sessions} detail={detail} />
+          <SessionSection view={sessions} detail={detail} sourceDisplay={sourceDisplay} />
           <ChartSection view={charts} />
         </div>
         <div className="sr-only" aria-live="polite">{loading ? "数据加载中…" : loadError ?? refreshError}</div>
       </main>
       {detail.open || detail.selected_row ? (
         <Suspense fallback={null}>
-          <LazySessionDetailDrawer view={detail} timezone={sessions.timezone} />
+          <LazySessionDetailDrawer view={detail} timezone={sessions.timezone} sourceDisplay={sourceDisplay} />
         </Suspense>
       ) : null}
     </div>

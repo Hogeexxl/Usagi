@@ -1714,39 +1714,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "usagi"
-version = "0.2.6"
-dependencies = [
- "axum",
- "base64",
- "blake3",
- "chrono",
- "chrono-tz",
- "directories",
- "form_urlencoded",
- "futures-util",
- "iana-time-zone",
- "image",
- "mime_guess",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tao",
- "tokio",
- "tower",
- "tower-http",
- "tray-icon",
- "uuid",
- "webbrowser",
- "windows-sys 0.61.2",
- "wry",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3369,6 +3336,40 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "usagi"
+version = "0.2.6"
+dependencies = [
+ "axum",
+ "base64",
+ "blake3",
+ "chrono",
+ "chrono-tz",
+ "directories",
+ "form_urlencoded",
+ "futures-util",
+ "iana-time-zone",
+ "image",
+ "mime_guess",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tao",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tray-icon",
+ "url",
+ "uuid",
+ "webbrowser",
+ "windows-sys 0.61.2",
+ "wry",
 ]
 
 [[package]]

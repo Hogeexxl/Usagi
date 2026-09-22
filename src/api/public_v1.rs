@@ -316,6 +316,48 @@ fn parse_summary_params(raw_query: Option<&str>) -> Result<SummaryParams, ApiErr
     Ok(params)
 }
 
+pub(crate) fn apply_legacy_public_projection(
+    mut summary: crate::usage::aggregate::UsageSummary,
+    legacy: crate::usage::aggregate::LegacyPublicUsageProjection,
+) -> Result<crate::usage::aggregate::UsageSummary, ApiError> {
+    let canonical_session_count = legacy.canonical_session_count;
+    let canonical_cost_incomplete = legacy.canonical_cost_incomplete_root_count;
+    let sidecar_error_count = legacy.sidecar_error_root_count;
+
+    query::ensure_safe(canonical_session_count)?;
+    query::ensure_safe(canonical_cost_incomplete)?;
+    query::ensure_safe(sidecar_error_count)?;
+
+    let complete_sessions = canonical_session_count
+        .checked_sub(canonical_cost_incomplete)
+        .ok_or(ApiError::QueryOverflow)?;
+    query::ensure_safe(complete_sessions)?;
+
+    let incomplete_sessions = canonical_cost_incomplete;
+    let error_sessions = sidecar_error_count;
+
+    let total_sessions = canonical_session_count
+        .checked_add(sidecar_error_count)
+        .ok_or(ApiError::QueryOverflow)?;
+    query::ensure_safe(total_sessions)?;
+
+    let cost_incomplete_session_count = canonical_cost_incomplete
+        .checked_add(sidecar_error_count)
+        .ok_or(ApiError::QueryOverflow)?;
+    query::ensure_safe(cost_incomplete_session_count)?;
+
+    summary.session_count = canonical_session_count;
+    summary.cost_incomplete_session_count = cost_incomplete_session_count;
+    summary.complete_session_cost_per_million_tokens =
+        legacy.canonical_complete_session_cost_per_million_tokens;
+    summary.health.total_sessions = total_sessions;
+    summary.health.complete_sessions = complete_sessions;
+    summary.health.incomplete_sessions = incomplete_sessions;
+    summary.health.error_sessions = error_sessions;
+
+    Ok(summary)
+}
+
 async fn summary(
     State(state): State<ApiState>,
     RawQuery(raw_query): RawQuery,
@@ -336,11 +378,17 @@ async fn summary(
     let snapshot = run_blocking_query(move || {
         let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
             [codex_sidecar.as_ref()];
-        UsageLedger::new(&ledger, &sidecars).summary_snapshot(summary_query)
+        UsageLedger::new(&ledger, &sidecars).summary_snapshot_with_legacy(summary_query)
     })
     .await?
     .map_err(query::map_usage_ledger_error)?;
-    let response = query::summary_response(&range, snapshot)?;
+    let compat_summary =
+        apply_legacy_public_projection(snapshot.value.summary, snapshot.value.legacy_public)?;
+    let compat_snapshot = crate::usage::ledger::UsageSnapshot {
+        data_revision: snapshot.data_revision,
+        value: compat_summary,
+    };
+    let response = query::summary_response(&range, compat_snapshot)?;
     Ok(Json(response.into()))
 }
 

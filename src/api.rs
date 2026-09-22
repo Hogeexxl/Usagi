@@ -363,7 +363,7 @@ async fn session_detail(
     let snapshot = run_blocking_query(move || {
         let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
             [codex_sidecar.as_ref()];
-        UsageLedger::new(&ledger, &sidecars).session_detail_snapshot(
+        UsageLedger::new(&ledger, &sidecars).session_detail_with_project_snapshot(
             aggregate_range,
             params.filter,
             params.expected_data_revision,
@@ -372,7 +372,9 @@ async fn session_detail(
     })
     .await?
     .map_err(query::map_usage_ledger_error)?;
-    Ok(Json(query::session_detail_response(&range, snapshot)?))
+    Ok(Json(query::session_detail_with_project_response(
+        &range, snapshot,
+    )?))
 }
 
 async fn models(
@@ -487,14 +489,8 @@ async fn filter_options(
     })
     .await?
     .map_err(query::map_usage_ledger_error)?;
-    let mut response = query::filter_options_response(snapshot)?;
-    for option in &mut response.sources {
-        if let Ok(source) = SourceId::new(option.source.clone())
-            && let Some(descriptor) = state.context.source_registry.get(&source)
-        {
-            option.display_name = descriptor.descriptor().display_name.to_owned();
-        }
-    }
+    let response =
+        query::registered_filter_options_response(snapshot, &state.context.source_registry)?;
     Ok(Json(response))
 }
 

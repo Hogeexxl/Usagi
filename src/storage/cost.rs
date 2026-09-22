@@ -65,34 +65,40 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
     )?;
     let mut rows = statement.query([])?;
     let mut updates = Vec::new();
+    use crate::source::SourceId;
     while let Some(row) = rows.next()? {
-        let event_kind: String = row.get(3)?;
-        let granularity = match event_kind.as_str() {
-            "normal" | "recovered" => UsageCostGranularity::RequestScoped,
-            "turn_compensation" => UsageCostGranularity::AggregateCompensation,
-            _ => return Err(StorageError::invalid_state("invalid usage event kind")),
+        let source: String = row.get(0)?;
+        let estimated_cost = if source == SourceId::CODEX.as_str() {
+            let event_kind: String = row.get(3)?;
+            let granularity = match event_kind.as_str() {
+                "normal" | "recovered" => UsageCostGranularity::RequestScoped,
+                "turn_compensation" => UsageCostGranularity::AggregateCompensation,
+                _ => return Err(StorageError::invalid_state("invalid usage event kind")),
+            };
+            let usage = NormalizedTokenUsage::new(
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+            )
+            .map_err(|_| StorageError::invalid_state("invalid canonical usage row"))?;
+            let model: String = row.get(5)?;
+            let occurred_at_ms: i64 = row.get(4)?;
+            estimate_event_cost(
+                &repository,
+                &estimator,
+                &model,
+                occurred_at_ms,
+                granularity,
+                &usage,
+            )?
+        } else {
+            None
         };
-        let usage = NormalizedTokenUsage::new(
-            row.get(6)?,
-            row.get(7)?,
-            row.get(8)?,
-            row.get(9)?,
-            row.get(10)?,
-            row.get(11)?,
-        )
-        .map_err(|_| StorageError::invalid_state("invalid canonical usage row"))?;
-        let model: String = row.get(5)?;
-        let occurred_at_ms: i64 = row.get(4)?;
-        let estimated_cost = estimate_event_cost(
-            &repository,
-            &estimator,
-            &model,
-            occurred_at_ms,
-            granularity,
-            &usage,
-        )?;
         updates.push((
-            row.get::<_, String>(0)?,
+            source,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
             estimated_cost,
@@ -149,4 +155,96 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
     }
     transaction.commit()?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::migrations::migrate;
+
+    #[test]
+    fn td_p4_cost_source_01_antigravity_cost_is_none_and_historical_cleared() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate(&mut conn, 0).unwrap();
+
+        conn.execute(
+            "INSERT INTO source_usage_epochs(source, active_epoch, build_epoch, active_parser_version, build_parser_version)
+             VALUES ('antigravity', 1, NULL, 1, NULL)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO threads(thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role, project_kind, archived, metadata_quality_status, metadata_resolved_at_ms)
+             VALUES ('codex:1', 'codex', '1', NULL, 'codex:1', 'main', 'project', 0, 'complete', 100)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads(thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role, project_kind, archived, metadata_quality_status, metadata_resolved_at_ms)
+             VALUES ('antigravity:1', 'antigravity', '1', NULL, 'antigravity:1', 'main', 'project', 0, 'complete', 100)",
+            [],
+        ).unwrap();
+
+        // Codex event: model='gpt-5.6-sol', estimated_cost_nanos_usd=NULL
+        conn.execute(
+            "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
+             VALUES ('codex', 1, 'ev-codex', 'normal', 100, 'codex:1', 'codex:1', 'gpt-5.6-sol', 1000, 0, 500, 0, 1500, 'complete', 100, NULL)",
+            [],
+        ).unwrap();
+
+        // Antigravity event: model='gpt-5.6-sol', historical non-NULL cost
+        conn.execute(
+            "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
+             VALUES ('antigravity', 1, 'ev-antigravity', 'normal', 100, 'antigravity:1', 'antigravity:1', 'gpt-5.6-sol', 1000, 0, 500, 0, 1500, 'partial', 100, 999999)",
+            [],
+        ).unwrap();
+
+        // Deliberately set cost_algorithm_version / pricing_catalog_version to stale
+        conn.execute(
+            "UPDATE app_meta SET cost_algorithm_version=0, pricing_catalog_version=0 WHERE id=1",
+            [],
+        )
+        .unwrap();
+
+        let initial_rev: i64 = conn
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        // Trigger refresh
+        let refreshed = refresh_usage_costs_if_needed(&mut conn).unwrap();
+        assert!(refreshed, "refresh should have occurred");
+
+        // Check Codex event has cost computed
+        let codex_cost: Option<i64> = conn.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='codex' AND event_id='ev-codex'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(codex_cost.is_some(), "Codex event must have computed cost");
+
+        // Check Antigravity event cost was cleared to NULL
+        let antigravity_cost: Option<i64> = conn.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='antigravity' AND event_id='ev-antigravity'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            antigravity_cost, None,
+            "Antigravity event cost must be NULL"
+        );
+
+        // Revision should have bumped because active costs changed
+        let new_rev: i64 = conn
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            new_rev,
+            initial_rev + 1,
+            "active cost changes must bump data_revision"
+        );
+    }
 }

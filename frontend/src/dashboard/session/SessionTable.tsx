@@ -21,6 +21,7 @@ type SessionTableProps = {
   sortBy: SessionSortField;
   sortOrder: SessionSortOrder;
   onSort: (sortBy: SessionSortField) => void;
+  sourceDisplay?: (source: string) => string;
 };
 
 const TABLE_ROW_HEIGHT = 48;
@@ -47,6 +48,7 @@ export function SessionTable({
   sortBy,
   sortOrder,
   onSort,
+  sourceDisplay,
 }: SessionTableProps) {
   const loading =
     loadState === "initial" ||
@@ -68,6 +70,15 @@ export function SessionTable({
       cell: (item) => {
         const value = formatSessionTime(item.last_activity_at_ms, timezone);
         return <span className="block truncate" title={value.title}>{value.text}</span>;
+      },
+    },
+    {
+      key: "source",
+      header: "终端",
+      width: "98pt",
+      cell: (item) => {
+        const name = sourceDisplay ? sourceDisplay(item.source) : item.source;
+        return <span className="block truncate" title={name}>{name}</span>;
       },
     },
     {
@@ -106,7 +117,7 @@ export function SessionTable({
     {
       key: "model",
       header: "模型",
-      width: "168px",
+      width: "140pt",
       sortable: true,
       cell: (item) => {
         const model = formatSessionModel(item.models_used);
@@ -133,7 +144,7 @@ export function SessionTable({
     {
       key: "cache_hit_rate",
       header: "缓存命中率",
-      width: "150px",
+      width: "80pt",
       sortable: true,
       align: "right",
       cell: (item) => item.inclusive_usage

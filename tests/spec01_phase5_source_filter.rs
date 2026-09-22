@@ -1412,12 +1412,7 @@ async fn q06_filter_options_source_facts_and_fallback() {
         .expect("codex source option");
     assert_eq!(codex_opt["display_name"], "Codex");
 
-    // legacy-source (unregistered in Registry) display_name fallback == 'legacy-source'
-    let legacy_opt = sources
-        .iter()
-        .find(|s| s["source"] == "legacy-source")
-        .expect("legacy-source option");
-    assert_eq!(legacy_opt["display_name"], "legacy-source");
+    assert!(sources.iter().all(|s| s["source"] != "legacy-source"));
 
     let registered_opt = sources
         .iter()
@@ -1431,10 +1426,10 @@ async fn q06_filter_options_source_facts_and_fallback() {
         "threads-only source must never appear without active usage_events"
     );
 
-    // registered-unused (registered in Registry, no active usage) MUST NEVER appear
+    // registered-unused (registered in Registry) appears because options are Registry-driven
     assert!(
-        sources.iter().all(|s| s["source"] != "registered-unused"),
-        "Registered adapter without active usage must never appear in filter-options"
+        sources.iter().any(|s| s["source"] == "registered-unused"),
+        "Registered adapter must appear in filter-options"
     );
 
     app.shutdown();

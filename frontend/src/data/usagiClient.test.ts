@@ -174,6 +174,7 @@ describe("usagiClient DTO seam", () => {
           ],
           models: [
             { model: "gpt-5.6-sol", provider: "openai" },
+            { model: "gemini-2.5-flash", provider: "antigravity" },
             { model: "gpt-5.6", provider: "route-models" },
           ],
           projects: [
@@ -193,6 +194,7 @@ describe("usagiClient DTO seam", () => {
       ],
       models: [
         { model: "gpt-5.6-sol", provider: "openai" },
+        { model: "gemini-2.5-flash", provider: "antigravity" },
         { model: "gpt-5.6", provider: "route-models" },
       ],
       projects: [
@@ -465,6 +467,8 @@ describe("usagiClient DTO seam", () => {
           source: "codex",
           native_session_id: "root-1",
           title: "A session",
+          project_name: "Usagi",
+          project_path: "/workspace/usagi",
           thread_id: "root-1",
           root_session_id: "root-1",
           models_used: ["gpt-5"],
@@ -500,7 +504,15 @@ describe("usagiClient DTO seam", () => {
       source: "codex",
       native_session_id: "root-1",
       last_activity_at_ms: 1_700_000_000_000,
-      main: { source: "codex", native_session_id: "root-1", model_usage: [{ model: "gpt-5", reasoning_effort: "high" }], self_usage: sessionUsage, inclusive_usage: sessionUsage },
+      main: {
+        source: "codex",
+        native_session_id: "root-1",
+        project_name: "Usagi",
+        project_path: "/workspace/usagi",
+        model_usage: [{ model: "gpt-5", reasoning_effort: "high" }],
+        self_usage: sessionUsage,
+        inclusive_usage: sessionUsage,
+      },
       subagents: [{
         source: "codex",
         native_session_id: "child-1",
@@ -606,6 +618,8 @@ describe("usagiClient DTO seam", () => {
             source: "codex",
             native_session_id: "root-1",
             title: "A session",
+            project_name: null,
+            project_path: null,
             thread_id: "root-1",
             root_session_id: "root-1",
             models_used: ["gpt-5"],
@@ -637,12 +651,90 @@ describe("usagiClient DTO seam", () => {
       usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1" }),
     ).resolves.toMatchObject({
       main: {
+        project_name: null,
+        project_path: null,
         model_usage: [{ usage: detailUsage }],
         self_usage: detailUsage,
         inclusive_usage: detailUsage,
       },
       subagents: [{ model_usage: [{ usage: detailUsage }] }],
     });
+  });
+
+  it("parses main.project_name and main.project_path, rejecting top-level fields", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    // Case 1: project_name and project_path inside main
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          range,
+          data_revision: 1,
+          source: "antigravity",
+          native_session_id: "root-ag",
+          root_session_id: "root-ag",
+          last_activity_at_ms: 100,
+          main: {
+            source: "antigravity",
+            native_session_id: "root-ag",
+            title: null,
+            project_name: "Antigravity Workspace",
+            project_path: "/home/user/project",
+            thread_id: "root-ag",
+            root_session_id: "root-ag",
+            models_used: ["model-ag"],
+            model_usage: [],
+            self_usage: sessionUsage,
+            subagent_count: 0,
+            inclusive_usage: sessionUsage,
+          },
+          subagents: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await usagiClient.getSessionDetail({
+      range: { key: "today" },
+      filters: emptyFilters,
+      root_session_id: "root-ag",
+    });
+    expect(result.main.project_name).toBe("Antigravity Workspace");
+    expect(result.main.project_path).toBe("/home/user/project");
+
+    // Case 2: top-level project_name is NOT read into main if missing from main
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          range,
+          data_revision: 1,
+          source: "antigravity",
+          native_session_id: "root-ag",
+          root_session_id: "root-ag",
+          last_activity_at_ms: 100,
+          project_name: "Top Level Name",
+          main: {
+            source: "antigravity",
+            native_session_id: "root-ag",
+            title: null,
+            thread_id: "root-ag",
+            root_session_id: "root-ag",
+            models_used: ["model-ag"],
+            model_usage: [],
+            self_usage: sessionUsage,
+            subagent_count: 0,
+            inclusive_usage: sessionUsage,
+          },
+          subagents: [],
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      usagiClient.getSessionDetail({
+        range: { key: "today" },
+        filters: emptyFilters,
+        root_session_id: "root-ag",
+      }),
+    ).rejects.toBeInstanceOf(UsagiClientError);
   });
 
 });

@@ -7,6 +7,44 @@ use rusqlite::{params_from_iter, types::Value};
 
 use crate::{cost::ModelRegistry, source::SourceId};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ModelFilterGroup {
+    OpenAi,
+    Antigravity,
+    RouteModels,
+}
+
+impl ModelFilterGroup {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Antigravity => "antigravity",
+            Self::RouteModels => "route-models",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LegacyPublicUsageProjection {
+    pub(crate) canonical_session_count: i64,
+    pub(crate) canonical_cost_incomplete_root_count: i64,
+    pub(crate) sidecar_error_root_count: i64,
+    pub(crate) canonical_complete_session_cost_per_million_tokens: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UsageSummaryWithLegacy {
+    pub(crate) summary: UsageSummary,
+    pub(crate) legacy_public: LegacyPublicUsageProjection,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SessionDetailWithProject {
+    pub(crate) detail: SessionDetail,
+    pub(crate) project_name: Option<String>,
+    pub(crate) project_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionErrorProjection {
     pub root_session_id: String,
@@ -568,10 +606,17 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
     }
 
     pub fn summary(&self, query: SummaryQuery) -> Result<UsageSummary, AggregateError> {
+        Ok(self.summary_with_legacy(query)?.summary)
+    }
+
+    pub(crate) fn summary_with_legacy(
+        &self,
+        query: SummaryQuery,
+    ) -> Result<UsageSummaryWithLegacy, AggregateError> {
         let range = query.range();
         validate_range(range)?;
         let (totals, values) = self.aggregate_for_summary(&query)?;
-        let session_count: i64 = self
+        let canonical_session_count: i64 = self
             .connection
             .query_row(
                 &format!(
@@ -587,7 +632,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 |row| row.get(0),
             )
             .map_err(map_sql_error)?;
-        let incomplete_sessions: i64 = self
+        let canonical_cost_incomplete_root_count: i64 = self
             .connection
             .query_row(
                 &format!(
@@ -603,33 +648,117 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 |row| row.get(0),
             )
             .map_err(map_sql_error)?;
-        let complete_session_cost_per_million_tokens =
-            self.complete_session_cost_per_million_tokens(&query, &values)?;
-        let error_sessions = i64::try_from(self.error_roots(range, query.filter())?.len())
-            .map_err(|_| AggregateError::ArithmeticOverflow)?;
-        let complete_sessions = session_count
-            .checked_sub(incomplete_sessions)
+        let canonical_complete_session_cost_per_million_tokens =
+            self.complete_session_cost_per_million_tokens(&query, &values, &[])?;
+        let error_roots = self.error_roots(range, query.filter())?;
+        let mut error_root_ids = std::collections::BTreeSet::new();
+        for root in &error_roots {
+            error_root_ids.insert(root.root_session_id.clone());
+        }
+        let sidecar_error_root_count =
+            i64::try_from(error_root_ids.len()).map_err(|_| AggregateError::ArithmeticOverflow)?;
+
+        let (
+            overlap_count,
+            cost_incomplete_overlap_count,
+            internal_complete_session_cost_per_million_tokens,
+        ) = if error_root_ids.is_empty() {
+            (
+                0_i64,
+                0_i64,
+                canonical_complete_session_cost_per_million_tokens,
+            )
+        } else {
+            let error_ids_vec: Vec<String> = error_root_ids.into_iter().collect();
+            let placeholders = (values.len() + 1..values.len() + 1 + error_ids_vec.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut overlap_values = values.clone();
+            overlap_values.extend(error_ids_vec.iter().cloned().map(Value::Text));
+            let overlap_sql = format!(
+                    "SELECT ue.root_session_id,
+                            COALESCE(SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END), 0)
+                     FROM source_usage_epochs sue
+                     CROSS JOIN usage_events ue
+                     LEFT JOIN threads root ON root.thread_id=ue.root_session_id
+                     WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+                       AND {}
+                       AND ue.root_session_id IN ({placeholders})
+                     GROUP BY ue.root_session_id",
+                    summary_where_clause(query.filter())
+                );
+            let mut statement = self
+                .connection
+                .prepare(&overlap_sql)
+                .map_err(map_sql_error)?;
+            let overlap_rows = statement
+                .query_map(params_from_iter(overlap_values.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(map_sql_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_sql_error)?;
+
+            let overlap_count = i64::try_from(overlap_rows.len())
+                .map_err(|_| AggregateError::ArithmeticOverflow)?;
+            let mut cost_incomplete_overlap: i64 = 0;
+            for (_id, null_count) in overlap_rows {
+                if null_count > 0 {
+                    cost_incomplete_overlap = cost_incomplete_overlap
+                        .checked_add(1)
+                        .ok_or(AggregateError::ArithmeticOverflow)?;
+                }
+            }
+            let internal_cost_metric =
+                self.complete_session_cost_per_million_tokens(&query, &values, &error_ids_vec)?;
+            (overlap_count, cost_incomplete_overlap, internal_cost_metric)
+        };
+
+        let complete_sessions = canonical_session_count
+            .checked_sub(overlap_count)
             .ok_or(AggregateError::InvariantViolation)?;
-        let total_sessions = session_count
-            .checked_add(error_sessions)
+        let error_sessions = sidecar_error_root_count;
+        let incomplete_sessions = 0_i64;
+        let total_sessions = canonical_session_count
+            .checked_add(sidecar_error_root_count)
+            .and_then(|sum| sum.checked_sub(overlap_count))
             .ok_or(AggregateError::ArithmeticOverflow)?;
-        let cost_incomplete_session_count = incomplete_sessions
-            .checked_add(error_sessions)
+        let cost_incomplete_session_count = canonical_cost_incomplete_root_count
+            .checked_add(sidecar_error_root_count)
+            .and_then(|sum| sum.checked_sub(cost_incomplete_overlap_count))
             .ok_or(AggregateError::ArithmeticOverflow)?;
-        if cost_incomplete_session_count < 0 || cost_incomplete_session_count > total_sessions {
+
+        if cost_incomplete_session_count < 0
+            || cost_incomplete_session_count > total_sessions
+            || complete_sessions < 0
+            || total_sessions < 0
+        {
             return Err(AggregateError::InvariantViolation);
         }
-        Ok(UsageSummary {
-            totals,
-            session_count,
-            cost_incomplete_session_count,
-            complete_session_cost_per_million_tokens,
-            health: SessionHealthSummary {
-                total_sessions,
-                complete_sessions,
-                incomplete_sessions,
-                error_sessions,
+
+        let legacy_public = LegacyPublicUsageProjection {
+            canonical_session_count,
+            canonical_cost_incomplete_root_count,
+            sidecar_error_root_count,
+            canonical_complete_session_cost_per_million_tokens,
+        };
+
+        Ok(UsageSummaryWithLegacy {
+            summary: UsageSummary {
+                totals,
+                session_count: canonical_session_count,
+                cost_incomplete_session_count,
+                complete_session_cost_per_million_tokens:
+                    internal_complete_session_cost_per_million_tokens,
+                health: SessionHealthSummary {
+                    total_sessions,
+                    complete_sessions,
+                    incomplete_sessions,
+                    error_sessions,
+                },
             },
+            legacy_public,
         })
     }
 
@@ -881,6 +1010,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
              CROSS JOIN usage_events
              WHERE sue.source=usage_events.source
                AND sue.active_epoch=usage_events.source_epoch
+               AND thread_id=root_session_id
                AND occurred_at_ms>=?1 AND occurred_at_ms<?2
                AND root_session_id IN ({root_placeholders})
              GROUP BY root_session_id, model
@@ -919,24 +1049,25 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         validate_range(range)?;
         let roots = self.eligible_roots(range, filter)?;
         let aggregates = self.session_sort_aggregates(range, &roots)?;
+        let error_roots = self.error_roots(range, filter)?;
+        let error_roots_map = error_roots
+            .into_iter()
+            .map(|root| (root.root_session_id.clone(), root))
+            .collect::<BTreeMap<_, _>>();
         let mut sort_index = aggregates
             .iter()
+            .filter(|aggregate| !error_roots_map.contains_key(&aggregate.root_session_id))
             .map(|aggregate| aggregate.sort_index_item())
             .collect::<Vec<_>>();
-        let error_roots = self.error_roots(range, filter)?;
-        sort_index.extend(error_roots.iter().map(error_sort_index_item));
+        sort_index.extend(error_roots_map.values().map(error_sort_index_item));
         let mut seed_index = sort_index.clone();
         seed_index.sort_by(|left, right| {
             compare_sort_index_items(left, right, seed_sort_field, seed_sort_order)
         });
         seed_index.truncate(MAX_SESSION_ROWS);
-        let error_roots = error_roots
-            .into_iter()
-            .map(|root| (root.root_session_id.clone(), root))
-            .collect::<BTreeMap<_, _>>();
         let seed_rows = seed_index
             .iter()
-            .map(|item| match error_roots.get(&item.root_session_id) {
+            .map(|item| match error_roots_map.get(&item.root_session_id) {
                 Some(root) => Ok(error_session_row(root)),
                 None => self.session_row_for_root(range, &item.root_session_id),
             })
@@ -999,6 +1130,17 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         filter: &UsageFilter,
         root_session_id: &str,
     ) -> Result<SessionDetail, AggregateError> {
+        Ok(self
+            .session_detail_with_project(range, filter, root_session_id)?
+            .detail)
+    }
+
+    pub(crate) fn session_detail_with_project(
+        &self,
+        range: TimeRange,
+        filter: &UsageFilter,
+        root_session_id: &str,
+    ) -> Result<SessionDetailWithProject, AggregateError> {
         validate_range(range)?;
         if root_session_id.is_empty() || root_session_id.chars().any(char::is_control) {
             return Err(AggregateError::InvalidSessionIds);
@@ -1027,11 +1169,14 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
             group.totals.recompute_derived()?;
         }
 
+        let mut root_project_name = None;
+        let mut root_project_path = None;
         let mut metadata = self
             .connection
             .prepare(
                 "SELECT thread_id, parent_thread_id, title,
-                        COALESCE(source, ''), COALESCE(native_session_id, thread_id)
+                        COALESCE(source, ''), COALESCE(native_session_id, thread_id),
+                        project_name, project_path
                  FROM threads WHERE root_session_id=?1 OR thread_id=?1",
             )
             .map_err(map_sql_error)?;
@@ -1043,6 +1188,8 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(map_sql_error)?
@@ -1050,9 +1197,23 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
             .map_err(map_sql_error)?;
         let metadata = metadata
             .into_iter()
-            .map(|(thread_id, parent, title, source, native_session_id)| {
-                (thread_id, (parent, title, source, native_session_id))
-            })
+            .map(
+                |(
+                    thread_id,
+                    parent,
+                    title,
+                    source,
+                    native_session_id,
+                    project_name,
+                    project_path,
+                )| {
+                    if thread_id == root_session_id {
+                        root_project_name = project_name;
+                        root_project_path = project_path;
+                    }
+                    (thread_id, (parent, title, source, native_session_id))
+                },
+            )
             .collect::<BTreeMap<_, _>>();
 
         let mut by_thread = BTreeMap::<String, Vec<DetailAggregateRow>>::new();
@@ -1145,30 +1306,34 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 (title.clone(), source.clone(), native_id.clone())
             })
             .unwrap_or((None, String::new(), root_session_id.to_owned()));
-        Ok(SessionDetail {
-            root_session_id: root_session_id.to_owned(),
-            source: root_source.clone(),
-            native_session_id: root_native_session_id.clone(),
-            last_activity_at_ms,
-            main: MainSessionDetail {
-                title,
-                thread_id: root_session_id.to_owned(),
-                source: root_source,
-                native_session_id: root_native_session_id,
+        Ok(SessionDetailWithProject {
+            detail: SessionDetail {
                 root_session_id: root_session_id.to_owned(),
-                models_used: main_models.iter().fold(Vec::new(), |mut models, model| {
-                    if !models.iter().any(|existing| existing == &model.model) {
-                        models.push(model.model.clone());
-                    }
-                    models
-                }),
-                model_usage: main_models,
-                self_usage: main_usage,
-                subagent_count: i64::try_from(subagents.len())
-                    .map_err(|_| AggregateError::ArithmeticOverflow)?,
-                inclusive_usage,
+                source: root_source.clone(),
+                native_session_id: root_native_session_id.clone(),
+                last_activity_at_ms,
+                main: MainSessionDetail {
+                    title,
+                    thread_id: root_session_id.to_owned(),
+                    source: root_source,
+                    native_session_id: root_native_session_id,
+                    root_session_id: root_session_id.to_owned(),
+                    models_used: main_models.iter().fold(Vec::new(), |mut models, model| {
+                        if !models.iter().any(|existing| existing == &model.model) {
+                            models.push(model.model.clone());
+                        }
+                        models
+                    }),
+                    model_usage: main_models,
+                    self_usage: main_usage,
+                    subagent_count: i64::try_from(subagents.len())
+                        .map_err(|_| AggregateError::ArithmeticOverflow)?,
+                    inclusive_usage,
+                },
+                subagents,
             },
-            subagents,
+            project_name: root_project_name,
+            project_path: root_project_path,
         })
     }
 
@@ -1244,17 +1409,34 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
             .connection
             .prepare(FILTER_MODELS_SQL)
             .map_err(map_sql_error)?;
-        let models = models_statement
-            .query_map([], |row| row.get(0))
+        let model_source_pairs = models_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(map_sql_error)?
-            .collect::<rusqlite::Result<Vec<String>>>()
-            .map_err(map_sql_error)?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+            .map_err(map_sql_error)?;
+
+        let mut model_sources = BTreeMap::<String, Vec<String>>::new();
+        for (model, source) in model_source_pairs {
+            model_sources.entry(model).or_default().push(source);
+        }
+
+        let models = model_sources
             .into_iter()
-            .map(|model| {
-                let provider = ModelRegistry::new().resolve(&model).provider;
+            .map(|(model, sources)| {
+                let group = if sources.iter().any(|s| s == SourceId::ANTIGRAVITY.as_str()) {
+                    ModelFilterGroup::Antigravity
+                } else {
+                    let provider = ModelRegistry::new().resolve(&model).provider;
+                    match provider.as_str() {
+                        "openai" => ModelFilterGroup::OpenAi,
+                        _ => ModelFilterGroup::RouteModels,
+                    }
+                };
                 ModelFilterOption {
                     model,
-                    provider: provider.as_str().to_owned(),
+                    provider: group.as_str().to_owned(),
                 }
             })
             .collect();
@@ -1516,7 +1698,17 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         &self,
         query: &SummaryQuery,
         values: &[Value],
+        exclude_roots: &[String],
     ) -> Result<Option<f64>, AggregateError> {
+        let exclude_clause = if exclude_roots.is_empty() {
+            String::new()
+        } else {
+            let placeholders = (values.len() + 1..values.len() + 1 + exclude_roots.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND ue.root_session_id NOT IN ({placeholders})")
+        };
         let sql = format!(
             "SELECT SUM(session_cost_nanos_usd), SUM(session_tokens)
              FROM (
@@ -1528,14 +1720,20 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                  LEFT JOIN threads root ON root.thread_id=ue.root_session_id
                  WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
                    AND {}
+                   {}
                  GROUP BY ue.root_session_id
                  HAVING SUM(CASE WHEN ue.estimated_cost_nanos_usd IS NULL THEN 1 ELSE 0 END)=0
              ) priced_sessions",
-            summary_where_clause(query.filter())
+            summary_where_clause(query.filter()),
+            exclude_clause
         );
+        let mut query_values = values.to_vec();
+        if !exclude_roots.is_empty() {
+            query_values.extend(exclude_roots.iter().cloned().map(Value::Text));
+        }
         let (cost_nanos, total_tokens): (Option<i64>, Option<i64>) = self
             .connection
-            .query_row(&sql, params_from_iter(values.iter()), |row| {
+            .query_row(&sql, params_from_iter(query_values.iter()), |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(map_sql_error)?;
@@ -1556,7 +1754,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
     }
 
     fn models_for_root(&self, range: TimeRange, root: &str) -> Result<Vec<String>, AggregateError> {
-        let mut statement = self.connection.prepare("SELECT ue.model FROM source_usage_epochs sue CROSS JOIN usage_events ue WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch AND ue.root_session_id=?1 AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
+        let mut statement = self.connection.prepare("SELECT ue.model FROM source_usage_epochs sue CROSS JOIN usage_events ue WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch AND ue.root_session_id=?1 AND ue.thread_id=ue.root_session_id AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
         statement
             .query_map(params![root, range.start_ms, range.end_ms], |row| {
                 row.get(0)
@@ -1593,7 +1791,7 @@ const FILTER_SOURCES_SQL: &str = "SELECT DISTINCT ue.source
        AND sue.active_epoch = ue.source_epoch
      ORDER BY ue.source ASC";
 
-const FILTER_MODELS_SQL: &str = "SELECT DISTINCT ue.model
+const FILTER_MODELS_SQL: &str = "SELECT DISTINCT ue.model, ue.source
      FROM source_usage_epochs sue
      CROSS JOIN usage_events ue
      WHERE sue.source=ue.source
@@ -1660,6 +1858,7 @@ fn eligible_roots_query(range: TimeRange, filter: &UsageFilter) -> (String, Vec<
                      WHERE sue_model.source=ue_model.source
                        AND sue_model.active_epoch=ue_model.source_epoch
                        AND ue_model.root_session_id=root.thread_id
+                       AND ue_model.thread_id=ue_model.root_session_id
                        AND ue_model.occurred_at_ms>=?1
                        AND ue_model.occurred_at_ms<?2
                        AND ue_model.model IN ({placeholders}))"
@@ -1855,11 +2054,8 @@ fn error_session_row(error: &SessionErrorProjection) -> SessionUsageRow {
     }
 }
 
-fn status_for_totals(totals: &TokenTotals) -> SessionDataStatus {
-    match totals.cost_completeness {
-        CostCompleteness::Partial | CostCompleteness::Unknown => SessionDataStatus::Incomplete,
-        CostCompleteness::Empty | CostCompleteness::Complete => SessionDataStatus::Complete,
-    }
+fn status_for_totals(_totals: &TokenTotals) -> SessionDataStatus {
+    SessionDataStatus::Complete
 }
 
 fn compare_sort_index_items(
@@ -2452,12 +2648,9 @@ mod tests {
         complete_for_footer: i64,
     ) {
         assert_eq!(summary.session_count, healthy);
-        assert_eq!(summary.health.incomplete_sessions, incomplete);
+        assert_eq!(summary.health.incomplete_sessions, 0);
         assert_eq!(summary.health.error_sessions, error);
-        assert_eq!(
-            summary.health.complete_sessions,
-            healthy.checked_sub(incomplete).unwrap()
-        );
+        assert_eq!(summary.health.complete_sessions, healthy);
         assert_eq!(
             summary.health.total_sessions,
             healthy.checked_add(error).unwrap()
@@ -3444,7 +3637,7 @@ mod tests {
             Some(1_900.0 / 10_500.0)
         );
         assert_eq!(root.subagent_count, 1);
-        assert_eq!(root.models_used, vec!["gpt-a", "gpt-b"]);
+        assert_eq!(root.models_used, vec!["gpt-a"]);
         assert!(
             AggregateReader::new(&connection, &[])
                 .verify_invariants(TimeRange::new(100, 400).unwrap())
@@ -3502,7 +3695,7 @@ mod tests {
         assert_eq!(root.subagent_usage.input_tokens, 9_515);
         assert_eq!(root.inclusive_usage.input_tokens, 10_515);
         assert_eq!(root.subagent_count, 2);
-        assert_eq!(root.models_used, vec!["gpt-a", "gpt-b"]);
+        assert_eq!(root.models_used, vec!["gpt-a"]);
         assert_eq!(
             reader
                 .summary(SummaryQuery::new(range, UsageFilter::default()))

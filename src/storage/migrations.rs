@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, Result, TransactionBehavior};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 12;
+pub const LATEST_SCHEMA_VERSION: u32 = 13;
 
 struct Migration {
     version: u32,
@@ -74,6 +74,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         sql: include_str!("schema/0012_codex_adapter_cutover.sql"),
         requires_foreign_keys_off: true,
+    },
+    Migration {
+        version: 13,
+        sql: include_str!("schema/0013_antigravity_adapter_state.sql"),
+        requires_foreign_keys_off: false,
     },
 ];
 
@@ -495,7 +500,7 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
         (TestDatabase(path), connection)
     }
 
@@ -1185,11 +1190,11 @@ mod tests {
             .unwrap();
         insert_v1_thread_and_source(&connection);
 
-        assert_eq!(migrate(&mut connection, 1).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 1).unwrap(), 13);
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let metadata: (i64, i64, i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
                 "SELECT data_revision,status_revision,active_epoch,build_epoch,
@@ -1277,7 +1282,7 @@ mod tests {
             .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 13);
         let kinds: Vec<(String, String, String)> = connection
             .prepare(
                 "SELECT project_kind,project_path,project_name FROM threads
@@ -1323,7 +1328,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(migrate(&mut connection, 12).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 13).unwrap(), 13);
     }
 
     #[test]
@@ -1459,11 +1464,11 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         for (table, required, forbidden) in [
             (
                 "usage_events",
@@ -1658,12 +1663,12 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 13);
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
 
         let revisions: (i64, i64) = connection
@@ -1958,7 +1963,7 @@ mod tests {
         ));
         let ledger =
             crate::storage::Ledger::open(crate::storage::LedgerOptions::new(&database.0)).unwrap();
-        assert_eq!(ledger.schema_version().unwrap(), 12);
+        assert_eq!(ledger.schema_version().unwrap(), 13);
         let app_state = ledger.app_state().unwrap();
         assert_eq!(app_state.data_revision, 8);
         assert_eq!(app_state.scan.status_revision, 9);
@@ -1992,7 +1997,7 @@ mod tests {
     fn t_dc_027_v2_rows_migrate_without_losing_canonical_values_or_occurrences() {
         let mut connection = v2_connection();
         add_v2_rows(&connection);
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 13);
         let known: (i64, i64, Option<i64>, i64, i64, i64) = connection
             .query_row(
                 "SELECT input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_events WHERE event_id='known'",
@@ -2099,7 +2104,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 13);
         let versions: (i64, i64) = connection.query_row("SELECT source_usage_epochs.active_parser_version,codex_usage_source_states.canonical_algorithm_version FROM source_usage_epochs JOIN codex_usage_source_states ON codex_usage_source_states.ledger_epoch=source_usage_epochs.active_epoch WHERE source_usage_epochs.source='codex'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(versions, (2, 2));
         assert_eq!(
@@ -2112,12 +2117,12 @@ mod tests {
     fn t_mu03_s01_v7_features_survive_v8_upgrade_idempotence_and_rollback() {
         let mut fresh = Connection::open_in_memory().unwrap();
         fresh.pragma_update(None, "foreign_keys", true).unwrap();
-        assert_eq!(migrate(&mut fresh, 0).unwrap(), 12);
+        assert_eq!(migrate(&mut fresh, 0).unwrap(), 13);
         assert_eq!(
             fresh
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
 
         for (table, required) in [
@@ -2230,7 +2235,7 @@ mod tests {
             .unwrap();
         assert!(usage_sql.contains("estimated_cost_nanos_usd"));
         assert!(usage_sql.contains("estimated_cost_nanos_usd IS NULL"));
-        assert_eq!(migrate(&mut fresh, 12).unwrap(), 12);
+        assert_eq!(migrate(&mut fresh, 13).unwrap(), 13);
 
         let mut upgraded = v5_connection_with_rows();
         let before: (i64, i64, i64, i64, i64) = upgraded
@@ -2253,12 +2258,12 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 12);
+        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 13);
         assert_eq!(
             upgraded
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         let after: (i64, i64, i64, i64, i64) = upgraded
             .query_row(
@@ -2281,7 +2286,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(before, after);
-        assert_eq!(migrate(&mut upgraded, 12).unwrap(), 12);
+        assert_eq!(migrate(&mut upgraded, 13).unwrap(), 13);
         let mut foreign_key_statement = upgraded.prepare("PRAGMA foreign_key_check").unwrap();
         let mut foreign_key_rows = foreign_key_statement.query([]).unwrap();
         let foreign_key_check = foreign_key_rows.next().unwrap();
@@ -2332,7 +2337,7 @@ mod tests {
         backfill
             .execute("DELETE FROM usage_event_occurrences", [])
             .unwrap();
-        assert_eq!(migrate(&mut backfill, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut backfill, 10).unwrap(), 13);
         let counts: (i64, i64) = backfill
             .query_row(
                 "SELECT
@@ -2393,7 +2398,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         type ThreadIdentityRow = (
             String,
             String,
@@ -2506,7 +2511,7 @@ mod tests {
             .unwrap();
         assert!(before.iter().any(|event| event.2.is_some()));
         drop(statement);
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         type UsageIdentityRow = (
             String,
             i64,
@@ -2610,7 +2615,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         let after: Vec<(String, i64, i64, i64, i64, i64, String)> = connection
             .prepare(
                 "SELECT source,ledger_epoch,source_file_id,file_generation,
@@ -2661,7 +2666,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         let epoch: (i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
                 "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
@@ -2682,7 +2687,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         let revisions: (i64, i64) = connection
             .query_row(
                 "SELECT data_revision,status_revision FROM app_meta WHERE id=1",
@@ -2747,7 +2752,7 @@ mod tests {
                 .unwrap()
         };
         let before = snapshot(&connection);
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         let after = snapshot(&connection);
         assert_eq!(after, before);
         for removed_column in [
@@ -2804,7 +2809,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
         let after: (i64, i64, i64, i64) = connection
             .query_row(
                 "SELECT usage_parser_version,canonical_algorithm_version,
@@ -2933,7 +2938,7 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 12);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
         crate::storage::validate_schema(&connection, std::path::Path::new(":memory:")).unwrap();
         let source_scan_runs_sql: String = connection
             .query_row(
@@ -3245,7 +3250,7 @@ mod tests {
         drop(connection);
 
         let ledger = Arc::new(Ledger::open(LedgerOptions::new(database.0.clone())).unwrap());
-        assert_eq!(ledger.schema_version().unwrap(), 12);
+        assert_eq!(ledger.schema_version().unwrap(), 13);
 
         let range = TimeRange::new(0, i64::MAX).unwrap();
         let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
@@ -3393,5 +3398,320 @@ mod tests {
             after_canonical, before_canonical,
             "successful production startup must preserve active canonical event identities and totals"
         );
+    }
+
+    #[test]
+    fn td_p2_migration_01_fresh_and_populated_v12_to_v13() {
+        // 1. Fresh DB -> v13
+        {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+            assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
+            let mut statement = connection.prepare("PRAGMA foreign_key_check").unwrap();
+            let mut rows = statement.query([]).unwrap();
+            assert!(
+                rows.next().unwrap().is_none(),
+                "fresh DB must pass foreign_key_check"
+            );
+            drop(rows);
+            drop(statement);
+            crate::storage::validate_schema(&connection, Path::new(":memory:")).unwrap();
+        }
+
+        // 2. Populated v12 -> v13
+        {
+            let mut connection = v10_connection_with_rows();
+            // Apply migrations 11 and 12 manually with FK off during table cutover
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            ensure_app_meta_v11_metadata_columns(&connection).unwrap();
+            connection
+                .execute_batch(include_str!("schema/0011_multi_source_core.sql"))
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", 11_i64)
+                .unwrap();
+            connection
+                .execute_batch(include_str!("schema/0012_codex_adapter_cutover.sql"))
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", 12_i64)
+                .unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+
+            // Snapshot canonical schema & data at v12
+            let canonical_tables = ["threads", "usage_events", "source_usage_epochs"];
+            let mut schemas_before = Vec::new();
+            for table in &canonical_tables {
+                let mut stmt = connection
+                    .prepare(&format!("PRAGMA table_info('{table}')"))
+                    .unwrap();
+                let columns: Vec<(i64, String, String, i64, Option<String>, i64)> = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                schemas_before.push((table.to_string(), columns));
+            }
+
+            let counts_before: (i64, i64, i64) = connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM threads), (SELECT count(*) FROM usage_events), (SELECT count(*) FROM source_usage_epochs)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+
+            // Run migration 12 -> 13
+            assert_eq!(migrate(&mut connection, 12).unwrap(), 13);
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                13
+            );
+
+            // Verify foreign_key_check passes
+            let mut statement = connection.prepare("PRAGMA foreign_key_check").unwrap();
+            let mut rows = statement.query([]).unwrap();
+            assert!(
+                rows.next().unwrap().is_none(),
+                "populated v12->v13 must pass foreign_key_check"
+            );
+            drop(rows);
+            drop(statement);
+
+            // Verify canonical schemas are completely unchanged
+            for (table, columns_before) in &schemas_before {
+                let mut stmt = connection
+                    .prepare(&format!("PRAGMA table_info('{table}')"))
+                    .unwrap();
+                let columns_after: Vec<(i64, String, String, i64, Option<String>, i64)> = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert_eq!(
+                    columns_before, &columns_after,
+                    "canonical table {table} schema changed after migration 13"
+                );
+            }
+
+            // Verify canonical row counts are unchanged
+            let counts_after: (i64, i64, i64) = connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM threads), (SELECT count(*) FROM usage_events), (SELECT count(*) FROM source_usage_epochs)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                counts_before, counts_after,
+                "canonical table row counts changed after migration 13"
+            );
+
+            // Verify new tables exist and pass validate_schema
+            crate::storage::validate_schema(&connection, Path::new(":memory:")).unwrap();
+        }
+    }
+
+    #[test]
+    fn td_p2_validate_01_schema_corruption_rejected() {
+        // Missing tables
+        assert_m07_rejected("antigravity_conversation_state missing table", |conn| {
+            conn.pragma_update(None, "foreign_keys", false).unwrap();
+            conn.execute("DROP TABLE antigravity_conversation_state", [])
+                .unwrap();
+        });
+        assert_m07_rejected("antigravity_usage_quarantine missing table", |conn| {
+            conn.pragma_update(None, "foreign_keys", false).unwrap();
+            conn.execute("DROP TABLE antigravity_usage_quarantine", [])
+                .unwrap();
+        });
+
+        // Missing columns
+        assert_m07_missing_column_rejected(
+            "antigravity_conversation_state observed_gen_max_idx missing",
+            "antigravity_conversation_state",
+            "observed_gen_max_idx",
+        );
+        assert_m07_missing_column_rejected(
+            "antigravity_usage_quarantine payload_digest missing",
+            "antigravity_usage_quarantine",
+            "payload_digest",
+        );
+        assert_m07_missing_column_rejected(
+            "antigravity_usage_quarantine reason_code missing",
+            "antigravity_usage_quarantine",
+            "reason_code",
+        );
+
+        // Damaged table definitions: PK, FK, CHECK
+        for (label, table, needle, replacement) in [
+            (
+                "conversation state PK",
+                "antigravity_conversation_state",
+                "conversation_id TEXT PRIMARY KEY",
+                "conversation_id TEXT",
+            ),
+            (
+                "conversation state empty check",
+                "antigravity_conversation_state",
+                "CHECK (length(conversation_id) > 0)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "conversation state gen idx check",
+                "antigravity_conversation_state",
+                "CHECK (observed_gen_max_idx >= -1)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "conversation state step idx check",
+                "antigravity_conversation_state",
+                "CHECK (observed_step_max_idx >= -1)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "conversation state scanned_at check",
+                "antigravity_conversation_state",
+                "CHECK (last_scanned_at_ms >= 0)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "quarantine PK",
+                "antigravity_usage_quarantine",
+                "PRIMARY KEY (conversation_id, payload_digest, reason_code)",
+                "PRIMARY KEY (conversation_id, payload_digest)",
+            ),
+            (
+                "quarantine FK missing cascade",
+                "antigravity_usage_quarantine",
+                "ON DELETE CASCADE",
+                "ON DELETE SET NULL",
+            ),
+            (
+                "quarantine FK wrong parent",
+                "antigravity_usage_quarantine",
+                "REFERENCES antigravity_conversation_state(conversation_id)",
+                "REFERENCES threads(thread_id)",
+            ),
+            (
+                "quarantine empty conversation_id check",
+                "antigravity_usage_quarantine",
+                "CHECK (length(conversation_id) > 0)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "quarantine digest length check",
+                "antigravity_usage_quarantine",
+                "length(payload_digest) = 64",
+                "length(payload_digest) > 0",
+            ),
+            (
+                "quarantine digest hex check",
+                "antigravity_usage_quarantine",
+                "payload_digest NOT GLOB '*[^0-9a-f]*'",
+                "1 = 1",
+            ),
+            (
+                "quarantine gen_idx check",
+                "antigravity_usage_quarantine",
+                "CHECK (gen_idx IS NULL OR gen_idx >= 0)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "quarantine first seen check",
+                "antigravity_usage_quarantine",
+                "CHECK (first_seen_at_ms >= 0)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "quarantine seen order check",
+                "antigravity_usage_quarantine",
+                "CHECK (last_seen_at_ms >= first_seen_at_ms)",
+                "CHECK (1 = 1)",
+            ),
+            (
+                "quarantine reason code missing mutation conflict",
+                "antigravity_usage_quarantine",
+                "'USAGE_EVENT_MUTATION_CONFLICT'",
+                "'UNKNOWN_REASON_CODE'",
+            ),
+        ] {
+            assert_m07_damage_rejected(label, table, needle, replacement);
+        }
+
+        // Damaged index
+        assert_m07_rejected("quarantine missing index", |conn| {
+            conn.execute(
+                "DROP INDEX antigravity_usage_quarantine_reason_seen_idx",
+                [],
+            )
+            .unwrap();
+        });
+        assert_m07_rejected("quarantine unique index", |conn| {
+            conn.execute(
+                "DROP INDEX antigravity_usage_quarantine_reason_seen_idx",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE UNIQUE INDEX antigravity_usage_quarantine_reason_seen_idx ON antigravity_usage_quarantine (reason_code, last_seen_at_ms)",
+                [],
+            )
+            .unwrap();
+        });
+        assert_m07_rejected("quarantine reversed index columns", |conn| {
+            conn.execute(
+                "DROP INDEX antigravity_usage_quarantine_reason_seen_idx",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE INDEX antigravity_usage_quarantine_reason_seen_idx ON antigravity_usage_quarantine (last_seen_at_ms, reason_code)",
+                [],
+            )
+            .unwrap();
+        });
+
+        // Trigger presence rejected
+        assert_m07_rejected("conversation state trigger present", |conn| {
+            conn.execute(
+                "CREATE TRIGGER trg_test_conv AFTER INSERT ON antigravity_conversation_state BEGIN SELECT 1; END;",
+                [],
+            )
+            .unwrap();
+        });
+        assert_m07_rejected("quarantine trigger present", |conn| {
+            conn.execute(
+                "CREATE TRIGGER trg_test_quar AFTER INSERT ON antigravity_usage_quarantine BEGIN SELECT 1; END;",
+                [],
+            )
+            .unwrap();
+        });
     }
 }

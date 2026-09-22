@@ -1,5 +1,10 @@
+pub mod antigravity;
 pub mod api;
 pub mod codex;
+
+pub use antigravity::{
+    AntigravityAdapter, AntigravityConfig, AntigravityConfigError, AntigravityConfigResolution,
+};
 pub(crate) mod cost;
 pub mod domain;
 pub mod ingestion;

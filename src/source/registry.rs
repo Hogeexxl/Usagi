@@ -89,6 +89,18 @@ impl SourceRegistry {
         }
     }
 
+    /// Return the display order of a source for UI / presentation purposes.
+    /// Codex is 10, Antigravity is 20, all others are u16::MAX.
+    pub(crate) fn source_display_order(source: &SourceId) -> u16 {
+        if source == &SourceId::CODEX {
+            10
+        } else if source == &SourceId::ANTIGRAVITY {
+            20
+        } else {
+            u16::MAX
+        }
+    }
+
     /// Register one adapter. Duplicate source ids are rejected.
     pub fn register<A>(&mut self, adapter: A) -> Result<(), SourceRegistryError>
     where
@@ -228,5 +240,18 @@ mod tests {
             Err(SourceRegistryError::DuplicateSource(source))
                 if source == SourceId::new("alpha").unwrap()
         ));
+    }
+
+    #[test]
+    fn source_display_order_matches_spec() {
+        assert_eq!(SourceRegistry::source_display_order(&SourceId::CODEX), 10);
+        assert_eq!(
+            SourceRegistry::source_display_order(&SourceId::ANTIGRAVITY),
+            20
+        );
+        assert_eq!(
+            SourceRegistry::source_display_order(&SourceId::new("other").unwrap()),
+            u16::MAX
+        );
     }
 }

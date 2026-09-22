@@ -74,6 +74,8 @@ function detail(revision: number, total = revision, rootSessionId = "root-1"): S
       source: "codex",
       native_session_id: rootSessionId,
       title: "Root",
+      project_name: "Usagi",
+      project_path: "/work/Usagi",
       thread_id: rootSessionId,
       root_session_id: rootSessionId,
       models_used: ["model-a", "model-b"],

@@ -164,17 +164,17 @@ describe("FilterControls", () => {
     expect(within(dialog).getByRole("checkbox", { name: "codex-auto-review" })).toBeInTheDocument();
   });
 
-  it("keeps a selected orphan model cancellable in the Route-models fallback group", async () => {
+  it("keeps a selected orphan model cancellable in the Selected fallback group", async () => {
     const onChange = vi.fn();
     renderControls({
       filters: { sources: [], models: ["orphan-rollout"], projects: [] },
       onChange,
     });
     const dialog = await openPopover("模型筛选，已选1项");
-    ensureModelGroupExpanded(dialog, "Route-models");
+    ensureModelGroupExpanded(dialog, "Selected");
     const orphan = within(dialog).getByRole("checkbox", { name: "orphan-rollout" });
 
-    expect(within(dialog).getByRole("button", { name: "Route-models" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Selected" })).toBeInTheDocument();
     fireEvent.click(orphan);
 
     expect(onChange).toHaveBeenCalledWith({ sources: [], models: [], projects: [] });
@@ -307,15 +307,15 @@ describe("FilterControls", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("hides the source filter button when options are null, empty, or have only 1 source", () => {
+  it("hides the terminal filter button when options are null, empty, or have only 1 source", () => {
     // null options
     const firstRender = renderControls({ options: null });
-    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
     firstRender.unmount();
 
     // 0 sources
     const secondRender = renderControls({ options: { data_revision: 1, sources: [], models: [], projects: [] } });
-    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
     secondRender.unmount();
 
     // 1 source
@@ -327,11 +327,11 @@ describe("FilterControls", () => {
         projects: [],
       },
     });
-    expect(screen.queryByRole("button", { name: /来源/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
     thirdRender.unmount();
   });
 
-  it("shows the source filter button when sources > 1, opens popover, and toggles selection", async () => {
+  it("TD-P5-TERMINAL-01 shows the terminal filter with SquareTerminal and identical geometry to Project filter", async () => {
     const onChange = vi.fn();
     const multiSourceOptions: FilterOptionsResponse = {
       data_revision: 1,
@@ -349,12 +349,16 @@ describe("FilterControls", () => {
       onChange,
     });
 
-    const trigger = screen.getByRole("button", { name: "来源筛选，全部" });
+    const trigger = screen.getByRole("button", { name: "终端筛选，全部" });
     expect(trigger).toBeInTheDocument();
-    expect(trigger).toHaveTextContent("来源 · 全部");
+    expect(trigger).toHaveTextContent("终端 · 全部");
 
-    const dialog = await openPopover("来源筛选，全部");
+    const dialog = await openPopover("终端筛选，全部");
     expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveClass("w-80");
+    const scrollArea = dialog.querySelector<HTMLElement>("[data-multi-select-scroll-area]");
+    expect(scrollArea).toHaveStyle({ maxHeight: "624px" });
+
     expect(within(dialog).getByText("Codex")).toBeInTheDocument();
     expect(within(dialog).getByText("Antigravity")).toBeInTheDocument();
 
@@ -368,7 +372,7 @@ describe("FilterControls", () => {
     });
   });
 
-  it("displays and allows toggling orphan selected sources when sources > 1", async () => {
+  it("TD-P5-TERMINAL-ORPHAN-01 does not append raw orphan source to menu and retains filter state", async () => {
     const onChange = vi.fn();
     const multiSourceOptions: FilterOptionsResponse = {
       data_revision: 1,
@@ -382,23 +386,119 @@ describe("FilterControls", () => {
 
     renderControls({
       options: multiSourceOptions,
-      filters: { sources: ["orphan-source"], models: [], projects: [] },
+      filters: { sources: ["legacy-source"], models: [], projects: [] },
       onChange,
     });
 
-    const trigger = screen.getByRole("button", { name: "来源筛选，已选1项" });
-    expect(trigger).toHaveTextContent("来源 · 1 项");
+    const trigger = screen.getByRole("button", { name: "终端筛选，已选1项" });
+    expect(trigger).toHaveTextContent("终端 · 1 项");
 
-    const dialog = await openPopover("来源筛选，已选1项");
-    const orphanCheckbox = within(dialog).getByRole("checkbox", { name: "orphan-source" });
-    expect(orphanCheckbox).toBeInTheDocument();
-    expect(orphanCheckbox).toBeChecked();
+    const dialog = await openPopover("终端筛选，已选1项");
+    expect(within(dialog).queryByRole("checkbox", { name: "legacy-source" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("legacy-source")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Codex")).toBeInTheDocument();
+    expect(within(dialog).getByText("Antigravity")).toBeInTheDocument();
+  });
 
-    fireEvent.click(orphanCheckbox);
-    expect(onChange).toHaveBeenCalledWith({
+  it("TD-P5-MODEL-ORPHAN-01 puts orphan model into Selected group at the end, not Route-models", async () => {
+    const multiOptions: FilterOptionsResponse = {
+      data_revision: 1,
       sources: [],
-      models: [],
+      models: [
+        { model: "gpt-4o", provider: "openai" },
+        { model: "gemini-2.5-pro", provider: "antigravity" },
+        { model: "claude-3", provider: "route-models" },
+      ],
       projects: [],
+    };
+
+    renderControls({
+      options: multiOptions,
+      filters: { sources: [], models: ["disappeared-antigravity-model"], projects: [] },
     });
+
+    const dialog = await openPopover("模型筛选，已选1项");
+    const groupButtons = within(dialog).getAllByRole("button", { name: /OpenAI|Antigravity|Route-models|Selected/ });
+    const labels = groupButtons.map((btn) => btn.textContent?.replace(/[^\w-]/g, "") || "");
+    expect(labels).toEqual(["OpenAI", "Antigravity", "Route-models", "Selected"]);
+
+    ensureModelGroupExpanded(dialog, "Selected");
+    expect(within(dialog).getByRole("checkbox", { name: "disappeared-antigravity-model" })).toBeInTheDocument();
+
+    // Collapse Selected group, expand Route-models, and verify orphan is not in Route-models
+    fireEvent.click(within(dialog).getByRole("button", { name: "Selected" }));
+    ensureModelGroupExpanded(dialog, "Route-models");
+    expect(within(dialog).queryByRole("checkbox", { name: "disappeared-antigravity-model" })).not.toBeInTheDocument();
+  });
+
+  it("TD-P5-MODEL-EXPAND-01 initially expands first active group and preserves expanded state on options change", async () => {
+    const initialOptions: FilterOptionsResponse = {
+      data_revision: 1,
+      sources: [],
+      models: [
+        { model: "gpt-4o", provider: "openai" },
+        { model: "claude-3", provider: "route-models" },
+      ],
+      projects: [],
+    };
+
+    const { rerender } = render(
+      <FilterControls
+        filters={emptyFilters}
+        options={initialOptions}
+        optionsLoading={false}
+        optionsStale={false}
+        anyFilterActive={false}
+        onChange={vi.fn()}
+        onClear={vi.fn()}
+        onRetryOptions={vi.fn()}
+      />,
+    );
+
+    const dialog = await openPopover("模型筛选，全部");
+    const openAiToggle = within(dialog).getByRole("button", { name: "OpenAI" });
+    const routeModelsToggle = within(dialog).getByRole("button", { name: "Route-models" });
+
+    // Initial: only OpenAI expanded
+    expect(openAiToggle).toHaveAttribute("aria-expanded", "true");
+    expect(routeModelsToggle).toHaveAttribute("aria-expanded", "false");
+
+    // User collapses OpenAI and expands Route-models
+    fireEvent.click(openAiToggle);
+    fireEvent.click(routeModelsToggle);
+    expect(openAiToggle).toHaveAttribute("aria-expanded", "false");
+    expect(routeModelsToggle).toHaveAttribute("aria-expanded", "true");
+
+    // Dynamic update: Antigravity model added and orphan selected model added
+    const updatedOptions: FilterOptionsResponse = {
+      data_revision: 2,
+      sources: [],
+      models: [
+        { model: "gpt-4o", provider: "openai" },
+        { model: "gemini-2.5-flash", provider: "antigravity" },
+        { model: "claude-3", provider: "route-models" },
+      ],
+      projects: [],
+    };
+
+    rerender(
+      <FilterControls
+        filters={{ sources: [], models: ["new-orphan"], projects: [] }}
+        options={updatedOptions}
+        optionsLoading={false}
+        optionsStale={false}
+        anyFilterActive={true}
+        onChange={vi.fn()}
+        onClear={vi.fn()}
+        onRetryOptions={vi.fn()}
+      />,
+    );
+
+    // States are preserved: OpenAI remains collapsed, Route-models remains expanded, Antigravity & Selected start collapsed
+    const dialogUpdated = screen.getByRole("dialog");
+    expect(within(dialogUpdated).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialogUpdated).getByRole("button", { name: "Route-models" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialogUpdated).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialogUpdated).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "false");
   });
 });

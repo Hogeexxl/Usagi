@@ -142,12 +142,12 @@ fn migration_binding_state_preserves_fingerprint_compatibility() {
     let ledger = Arc::new(
         Ledger::open(LedgerOptions::for_database(&db)).expect("migrate v11 fixture to v12"),
     );
-    assert_eq!(ledger.schema_version().expect("read schema version"), 12);
+    assert_eq!(ledger.schema_version().expect("read schema version"), 13);
     let migrated = Connection::open(&db).expect("reopen migrated database");
     let version: i64 = migrated
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read migrated user version");
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     for (table, count) in &canonical_counts {
         assert_eq!(
             migrated

@@ -1,4 +1,4 @@
-import { ChevronRight, Cpu, Folder, Layers } from "lucide-react";
+import { ChevronRight, Cpu, Folder, SquareTerminal } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 
@@ -28,14 +28,20 @@ type FilterControlsProps = {
   onRetryOptions: () => void;
 };
 
+type ModelGroupKey = ModelFilterProvider | "selected";
+
 type ModelGroup = {
-  provider: ModelFilterProvider;
-  label: "OpenAI" | "Route-models";
+  key: ModelGroupKey;
+  label: "OpenAI" | "Antigravity" | "Route-models" | "Selected";
   models: string[];
 };
 
-const MODEL_GROUPS: readonly { provider: ModelFilterProvider; label: ModelGroup["label"] }[] = [
+const ACTIVE_MODEL_GROUPS: readonly {
+  provider: ModelFilterProvider;
+  label: "OpenAI" | "Antigravity" | "Route-models";
+}[] = [
   { provider: "openai", label: "OpenAI" },
+  { provider: "antigravity", label: "Antigravity" },
   { provider: "route-models", label: "Route-models" },
 ];
 
@@ -48,29 +54,21 @@ function modelGroups(options: FilterOptionsResponse | null, selected: readonly s
     models.add(model);
     modelsByProvider.set(provider, models);
   }
-  const selectedOrphans = selected.filter((model) => !knownModels.has(model));
-  if (selectedOrphans.length > 0) {
-    const routeModels = modelsByProvider.get("route-models") ?? new Set<string>();
-    for (const model of selectedOrphans) routeModels.add(model);
-    modelsByProvider.set("route-models", routeModels);
-  }
-  return MODEL_GROUPS.flatMap(({ provider, label }) => {
+  const result: ModelGroup[] = ACTIVE_MODEL_GROUPS.flatMap(({ provider, label }) => {
     const models = modelsByProvider.get(provider);
     if (!models || models.size === 0) return [];
-    return [{ provider, label, models: [...models].sort((left, right) => left.localeCompare(right)) }];
+    return [{ key: provider, label, models: [...models].sort((left, right) => left.localeCompare(right)) }];
   });
+  const selectedOrphans = selected.filter((model) => !knownModels.has(model));
+  if (selectedOrphans.length > 0) {
+    const uniqueOrphans = [...new Set(selectedOrphans)].sort((left, right) => left.localeCompare(right));
+    result.push({ key: "selected", label: "Selected", models: uniqueOrphans });
+  }
+  return result;
 }
 
-function sourceSelections(options: FilterOptionsResponse | null, selected: readonly string[]): SourceFilterOption[] {
-  const values: SourceFilterOption[] = [...(options?.sources ?? [])];
-  const present = new Set(values.map((item) => item.source));
-  for (const source of selected) {
-    if (!present.has(source)) {
-      values.push({ source, display_name: source });
-      present.add(source);
-    }
-  }
-  return values;
+function sourceSelections(options: FilterOptionsResponse | null): SourceFilterOption[] {
+  return [...(options?.sources ?? [])];
 }
 
 function projectSelections(options: FilterOptionsResponse | null, selected: readonly ProjectSelection[]): ProjectLike[] {
@@ -95,22 +93,19 @@ const FilterTrigger = forwardRef<HTMLButtonElement, FilterTriggerProps>(function
 });
 
 export function FilterControls({ filters, options, optionsLoading, optionsStale, optionsErrorCode, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
-  const [expandedGroups, setExpandedGroups] = useState<Record<ModelFilterProvider, boolean>>({
-    openai: false,
-    "route-models": false,
-  });
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const modelGroupsInitialized = useRef(false);
   const reduce = useReducedMotion();
   const showSourceFilter = (options?.sources?.length ?? 0) > 1;
-  const sources = useMemo(() => sourceSelections(options, filters.sources), [options, filters.sources]);
+  const sources = useMemo(() => sourceSelections(options), [options]);
   const groups = useMemo(() => modelGroups(options, filters.models), [options, filters.models]);
   const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
 
   useEffect(() => {
     if (modelGroupsInitialized.current || !options || groups.length === 0) return;
     modelGroupsInitialized.current = true;
-    const firstProvider = groups[0].provider;
-    setExpandedGroups((current) => ({ ...current, [firstProvider]: true }));
+    const firstActive = groups.find((group) => group.key !== "selected") ?? groups[0];
+    setExpandedGroups({ [firstActive.key]: true });
   }, [groups, options]);
 
   const selectedSources = new Set(filters.sources);
@@ -143,9 +138,9 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
       {showSourceFilter ? (
         <MorphPopover>
           <MorphPopoverTrigger>
-            <FilterTrigger label="来源" count={filters.sources.length} icon={<Layers className="h-4 w-4" />} />
+            <FilterTrigger label="终端" count={filters.sources.length} icon={<SquareTerminal className="h-4 w-4" />} />
           </MorphPopoverTrigger>
-          <MorphPopoverContent side="bottom" align="start" className="w-64">
+          <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
             <div className="p-2">
             <OptionStatus
               loading={optionsLoading}
@@ -155,7 +150,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
               onRetry={onRetryOptions}
             />
             {!optionsLoading && sources.length === 0 ? (
-              <div className="px-2 py-3 text-xs text-muted-foreground">暂无来源</div>
+              <div className="px-2 py-3 text-xs text-muted-foreground">暂无终端</div>
             ) : null}
             {sources.map((item) => (
               <div key={item.source} className={rowClass}>
@@ -177,13 +172,13 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
           <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={groups.length > 0} onRetry={onRetryOptions} />
           {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
           {groups.map((group) => {
-            const expanded = expandedGroups[group.provider];
+            const expanded = Boolean(expandedGroups[group.key]);
             const allSelected = group.models.every((model) => selectedModels.has(model));
             const someSelected = group.models.some((model) => selectedModels.has(model));
-            return <div key={group.provider}>
+            return <div key={group.key}>
               <div className={rowClass}>
                 <Checkbox checked={allSelected} indeterminate={someSelected && !allSelected} aria-label={group.label} onCheckedChange={() => toggleGroup(group.models)} />
-                <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" aria-expanded={expanded} onClick={() => setExpandedGroups((current) => ({ ...current, [group.provider]: !current[group.provider] }))}><span className="flex-1">{group.label}</span><motion.span animate={{ rotate: expanded ? 90 : 0 }} transition={reduce ? { duration: 0 } : SPRING_LAYOUT}><ChevronRight className="h-4 w-4 text-muted-foreground" /></motion.span></button>
+                <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" aria-expanded={expanded} onClick={() => setExpandedGroups((current) => ({ ...current, [group.key]: !current[group.key] }))}><span className="flex-1">{group.label}</span><motion.span animate={{ rotate: expanded ? 90 : 0 }} transition={reduce ? { duration: 0 } : SPRING_LAYOUT}><ChevronRight className="h-4 w-4 text-muted-foreground" /></motion.span></button>
               </div>
               {expanded ? <div className="pl-5">{group.models.map((model) => <div key={model} className={rowClass}><Checkbox checked={selectedModels.has(model)} onCheckedChange={() => toggleModel(model)} label={model} /></div>)}</div> : null}
             </div>;

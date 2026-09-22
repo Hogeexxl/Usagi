@@ -15,6 +15,9 @@ impl SourceId {
     /// The source id reserved for the existing Codex ingestion path.
     pub const CODEX: Self = Self(Cow::Borrowed("codex"));
 
+    /// The source id reserved for the Antigravity ingestion path.
+    pub const ANTIGRAVITY: Self = Self(Cow::Borrowed("antigravity"));
+
     /// Construct a source id after validating its stable slug grammar.
     pub fn new(value: impl Into<String>) -> Result<Self, SourceIdError> {
         let value = value.into();
@@ -35,6 +38,11 @@ impl SourceId {
     /// Return the Codex source id.
     pub const fn codex() -> Self {
         Self::CODEX
+    }
+
+    /// Return the Antigravity source id.
+    pub const fn antigravity() -> Self {
+        Self::ANTIGRAVITY
     }
 
     pub fn validate(&self) -> Result<(), SourceIdError> {
@@ -146,6 +154,12 @@ mod tests {
         assert_eq!(SourceId::CODEX.as_str(), "codex");
         assert_eq!(SourceId::codex(), SourceId::CODEX);
         assert_eq!("codex".parse::<SourceId>().unwrap(), SourceId::CODEX);
+        assert_eq!(SourceId::ANTIGRAVITY.as_str(), "antigravity");
+        assert_eq!(SourceId::antigravity(), SourceId::ANTIGRAVITY);
+        assert_eq!(
+            "antigravity".parse::<SourceId>().unwrap(),
+            SourceId::ANTIGRAVITY
+        );
     }
 
     #[test]

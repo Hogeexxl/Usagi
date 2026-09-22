@@ -21,7 +21,22 @@ describe("Dashboard scope policy", () => {
     }
     const resolvedSkills = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.skillsUsage, { key: "year" }, filters);
     expect(resolvedSkills.range).toEqual({ key: "7d" });
-    expect(resolvedSkills.filters.sources).toEqual(["source-a", "source-b"]);
+    expect(resolvedSkills.filters.sources).toEqual([]);
+    expect(resolvedSkills.filters.models).toEqual(["a", "b"]);
+    expect(resolvedSkills.filters.projects).toEqual([{ kind: "project", project_path: "/repo" }]);
+  });
+
+  it("TD-P5-SKILLS-01 ignores dashboard sources for skillsUsage even when antigravity is selected", () => {
+    const customFilters = {
+      sources: ["antigravity"],
+      models: ["model-x"],
+      projects: [{ kind: "project" as const, project_path: "/repo" }],
+    };
+    const resolved = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.skillsUsage, { key: "30d" }, customFilters);
+    expect(resolved.range).toEqual({ key: "7d" });
+    expect(resolved.filters.sources).toEqual([]);
+    expect(resolved.filters.models).toEqual(["model-x"]);
+    expect(resolved.filters.projects).toEqual([{ kind: "project", project_path: "/repo" }]);
   });
 
   it("T-022-A4 keeps a complete custom range in Dashboard scope while Skills stays fixed", () => {

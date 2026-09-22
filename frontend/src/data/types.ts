@@ -91,7 +91,7 @@ export type SourceFilterOption = {
   display_name: string;
 };
 
-export type ModelFilterProvider = "openai" | "route-models";
+export type ModelFilterProvider = "openai" | "antigravity" | "route-models";
 
 export type ModelFilterOption = {
   model: string;
@@ -217,6 +217,8 @@ export type MainSessionDetailDto = {
   source: string;
   native_session_id: string;
   title: string | null;
+  project_name: string | null;
+  project_path: string | null;
   thread_id: string;
   root_session_id: string;
   models_used: string[];

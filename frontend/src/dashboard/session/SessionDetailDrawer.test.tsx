@@ -57,6 +57,8 @@ const detail: SessionDetailResponse = {
     source: "codex",
     native_session_id: "root-session-full-id",
     title: "A long Session title",
+    project_name: "Usagi",
+    project_path: "/work/Usagi",
     thread_id: "root-session-full-id",
     root_session_id: "root-session-full-id",
     models_used: ["gpt-5", "o4-mini"],
@@ -128,7 +130,7 @@ function view(overrides: Partial<SessionDetailControllerViewModel> = {}): Sessio
 }
 
 describe("SessionDetailDrawer v0.2.0", () => {
-  it("renders the 480px receipt shell with exactly four summary rows", () => {
+  it("renders the 480px receipt shell with summary rows", () => {
     render(<SessionDetailDrawer view={view()} timezone="Asia/Shanghai" />);
 
     const dialog = screen.getByRole("dialog", { name: "Session 详情" });
@@ -142,7 +144,9 @@ describe("SessionDetailDrawer v0.2.0", () => {
 
     const summary = screen.getByRole("region", { name: "Session 合计" });
     const rows = summary.querySelectorAll("dl > div");
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(6);
+    expect(summary).toHaveTextContent("Source");
+    expect(summary).toHaveTextContent("Project");
     expect(summary).toHaveTextContent("Main Tokens");
     expect(summary).toHaveTextContent("Subagent Tokens");
     expect(summary).toHaveTextContent("Total Tokens");
@@ -152,6 +156,88 @@ describe("SessionDetailDrawer v0.2.0", () => {
     expect(summary).toHaveTextContent("3,601");
     expect(summary).toHaveTextContent("$1.20");
     expect(screen.queryByText(/复制/)).not.toBeInTheDocument();
+  });
+
+  it("TD-P5-DRAWER-01 verifies Source and Project rows, ordering, styling and null fallback [INV-DETAIL-01] ~ [INV-DETAIL-03]", () => {
+    // 1. With project_name and project_path, and custom sourceDisplay
+    const sourceDisplay = (s: string) => (s === "codex" ? "Codex Terminal" : s);
+    const { unmount } = render(
+      <SessionDetailDrawer
+        view={view({
+          detail: {
+            ...detail,
+            main: {
+              ...detail.main,
+              project_name: "Usagi Project",
+              project_path: "/path/to/usagi",
+            },
+          },
+        })}
+        timezone="Asia/Shanghai"
+        sourceDisplay={sourceDisplay}
+      />,
+    );
+
+    const summary = screen.getByRole("region", { name: "Session 合计" });
+    const rows = summary.querySelectorAll("dl > div");
+    expect(rows).toHaveLength(6);
+
+    // Verify fixed order: Source -> Project -> Main Tokens -> Subagent Tokens -> Total Tokens -> Estimated Cost
+    const dts = Array.from(rows).map((row) => row.querySelector("dt")?.textContent);
+    expect(dts).toEqual([
+      "Source",
+      "Project",
+      "Main Tokens",
+      "Subagent Tokens",
+      "Total Tokens",
+      "Estimated Cost",
+    ]);
+
+    // Verify Source and Project row values
+    expect(rows[0].querySelector("dd")?.textContent).toBe("Codex Terminal");
+    const projectDd = rows[1].querySelector("dd");
+    expect(projectDd?.textContent).toBe("Usagi Project");
+    expect(projectDd).toHaveAttribute("title", "/path/to/usagi");
+
+    // Verify styling reuse: dt has text-muted-foreground, dd has text-foreground
+    expect(rows[0].querySelector("dt")).toHaveClass("text-muted-foreground");
+    expect(rows[0].querySelector("dd")).toHaveClass("text-foreground");
+    expect(rows[1].querySelector("dt")).toHaveClass("text-muted-foreground");
+    expect(rows[1].querySelector("dd")).toHaveClass("text-foreground");
+
+    unmount();
+
+    // 2. With project_name null, empty string, or whitespace -> displays '—' and no title attribute
+    const testCases = [
+      { name: null, path: null },
+      { name: "", path: "" },
+      { name: "   ", path: "   " },
+    ];
+    for (const tc of testCases) {
+      const { unmount: unmountCase } = render(
+        <SessionDetailDrawer
+          view={view({
+            detail: {
+              ...detail,
+              main: {
+                ...detail.main,
+                project_name: tc.name,
+                project_path: tc.path,
+              },
+            },
+          })}
+          timezone="Asia/Shanghai"
+        />,
+      );
+      const caseSummary = screen.getByRole("region", { name: "Session 合计" });
+      const caseRows = caseSummary.querySelectorAll("dl > div");
+      const projectRowDd = caseRows[1].querySelector("dd");
+      expect(projectRowDd?.textContent).toBe("—");
+      expect(projectRowDd).not.toHaveAttribute("title");
+      // Fallback source display uses raw string when sourceDisplay is not provided
+      expect(caseRows[0].querySelector("dd")?.textContent).toBe("codex");
+      unmountCase();
+    }
   });
 
   it("keeps the backdrop surface free of border and outline layers", () => {
@@ -378,7 +464,7 @@ describe("SessionDetailDrawer v0.2.0", () => {
     const summary = within(status).getByRole("region", { name: "Session 合计加载中" });
     const main = within(status).getByRole("region", { name: "Main 加载中" });
     const subagent = within(status).getByRole("region", { name: "Subagent 加载中" });
-    expect(summary.querySelectorAll(".animate-pulse")).toHaveLength(8);
+    expect(summary.querySelectorAll(".animate-pulse")).toHaveLength(12);
     expect(Array.from(main.querySelectorAll("div.animate-pulse")).filter((node) => node.className.includes("h-[54px]")).length).toBe(2);
     expect(Array.from(subagent.querySelectorAll("div.animate-pulse")).filter((node) => node.className.includes("h-[54px]")).length).toBe(2);
   });

@@ -624,6 +624,38 @@ impl SourceWriteTxn<'_> {
         Ok(())
     }
 
+    pub(crate) fn compare_usage_event_no_revision(
+        &mut self,
+        target: UsageWriteTarget,
+        event: &CanonicalUsageEventWrite,
+    ) -> Result<CanonicalUsageEventMatch, SourceStorageError> {
+        self.require_open()?;
+        validate_usage_event(event)?;
+        let epoch = self.resolve_usage_write_epoch(target)?;
+        let connection = self.connection()?.connection();
+        validate_event_session_source(
+            connection,
+            &self.source,
+            &event.thread_id,
+            &event.root_session_id,
+        )?;
+        let existing = CanonicalIdentityRow::query_existing(
+            connection,
+            self.source.as_str(),
+            epoch,
+            event.event_id.as_str(),
+        )?;
+        let Some(existing) = existing else {
+            return Ok(CanonicalUsageEventMatch::Absent);
+        };
+        let identity = CanonicalIdentityRow::from_event(event);
+        if existing == identity {
+            Ok(CanonicalUsageEventMatch::Identical)
+        } else {
+            Ok(CanonicalUsageEventMatch::Conflict)
+        }
+    }
+
     pub(crate) fn write_usage_no_revision(
         &mut self,
         target: UsageWriteTarget,
@@ -639,56 +671,13 @@ impl SourceWriteTxn<'_> {
             &event.thread_id,
             &event.root_session_id,
         )?;
-        let event_kind = event.kind.as_str();
-        let quality = if event.usage.cache_write_tokens.is_some() {
-            "complete"
-        } else {
-            "partial"
-        };
-        let existing: Option<CanonicalIdentityRow> = connection
-            .query_row(
-                "SELECT event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
-                        reasoning_effort,input_tokens,cached_tokens,cache_write_tokens,output_tokens,
-                        reasoning_tokens,total_tokens,quality_status
-                 FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
-                params![self.source.as_str(), epoch, event.event_id.as_str()],
-                |row| {
-                    Ok(CanonicalIdentityRow {
-                        event_kind: row.get(0)?,
-                        occurred_at_ms: row.get(1)?,
-                        thread_id: row.get(2)?,
-                        root_session_id: row.get(3)?,
-                        turn_key: row.get(4)?,
-                        model: row.get(5)?,
-                        reasoning_effort: row.get(6)?,
-                        input_tokens: row.get(7)?,
-                        cached_tokens: row.get(8)?,
-                        cache_write_tokens: row.get(9)?,
-                        output_tokens: row.get(10)?,
-                        reasoning_tokens: row.get(11)?,
-                        total_tokens: row.get(12)?,
-                        quality_status: row.get(13)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(map_sql_error)?;
-        let identity = CanonicalIdentityRow {
-            event_kind: event_kind.to_owned(),
-            occurred_at_ms: event.occurred_at_ms,
-            thread_id: event.thread_id.clone(),
-            root_session_id: event.root_session_id.clone(),
-            turn_key: event.turn_key.clone(),
-            model: event.model.clone(),
-            reasoning_effort: event.reasoning_effort.clone(),
-            input_tokens: event.usage.input_tokens,
-            cached_tokens: event.usage.cached_tokens,
-            cache_write_tokens: event.usage.cache_write_tokens,
-            output_tokens: event.usage.output_tokens,
-            reasoning_tokens: event.usage.reasoning_tokens,
-            total_tokens: event.usage.total_tokens,
-            quality_status: quality.to_owned(),
-        };
+        let existing = CanonicalIdentityRow::query_existing(
+            connection,
+            self.source.as_str(),
+            epoch,
+            event.event_id.as_str(),
+        )?;
+        let identity = CanonicalIdentityRow::from_event(&event);
         if let Some(existing) = existing {
             if existing != identity {
                 return Err(SourceStorageError::InvalidRequest(
@@ -697,6 +686,7 @@ impl SourceWriteTxn<'_> {
             }
             return Ok(CanonicalWriteOutcome::Duplicate);
         }
+        let event_kind = event.kind.as_str();
         connection
             .execute(
                 "INSERT INTO usage_events(
@@ -709,7 +699,8 @@ impl SourceWriteTxn<'_> {
                     event.thread_id, event.root_session_id, event.turn_key, event.model,
                     event.reasoning_effort, event.estimated_cost_nanos_usd, event.usage.input_tokens,
                     event.usage.cached_tokens, event.usage.cache_write_tokens, event.usage.output_tokens,
-                    event.usage.reasoning_tokens, event.usage.total_tokens, quality, event.created_at_ms,
+                    event.usage.reasoning_tokens, event.usage.total_tokens, identity.quality_status,
+                    event.created_at_ms
                 ],
             )
             .map_err(map_sql_error)?;
@@ -1176,6 +1167,13 @@ impl Drop for SourceWriteTxn<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalUsageEventMatch {
+    Absent,
+    Identical,
+    Conflict,
+}
+
 #[derive(PartialEq, Eq)]
 struct CanonicalIdentityRow {
     event_kind: String,
@@ -1192,6 +1190,69 @@ struct CanonicalIdentityRow {
     reasoning_tokens: i64,
     total_tokens: i64,
     quality_status: String,
+}
+
+impl CanonicalIdentityRow {
+    fn from_event(event: &CanonicalUsageEventWrite) -> Self {
+        let event_kind = event.kind.as_str();
+        let quality = if event.usage.cache_write_tokens.is_some() {
+            "complete"
+        } else {
+            "partial"
+        };
+        Self {
+            event_kind: event_kind.to_owned(),
+            occurred_at_ms: event.occurred_at_ms,
+            thread_id: event.thread_id.clone(),
+            root_session_id: event.root_session_id.clone(),
+            turn_key: event.turn_key.clone(),
+            model: event.model.clone(),
+            reasoning_effort: event.reasoning_effort.clone(),
+            input_tokens: event.usage.input_tokens,
+            cached_tokens: event.usage.cached_tokens,
+            cache_write_tokens: event.usage.cache_write_tokens,
+            output_tokens: event.usage.output_tokens,
+            reasoning_tokens: event.usage.reasoning_tokens,
+            total_tokens: event.usage.total_tokens,
+            quality_status: quality.to_owned(),
+        }
+    }
+
+    fn query_existing(
+        connection: &Connection,
+        source: &str,
+        epoch: i64,
+        event_id: &str,
+    ) -> Result<Option<Self>, SourceStorageError> {
+        connection
+            .query_row(
+                "SELECT event_kind,occurred_at_ms,thread_id,root_session_id,turn_key,model,
+                        reasoning_effort,input_tokens,cached_tokens,cache_write_tokens,output_tokens,
+                        reasoning_tokens,total_tokens,quality_status
+                 FROM usage_events WHERE source=?1 AND source_epoch=?2 AND event_id=?3",
+                params![source, epoch, event_id],
+                |row| {
+                    Ok(CanonicalIdentityRow {
+                        event_kind: row.get(0)?,
+                        occurred_at_ms: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        root_session_id: row.get(3)?,
+                        turn_key: row.get(4)?,
+                        model: row.get(5)?,
+                        reasoning_effort: row.get(6)?,
+                        input_tokens: row.get(7)?,
+                        cached_tokens: row.get(8)?,
+                        cache_write_tokens: row.get(9)?,
+                        output_tokens: row.get(10)?,
+                        reasoning_tokens: row.get(11)?,
+                        total_tokens: row.get(12)?,
+                        quality_status: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(map_sql_error)
+    }
 }
 
 fn validate_usage_event(event: &CanonicalUsageEventWrite) -> Result<(), SourceStorageError> {
@@ -1578,5 +1639,137 @@ mod tests {
         drop(storage);
         drop(ledger);
         fs::remove_dir_all(root).expect("remove temporary read seam directory");
+    }
+
+    #[test]
+    fn td_p2_compare_01_canonical_event_compare_and_write() {
+        use crate::domain::{AgentRole, MetadataQualityStatus, Patch};
+
+        let root = std::env::temp_dir().join(format!(
+            "usagi-td-p2-compare-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temporary test directory");
+        let db_path = root.join("test.sqlite3");
+        let ledger =
+            Arc::new(Ledger::open(LedgerOptions::new(&db_path)).expect("open temporary ledger"));
+        let source_id = SourceId::new("test-src").expect("valid test source");
+        let storage =
+            SourceStorage::with_ledger("test-scan", source_id.clone(), Arc::clone(&ledger));
+
+        let mut txn = storage.begin_write_txn().expect("begin write txn");
+
+        let session_id =
+            SessionIdentity::namespaced(source_id.clone(), "session-1").expect("session id");
+        let mut patch = ResolvedThreadPatch::new(&session_id, 100).expect("patch");
+        patch.agent_role = Patch::Set(AgentRole::Main);
+        patch.title = Patch::Set("Test Session".to_owned());
+        patch.project_name = Patch::Set("test-project".to_owned());
+        patch.project_path = Patch::Set("/test/project".to_owned());
+        patch.project_kind = Patch::Set(crate::domain::ProjectKind::Project);
+        patch.metadata_quality_status = MetadataQualityStatus::Complete;
+        txn.upsert_session_metadata_no_revision(&session_id, &patch)
+            .expect("upsert session metadata");
+
+        let build = txn.begin_or_resume_usage_build(1).expect("create build");
+        assert_eq!(build, 1);
+
+        let event = CanonicalUsageEventWrite {
+            event_id: "evt-1".to_owned(),
+            kind: EventKind::Normal,
+            occurred_at_ms: 1000,
+            thread_id: session_id.thread_id.clone(),
+            root_session_id: session_id.thread_id.clone(),
+            turn_key: Some("turn-1".to_owned()),
+            model: "gpt-4".to_owned(),
+            reasoning_effort: Some("high".to_owned()),
+            estimated_cost_nanos_usd: Some(100_000),
+            usage: NormalizedTokenUsage {
+                input_tokens: 100,
+                cached_tokens: 20,
+                cache_write_tokens: Some(5),
+                output_tokens: 50,
+                reasoning_tokens: 10,
+                total_tokens: 150,
+            },
+            created_at_ms: 1000,
+        };
+
+        // 1. Before write: compare is Absent
+        let match_result = txn
+            .compare_usage_event_no_revision(UsageWriteTarget::Build, &event)
+            .expect("compare absent event");
+        assert_eq!(match_result, CanonicalUsageEventMatch::Absent);
+
+        // Write the event
+        let write_result = txn
+            .write_usage_no_revision(UsageWriteTarget::Build, event.clone())
+            .expect("write event");
+        assert_eq!(write_result, CanonicalWriteOutcome::Inserted);
+
+        // 2. After write: compare identical event is Identical
+        let match_result = txn
+            .compare_usage_event_no_revision(UsageWriteTarget::Build, &event)
+            .expect("compare identical event");
+        assert_eq!(match_result, CanonicalUsageEventMatch::Identical);
+
+        // write identical again returns Duplicate
+        let write_duplicate = txn
+            .write_usage_no_revision(UsageWriteTarget::Build, event.clone())
+            .expect("write duplicate");
+        assert_eq!(write_duplicate, CanonicalWriteOutcome::Duplicate);
+
+        // 3. Compare with changed comparator payload: Conflict
+        let mut conflicting_event = event.clone();
+        conflicting_event.usage.input_tokens = 110;
+        conflicting_event.usage.total_tokens = 160;
+        let match_result = txn
+            .compare_usage_event_no_revision(UsageWriteTarget::Build, &conflicting_event)
+            .expect("compare conflicting event");
+        assert_eq!(match_result, CanonicalUsageEventMatch::Conflict);
+
+        let conflict_err = txn
+            .write_usage_no_revision(UsageWriteTarget::Build, conflicting_event)
+            .expect_err("write conflicting event must fail");
+        assert!(matches!(
+            conflict_err,
+            SourceStorageError::InvalidRequest(..)
+        ));
+
+        // Change model: Conflict
+        let mut conflict_model = event.clone();
+        conflict_model.model = "gpt-5".to_owned();
+        assert_eq!(
+            txn.compare_usage_event_no_revision(UsageWriteTarget::Build, &conflict_model)
+                .expect("compare conflict model"),
+            CanonicalUsageEventMatch::Conflict
+        );
+
+        // Change reasoning_effort: Conflict
+        let mut conflict_effort = event.clone();
+        conflict_effort.reasoning_effort = Some("low".to_owned());
+        assert_eq!(
+            txn.compare_usage_event_no_revision(UsageWriteTarget::Build, &conflict_effort)
+                .expect("compare conflict effort"),
+            CanonicalUsageEventMatch::Conflict
+        );
+
+        // Change occurred_at_ms: Conflict
+        let mut conflict_time = event.clone();
+        conflict_time.occurred_at_ms = 2000;
+        assert_eq!(
+            txn.compare_usage_event_no_revision(UsageWriteTarget::Build, &conflict_time)
+                .expect("compare conflict time"),
+            CanonicalUsageEventMatch::Conflict
+        );
+
+        drop(txn);
+        drop(storage);
+        drop(ledger);
+        fs::remove_dir_all(root).expect("remove temporary directory");
     }
 }

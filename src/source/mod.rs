@@ -2,7 +2,7 @@
 
 pub use crate::domain::SessionIdentity;
 
-mod adapter;
+pub(crate) mod adapter;
 mod id;
 mod registry;
 
@@ -12,6 +12,8 @@ pub use adapter::{
     SourceContextError, SourceRunContext, SourceRunReport, SourceRunResult, SourceRunState,
     SourceStorage, SourceStorageError, SourceWriteTxn, UsageWriteTarget,
 };
-pub(crate) use adapter::{CanonicalWriteOutcome, SessionMutationOutcome, UsageActivationOutcome};
+pub(crate) use adapter::{
+    CanonicalUsageEventMatch, CanonicalWriteOutcome, SessionMutationOutcome, UsageActivationOutcome,
+};
 pub use id::{SourceId, SourceIdError};
 pub use registry::{SourceDescriptor, SourceDescriptorError, SourceRegistry, SourceRegistryError};

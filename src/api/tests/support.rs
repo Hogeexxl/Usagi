@@ -80,11 +80,37 @@ impl ApiFixture {
         Self::with_updates_and_quota_service(label, update_service, browser_opener, None)
     }
 
+    pub fn track_d(label: &str) -> Self {
+        Self::with_updates_and_quota_service_and_registry(
+            label,
+            UpdateService::unavailable(),
+            Arc::new(SystemBrowser),
+            None,
+            true,
+        )
+    }
+
     fn with_updates_and_quota_service(
         label: &str,
         update_service: Arc<UpdateService>,
         browser_opener: Arc<dyn BrowserOpener>,
         quota_service: Option<Arc<CodexQuotaService>>,
+    ) -> Self {
+        Self::with_updates_and_quota_service_and_registry(
+            label,
+            update_service,
+            browser_opener,
+            quota_service,
+            false,
+        )
+    }
+
+    fn with_updates_and_quota_service_and_registry(
+        label: &str,
+        update_service: Arc<UpdateService>,
+        browser_opener: Arc<dyn BrowserOpener>,
+        quota_service: Option<Arc<CodexQuotaService>>,
+        register_antigravity: bool,
     ) -> Self {
         let root = TempRoot::new(label);
         let home = root.path().join("codex");
@@ -99,6 +125,13 @@ impl ApiFixture {
         registry
             .register(CodexAdapter::new(CodexConfig::from_home(home.clone())))
             .expect("register Codex source");
+        if register_antigravity {
+            registry
+                .register(crate::antigravity::AntigravityAdapter::new(
+                    crate::antigravity::AntigravityConfigResolution::NotInstalled,
+                ))
+                .expect("register Antigravity source");
+        }
         let scanner = IngestionCoordinator::start(
             IngestionConfig::default().with_interval(std::time::Duration::from_secs(3_600)),
             Arc::clone(&ledger),

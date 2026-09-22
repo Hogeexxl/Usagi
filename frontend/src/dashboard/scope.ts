@@ -19,7 +19,7 @@ const FOLLOW_DASHBOARD: DashboardScopePolicy = {
 };
 const ROLLING_7D_FILTERED: DashboardScopePolicy = {
   range: { kind: "fixed", range: { key: "7d" } },
-  sources: "dashboard",
+  sources: "ignore",
   models: "dashboard",
   projects: "dashboard",
 };

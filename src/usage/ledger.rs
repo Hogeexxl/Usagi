@@ -3,9 +3,10 @@
 use crate::storage::{Ledger, StorageError};
 
 use super::aggregate::{
-    AggregateError, AggregateReader, FilterOptions, ModelUsageRows, SessionDetail,
-    SessionPageRequest, SessionSortField, SessionSortOrder, SessionUsagePage, SummaryQuery,
-    TimeRange, UsageFilter, UsageSummary,
+    AggregateError, AggregateReader, FilterOptions, LegacyPublicUsageProjection, ModelUsageRows,
+    SessionDetail, SessionDetailWithProject, SessionPageRequest, SessionSortField,
+    SessionSortOrder, SessionUsagePage, SummaryQuery, TimeRange, UsageFilter, UsageSummary,
+    UsageSummaryWithLegacy,
 };
 
 #[derive(Debug)]
@@ -109,6 +110,21 @@ impl<'a> UsageLedger<'a> {
         })
     }
 
+    pub(crate) fn summary_snapshot_with_legacy(
+        &self,
+        query: SummaryQuery,
+    ) -> Result<UsageSnapshot<UsageSummaryWithLegacy>, UsageLedgerError> {
+        self.ledger.with_read_transaction(|transaction| {
+            let data_revision = snapshot_meta(transaction)?;
+            let value = AggregateReader::new(transaction, self.session_error_sidecars)
+                .summary_with_legacy(query)?;
+            Ok(UsageSnapshot {
+                data_revision,
+                value,
+            })
+        })
+    }
+
     pub fn sessions_snapshot(
         &self,
         range: TimeRange,
@@ -164,6 +180,27 @@ impl<'a> UsageLedger<'a> {
             let value = AggregateReader::new(transaction, self.session_error_sidecars)
                 .session_detail(range, &filter, &root_session_id)?;
             Ok(SessionDetailSnapshot {
+                data_revision,
+                value,
+            })
+        })
+    }
+
+    pub(crate) fn session_detail_with_project_snapshot(
+        &self,
+        range: TimeRange,
+        filter: UsageFilter,
+        expected_data_revision: Option<i64>,
+        root_session_id: String,
+    ) -> Result<UsageSnapshot<SessionDetailWithProject>, UsageLedgerError> {
+        self.ledger.with_read_transaction(|transaction| {
+            let data_revision = snapshot_meta(transaction)?;
+            if expected_data_revision.is_some_and(|expected| expected != data_revision) {
+                return Err(UsageLedgerError::StaleDataRevision);
+            }
+            let value = AggregateReader::new(transaction, self.session_error_sidecars)
+                .session_detail_with_project(range, &filter, &root_session_id)?;
+            Ok(UsageSnapshot {
                 data_revision,
                 value,
             })

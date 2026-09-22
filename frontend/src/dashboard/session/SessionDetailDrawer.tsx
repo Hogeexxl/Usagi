@@ -18,9 +18,14 @@ import {
   formatSessionNullableTokenInteger,
   formatSessionTokenInteger,
 } from "./sessionFormat";
+import type { SourceDisplayLookup } from "../shared/sourceDisplay";
 import type { SessionDetailControllerViewModel } from "./useSessionDetailController";
 
-type SessionDetailDrawerProps = { view: SessionDetailControllerViewModel; timezone: string };
+type SessionDetailDrawerProps = {
+  view: SessionDetailControllerViewModel;
+  timezone: string;
+  sourceDisplay?: SourceDisplayLookup;
+};
 
 function StaticValue({ value, ariaLabel }: { value: string; ariaLabel: string }) {
   return <span className="tabular-nums text-foreground" aria-label={ariaLabel}>{value}</span>;
@@ -110,7 +115,7 @@ function DetailSkeleton() {
     <div role="status" aria-label="Session 详情加载中">
       <section aria-label="Session 合计加载中">
         <div className="space-y-2 text-sm">
-          {Array.from({ length: 4 }, (_, index) => (
+          {Array.from({ length: 6 }, (_, index) => (
             <div key={index} className="flex items-baseline justify-between gap-4">
               <span className="h-4 w-28 animate-pulse rounded bg-muted" />
               <span className="h-4 w-20 animate-pulse rounded bg-muted" />
@@ -136,7 +141,13 @@ function DetailSkeleton() {
   );
 }
 
-function SummaryReceipt({ detail }: { detail: SessionDetailResponse }) {
+function SummaryReceipt({
+  detail,
+  sourceDisplay,
+}: {
+  detail: SessionDetailResponse;
+  sourceDisplay?: SourceDisplayLookup;
+}) {
   const mainTokens = detail.main.self_usage.total_tokens;
   const totalTokens = detail.main.inclusive_usage.total_tokens;
   const subagentTokens = Math.max(0, totalTokens - mainTokens);
@@ -146,9 +157,24 @@ function SummaryReceipt({ detail }: { detail: SessionDetailResponse }) {
     ["Total Tokens", totalTokens, true],
   ] as const;
 
+  const displaySource = sourceDisplay ? sourceDisplay(detail.source) : detail.source;
+  const trimmedProjectName = detail.main.project_name?.trim();
+  const projectName = trimmedProjectName ? trimmedProjectName : "—";
+  const projectPath = detail.main.project_path?.trim() || undefined;
+
   return (
     <section aria-label="Session 合计">
       <dl className="space-y-2 text-sm">
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-muted-foreground">Source</dt>
+          <dd className="text-foreground">{displaySource}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-muted-foreground">Project</dt>
+          <dd className="text-foreground" title={projectPath}>
+            {projectName}
+          </dd>
+        </div>
         {rows.map(([label, value, emphasized]) => (
           <div key={label} className="flex items-baseline justify-between gap-4">
             <dt className={emphasized ? "font-semibold text-foreground" : "text-muted-foreground"}>{label}</dt>
@@ -168,7 +194,7 @@ function SummaryReceipt({ detail }: { detail: SessionDetailResponse }) {
   );
 }
 
-export function SessionDetailDrawer({ view, timezone }: SessionDetailDrawerProps) {
+export function SessionDetailDrawer({ view, timezone, sourceDisplay }: SessionDetailDrawerProps) {
   const toast = useAnimatedToastStack();
   const [mainOpen, setMainOpen] = useState<string | null>(null);
   const [subagentOpen, setSubagentOpen] = useState<string | null>(null);
@@ -297,7 +323,7 @@ export function SessionDetailDrawer({ view, timezone }: SessionDetailDrawerProps
             ) : null}
             {detail ? (
               <div>
-                <SummaryReceipt detail={detail} />
+                <SummaryReceipt detail={detail} sourceDisplay={sourceDisplay} />
 
                 <section aria-labelledby="drawer-main-heading" className="mt-6">
                   <h3 id="drawer-main-heading" className="mb-2 text-sm font-semibold text-foreground">Main ({mainItems.length})</h3>

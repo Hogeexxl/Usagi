@@ -186,6 +186,7 @@ describe("SessionSection v0.2.0", () => {
     expect(screen.getByRole("heading", { name: "Session 记录" })).toBeInTheDocument();
     expect(headers.map((header) => header.textContent?.trim())).toEqual([
       "最后活动",
+      "终端",
       "标题",
       "项目",
       "模型",
@@ -196,7 +197,8 @@ describe("SessionSection v0.2.0", () => {
     ]);
 
     expect(headers[1].querySelector("button")).toBeNull();
-    expect(headers[5].querySelector("button")).toBeNull();
+    expect(headers[2].querySelector("button")).toBeNull();
+    expect(headers[6].querySelector("button")).toBeNull();
     expect(headers.filter((header) => header.querySelector("button")).length).toBe(6);
 
     for (const label of ["合计 Token", "缓存命中率", "合计费用"]) {
@@ -206,27 +208,72 @@ describe("SessionSection v0.2.0", () => {
     const cells = rendered.container.querySelectorAll(
       'tbody tr[data-session-root-id="root-1"] td',
     );
-    for (const index of [4, 5, 6, 7]) {
+    for (const index of [5, 6, 7, 8]) {
       expect(cells[index]).toHaveClass("text-right");
     }
-    expect(cells[4]).toHaveTextContent("5,678");
-    expect(cells[5]).toHaveTextContent("2");
-    expect(cells[4].querySelector(".tabular-nums")).toBeTruthy();
+    expect(cells[1]).toHaveTextContent("codex");
+    expect(cells[5]).toHaveTextContent("5,678");
+    expect(cells[6]).toHaveTextContent("2");
     expect(cells[5].querySelector(".tabular-nums")).toBeTruthy();
+    expect(cells[6].querySelector(".tabular-nums")).toBeTruthy();
 
     const table = rendered.container.querySelector("table");
     if (!table) throw new Error("Session table not found");
     expect(Array.from(table.querySelectorAll("col"), (column) => column.style.width)).toEqual([
       "128px",
+      "98pt",
       "",
       "150px",
-      "168px",
+      "140pt",
       "150px",
       "128px",
-      "150px",
+      "80pt",
       "120px",
       "0px",
     ]);
+  });
+
+  it("TD-P5-TABLE-01 renders mixed-source rows with 9 columns in exact order and authored widths", () => {
+    const mixedRows: SessionItemDto[] = [
+      row(1, { source: "codex" }),
+      row(2, { source: "antigravity" }),
+    ];
+    const sourceDisplay = (s: string) => (s === "antigravity" ? "Antigravity" : "Codex");
+    const rendered = render(
+      <SessionSection view={view({ rows: mixedRows })} sourceDisplay={sourceDisplay} />,
+    );
+    const headers = screen.getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "最后活动",
+      "终端",
+      "标题",
+      "项目",
+      "模型",
+      "合计 Token",
+      "sub数量",
+      "缓存命中率",
+      "合计费用",
+    ]);
+
+    const table = rendered.container.querySelector("table");
+    if (!table) throw new Error("Session table not found");
+    expect(Array.from(table.querySelectorAll("col"), (col) => col.style.width)).toEqual([
+      "128px",
+      "98pt",
+      "",
+      "150px",
+      "140pt",
+      "150px",
+      "128px",
+      "80pt",
+      "120px",
+      "0px",
+    ]);
+
+    const row1Cells = rendered.container.querySelectorAll('tbody tr[data-session-root-id="root-1"] td');
+    expect(row1Cells[1]).toHaveTextContent("Codex");
+    const row2Cells = rendered.container.querySelectorAll('tbody tr[data-session-root-id="root-2"] td');
+    expect(row2Cells[1]).toHaveTextContent("Antigravity");
   });
 
   it("T-S04-002 keeps table width styles stable when sorting changes", () => {

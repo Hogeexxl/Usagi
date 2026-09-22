@@ -64,12 +64,12 @@ impl SessionErrorSidecar for CodexSessionErrorSidecar {
         range: TimeRange,
         filter: &UsageFilter,
     ) -> Result<Vec<SessionErrorProjection>, AggregateError> {
-        if filter.models().iter().next().is_some()
-            || filter
-                .sources()
+        let sources = filter.sources();
+        let codex_source_included = sources.is_empty()
+            || sources
                 .iter()
-                .any(|source| source.as_str() != "codex")
-        {
+                .any(|source| source == &crate::source::SourceId::CODEX);
+        if filter.models().iter().next().is_some() || !codex_source_included {
             return Ok(Vec::new());
         }
 
@@ -295,5 +295,65 @@ fn map_sql_error(error: rusqlite::Error) -> AggregateError {
             AggregateError::ArithmeticOverflow
         }
         _ => AggregateError::QueryFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{source::SourceId, storage::migrate};
+
+    #[test]
+    fn td_p4_sidecar_or_01_filter_table_driven() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate(&mut conn, 0).unwrap();
+
+        conn.execute(
+            "INSERT INTO source_usage_epochs(source, active_epoch, build_epoch, active_parser_version, build_parser_version)
+             VALUES ('codex', 1, NULL, 1, NULL)
+             ON CONFLICT(source) DO UPDATE SET active_epoch=1, build_epoch=NULL, active_parser_version=1, build_parser_version=NULL",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO threads(thread_id, source, native_session_id, parent_thread_id, root_session_id, agent_role, project_kind, archived, metadata_quality_status, metadata_resolved_at_ms)
+             VALUES ('root-codex-1', 'codex', 'native-1', NULL, 'root-codex-1', 'main', 'project', 0, 'complete', 100)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO codex_usage_session_quarantine(ledger_epoch, root_session_id, primary_error_code, last_activity_at_ms, first_seen_at_ms, updated_at_ms)
+             VALUES (1, 'root-codex-1', 'TEST_ERROR', 100, 100, 100)",
+            [],
+        ).unwrap();
+
+        let sidecar = CodexSessionErrorSidecar;
+        let range = TimeRange::new(0, 1000).unwrap();
+
+        // 1. []
+        let filter_empty = UsageFilter::default();
+        let roots_empty = sidecar.error_roots(&conn, range, &filter_empty).unwrap();
+        assert_eq!(roots_empty.len(), 1);
+        assert_eq!(roots_empty[0].root_session_id, "root-codex-1");
+
+        // 2. [codex]
+        let filter_codex = UsageFilter::default().with_sources(vec![SourceId::CODEX]);
+        let roots_codex = sidecar.error_roots(&conn, range, &filter_codex).unwrap();
+        assert_eq!(roots_codex, roots_empty);
+
+        // 3. [antigravity]
+        let filter_ag = UsageFilter::default().with_sources(vec![SourceId::ANTIGRAVITY]);
+        let roots_ag = sidecar.error_roots(&conn, range, &filter_ag).unwrap();
+        assert!(
+            roots_ag.is_empty(),
+            "[antigravity] filter must not return Codex error roots"
+        );
+
+        // 4. [codex, antigravity]
+        let filter_both =
+            UsageFilter::default().with_sources(vec![SourceId::CODEX, SourceId::ANTIGRAVITY]);
+        let roots_both = sidecar.error_roots(&conn, range, &filter_both).unwrap();
+        assert_eq!(roots_both, roots_empty);
     }
 }

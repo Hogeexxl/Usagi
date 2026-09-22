@@ -271,7 +271,7 @@ function parseModelFilterOption(value: unknown): ModelFilterOption {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   const provider = record.provider;
-  if (provider !== "openai" && provider !== "route-models") {
+  if (provider !== "openai" && provider !== "antigravity" && provider !== "route-models") {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
   return { model, provider: provider as ModelFilterProvider };
@@ -459,6 +459,8 @@ function parseSessionDetail(value: unknown): SessionDetailResponse {
       source: requiredString(mainRecord, "source"),
       native_session_id: requiredString(mainRecord, "native_session_id"),
       title: nullableString(mainRecord, "title"),
+      project_name: nullableString(mainRecord, "project_name"),
+      project_path: nullableString(mainRecord, "project_path"),
       thread_id: requiredString(mainRecord, "thread_id"),
       root_session_id: requiredString(mainRecord, "root_session_id"),
       models_used: modelsUsed,

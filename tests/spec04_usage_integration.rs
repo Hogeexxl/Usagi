@@ -604,7 +604,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 12);
+    assert_eq!(user_version, 13);
     let source_id = 1_i64;
     let db = Connection::open(&fixture.db).unwrap();
     let old_metadata: (i64, i64, Option<String>, Option<String>, Option<i64>) = db
@@ -926,7 +926,7 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     let backfilled_cost: Option<i64> = db
         .query_row(
