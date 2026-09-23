@@ -1,16 +1,28 @@
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, RefreshCw } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 
-import type { CodexQuotaResponse, SummaryUsageDto } from "../data/types";
+import type { AntigravityQuotaResponse, CodexQuotaResponse, CodexQuotaWindowDto, SummaryUsageDto } from "../data/types";
 import { chartMuted, chartSeriesColor } from "./charts/chartPalette";
 import { EASE_OUT } from "../ui/lib/ease";
 import { NumberTicker } from "../ui/beui/number-ticker";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/beui/popover";
+import { Button } from "../ui/beui/button";
+import { NotificationStack, type NotificationStackItem } from "../ui/beui/notification-stack";
 import { TiltCard } from "../ui/beui/tilt-card";
 import { formatCodexPlanType, formatCodexResetTime, formatCostFull, formatCostPerMillionTokens, formatIntegerFull, formatRatio, type FormattedValue } from "./format";
+import { useHoverGesture } from "../ui/lib/use-hover-gesture";
 
-type MetricGridProps = { usage: SummaryUsageDto | null; modelFilterActive: boolean; quota?: CodexQuotaResponse };
+type MetricGridProps = {
+  usage: SummaryUsageDto | null;
+  modelFilterActive: boolean;
+  codexQuota: CodexQuotaResponse;
+  antigravityQuota: AntigravityQuotaResponse;
+  onRefreshQuota: () => void;
+  quotaRefreshing: boolean;
+  quotaRefreshError: boolean;
+  quotaRefreshAvailable: boolean;
+};
 type Focus = "input" | "output" | "reasoning" | null;
 type CacheFocus = "cached" | "input" | null;
 
@@ -193,77 +205,193 @@ export function codexQuotaColor(remainingPercent: number): string {
   return chartSeriesColor(9);
 }
 
-export function CodexQuotaCard({ quota, glare = true }: { quota: CodexQuotaResponse; glare?: boolean }) {
-  if (quota.status === "loading") return <SkeletonCard bar />;
+type QuotaProvider = "Codex" | "Gemini";
 
-  const weekly = quota.status === "ready" ? quota.weekly : null;
-  if (weekly === null) {
-    return (
-      <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
-        <div className={TITLE}>剩余配额</div>
-        <div className={VALUE}>—</div>
-        <div className={`${LEGEND} mt-auto`}>暂时无法获取配额</div>
-      </TiltCard>
-    );
-  }
+function formatGeminiPlanType(planType: string | null): string {
+  if (!planType) return "—";
+  return planType
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.toLowerCase() === "ai" ? "AI" : `${part[0].toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+}
 
-  const plan = formatCodexPlanType(quota.plan_type);
-  const email = quota.account_email || "—";
-  const resetCredits = quota.reset_credits_available === null ? "—" : `${quota.reset_credits_available} 次`;
-  const remaining = Math.round(weekly.remaining_percent);
-  const header = (
-    <div className="flex min-w-0 items-center justify-between gap-2">
-      <div className={`${TITLE} min-w-0`}>剩余配额</div>
-      <Popover trigger="hover" side="bottom" align="end">
-        <PopoverTrigger>
-          <button type="button" aria-label={plan} className="inline-flex h-4 shrink-0 items-center justify-center rounded-full border border-foreground/40 px-1 text-center text-[10px] font-medium leading-[10px] whitespace-nowrap text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-            {plan}
-          </button>
-        </PopoverTrigger>
-        <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
-          <div className="flex flex-col gap-1">
-            <div>{email}</div>
-            <div>重置卡：{resetCredits}</div>
-          </div>
-        </PopoverContent>
-      </Popover>
-    </div>
-  );
+function QuotaPlanBadge({
+  provider,
+  planType,
+  codex,
+  accountEmail,
+}: {
+  provider: QuotaProvider;
+  planType: string | null;
+  codex?: Pick<CodexQuotaResponse, "account_email" | "reset_credits_available">;
+  accountEmail?: string | null;
+}) {
+  const plan = provider === "Codex" ? formatCodexPlanType(planType) : formatGeminiPlanType(planType);
+  const details = provider === "Codex" ? (
+    <>
+      <div>{codex?.account_email || "—"}</div>
+      <div>重置卡：{codex?.reset_credits_available === null || codex?.reset_credits_available === undefined ? "—" : `${codex.reset_credits_available} 次`}</div>
+    </>
+  ) : <div>{accountEmail || "—"}</div>;
 
   return (
-    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
-      {header}
-      {quota.session === null ? (
-        <>
-          <span className={VALUE} title={`${remaining}%`} aria-label={`${remaining}%`}>
-            <NumberTicker value={weekly.remaining_percent} blur format={(value) => `${value}%`} />
-          </span>
-          <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="剩余与已使用配额">
-            <div className="absolute inset-y-0 left-0" style={{ width: `${weekly.remaining_percent}%`, backgroundColor: codexQuotaColor(weekly.remaining_percent) }} />
-            <div className="absolute inset-y-0 right-0" style={{ width: `${100 - weekly.remaining_percent}%`, backgroundColor: chartMuted }} />
+    <Popover trigger="hover" side="bottom" align="end">
+      <PopoverTrigger>
+        <button type="button" aria-label={`${provider} 计划：${plan}`} className="inline-flex h-4 shrink-0 items-center justify-center rounded-full border border-foreground/40 px-1 text-center text-[10px] font-medium leading-[10px] whitespace-nowrap text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+          {plan}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
+        <div className="flex flex-col gap-1">{details}</div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function QuotaWindowCard({
+  provider,
+  window,
+  planType,
+  codex,
+  accountEmail,
+}: {
+  provider: QuotaProvider;
+  window: CodexQuotaWindowDto;
+  planType: string | null;
+  codex?: Pick<CodexQuotaResponse, "account_email" | "reset_credits_available">;
+  accountEmail?: string | null;
+}) {
+  const label = `${provider}·${window.limit_window_seconds === 18_000 ? "5H" : "Weekly"}`;
+  const remaining = Math.round(window.remaining_percent);
+
+  return (
+    <div className="flex h-full min-w-0 flex-col justify-between">
+      <div className="flex h-4 min-w-0 items-center justify-between gap-2">
+        <span className="truncate text-xs font-medium leading-4 text-foreground">{label}</span>
+        <span className="shrink-0 text-xs font-semibold leading-4 text-foreground" title={`${remaining}%`} aria-label={`${remaining}%`}>
+          <NumberTicker value={window.remaining_percent} blur format={(value) => `${value}%`} />
+        </span>
+      </div>
+      <div className="relative h-[5px] overflow-hidden rounded-full bg-muted" aria-label="剩余与已使用配额">
+        <div className="absolute inset-y-0 left-0" style={{ width: `${window.remaining_percent}%`, backgroundColor: codexQuotaColor(window.remaining_percent) }} />
+        <div className="absolute inset-y-0 right-0" style={{ width: `${100 - window.remaining_percent}%`, backgroundColor: chartMuted }} />
+      </div>
+      <div className="flex h-4 min-w-0 items-center justify-between gap-2">
+        <div className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground">下次重置：{formatCodexResetTime(window.reset_at_ms)}</div>
+        <QuotaPlanBadge provider={provider} planType={planType} codex={codex} accountEmail={accountEmail} />
+      </div>
+    </div>
+  );
+}
+
+export function AccountQuotaCard({
+  codex,
+  antigravity,
+  onRefresh,
+  refreshing,
+  refreshError,
+  refreshAvailable,
+  wide = false,
+  showGemini = true,
+}: {
+  codex: CodexQuotaResponse;
+  antigravity: AntigravityQuotaResponse;
+  onRefresh: () => void;
+  refreshing: boolean;
+  refreshError: boolean;
+  refreshAvailable: boolean;
+  wide?: boolean;
+  showGemini?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const hasFocus = useRef(false);
+  const hover = useHoverGesture();
+  const reduce = useReducedMotion();
+  const items: NotificationStackItem[] = [];
+
+  if (codex.status === "ready") {
+    if (codex.session) {
+      items.push({ id: "codex-session", content: <QuotaWindowCard provider="Codex" window={codex.session} planType={codex.plan_type} codex={codex} /> });
+    }
+    if (codex.weekly) {
+      items.push({ id: "codex-weekly", content: <QuotaWindowCard provider="Codex" window={codex.weekly} planType={codex.plan_type} codex={codex} /> });
+    }
+  }
+  if (showGemini && antigravity.status === "ready") {
+    if (antigravity.session) {
+      items.push({ id: "gemini-session", content: <QuotaWindowCard provider="Gemini" window={antigravity.session} planType={antigravity.plan_type} accountEmail={antigravity.account_email} /> });
+    }
+    if (antigravity.weekly) {
+      items.push({ id: "gemini-weekly", content: <QuotaWindowCard provider="Gemini" window={antigravity.weekly} planType={antigravity.plan_type} accountEmail={antigravity.account_email} /> });
+    }
+  }
+
+  const isLoading = codex.status === "loading" || (showGemini && antigravity.status === "loading");
+  const emptyMessage = isLoading ? "正在读取账户额度…" : "暂无可用额度";
+
+  return (
+    <div
+      ref={shellRef}
+      role="group"
+      aria-labelledby="account-quota-title"
+      className={`relative h-[144px] ${wide ? "w-[304px]" : "w-[236px]"} overflow-visible text-foreground ${expanded ? "z-50" : "z-0"}`}
+      onPointerEnter={(event) => {
+        if (hover.enter(event)) setExpanded(true);
+      }}
+      onPointerLeave={(event) => {
+        if (hover.leave(event) && !hasFocus.current) setExpanded(false);
+      }}
+      onFocusCapture={() => {
+        hasFocus.current = true;
+        setExpanded(true);
+      }}
+      onBlurCapture={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        hasFocus.current = false;
+        setExpanded(false);
+      }}
+    >
+      <div className="absolute left-0 top-0 min-h-[144px] w-full overflow-visible rounded-3xl p-[10px] text-foreground">
+        <motion.div
+          aria-hidden
+          layout="size"
+          initial={false}
+          transition={reduce ? { duration: 0 } : { duration: 0.26, ease: EASE_OUT }}
+          className="absolute inset-0 rounded-3xl bg-muted"
+        />
+        <div className="relative z-10">
+          <div className="flex h-5 min-w-0 items-center justify-between gap-2">
+            <div id="account-quota-title" className="pl-[2px] text-xs font-medium leading-4 text-foreground">账户额度</div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-5 w-5 shrink-0 rounded-md p-0 ${refreshError ? "text-destructive" : "text-muted-foreground"}`}
+              disabled={refreshing || !refreshAvailable}
+              aria-label={refreshError ? "刷新失败，重试账户额度" : "刷新账户额度"}
+              title={refreshError ? "刷新失败，点击重试" : "刷新账户额度"}
+              onClick={onRefresh}
+            >
+              <RefreshCw aria-hidden className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            </Button>
           </div>
-          <div className={`${LEGEND} mt-auto`}>下次重置 · {formatCodexResetTime(weekly.reset_at_ms)}</div>
-        </>
-      ) : (
-        <div className="mt-2 flex min-h-0 flex-1 flex-col justify-between">
-          {[{ label: "session", window: quota.session }, { label: "weekly", window: weekly }].map(({ label, window }) => (
-            <div key={label} className="flex min-w-0 flex-col gap-1">
-              <div className="flex min-w-0 items-center justify-between gap-2">
-                <span className="text-xs font-semibold leading-4 text-foreground">{label}</span>
-                <span className="text-xs font-semibold leading-4 text-foreground" title={`${Math.round(window.remaining_percent)}%`} aria-label={`${Math.round(window.remaining_percent)}%`}>
-                  <NumberTicker value={window.remaining_percent} blur format={(value) => `${value}%`} />
-                </span>
-              </div>
-              <div className="relative h-[4px] overflow-hidden rounded-full bg-muted" aria-label="剩余与已使用配额">
-                <div className="absolute inset-y-0 left-0" style={{ width: `${window.remaining_percent}%`, backgroundColor: codexQuotaColor(window.remaining_percent) }} />
-                <div className="absolute inset-y-0 right-0" style={{ width: `${100 - window.remaining_percent}%`, backgroundColor: chartMuted }} />
-              </div>
-              <div className={LEGEND}>下次重置 · {formatCodexResetTime(window.reset_at_ms)}</div>
-            </div>
-          ))}
+          <div className={`mt-1 ${wide ? "w-[284px]" : "w-[216px]"}`}>
+            {items.length > 0 ? (
+              <NotificationStack
+                items={items}
+                expanded={expanded}
+                dismissRef={shellRef}
+                onExpandedChange={setExpanded}
+                className={`relative h-[100px] ${wide ? "w-[284px]" : "w-[216px]"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background`}
+              />
+            ) : (
+              <div className="flex h-[100px] items-start pt-3 text-xs text-muted-foreground" aria-live="polite">{emptyMessage}</div>
+            )}
+          </div>
         </div>
-      )}
-    </TiltCard>
+      </div>
+    </div>
   );
 }
 
@@ -277,17 +405,16 @@ export function SkeletonCard({ wide = false, bar = false }: { wide?: boolean; ba
   );
 }
 
-const LOADING_QUOTA: CodexQuotaResponse = {
-  status: "loading",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  reset_credits_available: null,
-  fetched_at_ms: null,
-};
-
-export const MetricGrid = memo(function MetricGrid({ usage, modelFilterActive, quota = LOADING_QUOTA }: MetricGridProps) {
+export const MetricGrid = memo(function MetricGrid({
+  usage,
+  modelFilterActive,
+  codexQuota,
+  antigravityQuota,
+  onRefreshQuota,
+  quotaRefreshing,
+  quotaRefreshError,
+  quotaRefreshAvailable,
+}: MetricGridProps) {
   const columns = modelFilterActive
     ? "[grid-template-columns:minmax(0,1fr)_repeat(3,236px)]"
     : "[grid-template-columns:minmax(0,1fr)_repeat(4,236px)]";
@@ -308,7 +435,14 @@ export const MetricGrid = memo(function MetricGrid({ usage, modelFilterActive, q
           <CacheHitMetric usage={usage} glare={false} />
           {!modelFilterActive ? <SessionCountMetric usage={usage} /> : null}
           <EstimatedCostMetric usage={usage} glare={false} />
-          <CodexQuotaCard quota={quota} glare={false} />
+          <AccountQuotaCard
+            codex={codexQuota}
+            antigravity={antigravityQuota}
+            onRefresh={onRefreshQuota}
+            refreshing={quotaRefreshing}
+            refreshError={quotaRefreshError}
+            refreshAvailable={quotaRefreshAvailable}
+          />
         </>
       )}
     </div>

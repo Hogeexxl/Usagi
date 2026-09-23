@@ -4,8 +4,9 @@ import type { ReactNode } from "react";
 
 import type { UsagiClient } from "../data/usagiClient";
 import type { RevisionFeed as RevisionFeedType } from "../data/revisionFeed";
-import type { CodexQuotaResponse, DashboardRange, RevisionTuple, StatusResponse, SummaryUsageDto } from "../data/types";
+import type { AntigravityQuotaResponse, CodexQuotaResponse, DashboardRange, RevisionTuple, StatusResponse, SummaryUsageDto } from "../data/types";
 import { ThemeProvider } from "../theme/ThemeProvider";
+import type { DashboardQuotaControllerView } from "../dashboard/useDashboardQuotaController";
 import { TrayPanelPage, TrayPanelView, type TrayPanelViewModel } from "./TrayPanelPage";
 
 const usage: SummaryUsageDto = {
@@ -31,11 +32,16 @@ const usage: SummaryUsageDto = {
   },
 };
 
-const quota: CodexQuotaResponse = {
+const codexQuota: CodexQuotaResponse = {
   status: "ready",
   account_email: "hoge@example.com",
   plan_type: "pro",
-  session: null,
+  session: {
+    used_percent: 11,
+    remaining_percent: 89,
+    limit_window_seconds: 18_000,
+    reset_at_ms: 1_800_000_000_000,
+  },
   weekly: {
     used_percent: 2,
     remaining_percent: 98,
@@ -45,6 +51,37 @@ const quota: CodexQuotaResponse = {
   reset_credits_available: 999,
   fetched_at_ms: 1_800_000_000_000,
 };
+
+const antigravityQuota: AntigravityQuotaResponse = {
+  status: "ready",
+  account_email: "gemini@example.com",
+  plan_type: "google_ai_pro",
+  session: {
+    used_percent: 20,
+    remaining_percent: 80,
+    limit_window_seconds: 18_000,
+    reset_at_ms: 1_800_000_000_000,
+  },
+  weekly: {
+    used_percent: 65,
+    remaining_percent: 35,
+    limit_window_seconds: 604_800,
+    reset_at_ms: 1_800_000_000_000,
+  },
+  fetched_at_ms: 1_800_000_000_000,
+};
+
+function quotaView(overrides: Partial<DashboardQuotaControllerView> = {}): DashboardQuotaControllerView {
+  return {
+    codex: codexQuota,
+    antigravity: antigravityQuota,
+    refreshing: false,
+    refresh_error: false,
+    refresh_available: true,
+    refresh: vi.fn(),
+    ...overrides,
+  };
+}
 
 const status: StatusResponse = {
   data_revision: 1,
@@ -71,7 +108,10 @@ const revisionFeed = {
 
 function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
   return {
-    codexQuota: vi.fn(async () => quota),
+    codexQuota: vi.fn(async () => codexQuota),
+    antigravityQuota: vi.fn(async () => antigravityQuota),
+    refreshCodexQuota: vi.fn(async () => codexQuota),
+    refreshAntigravityQuota: vi.fn(async () => antigravityQuota),
     filterOptions: vi.fn(async () => ({ data_revision: 1, models: [], projects: [] })),
     summary: vi.fn(async (range) => ({
       range: { key: range.key, start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" },
@@ -148,7 +188,7 @@ describe("TrayPanelPage", () => {
     renderWithTheme(
       <TrayPanelView
         view={viewFor()}
-        quota={quota}
+        quota={quotaView()}
         stopping={false}
         onOpenDashboard={vi.fn()}
         onStop={vi.fn()}
@@ -161,18 +201,82 @@ describe("TrayPanelPage", () => {
     });
   });
 
+  it("places the shared Codex-only quota stack top-right and overlays the lower row on hover", async () => {
+    const quota = quotaView();
+    renderWithTheme(
+      <TrayPanelView
+        view={viewFor()}
+        quota={quota}
+        stopping={false}
+        onOpenDashboard={vi.fn()}
+        onStop={vi.fn()}
+      />,
+    );
+
+    const grid = screen.getByLabelText("KPI 指标");
+    const account = screen.getByRole("group", { name: "账户额度" });
+    const stack = within(account).getByRole("group", { name: "账户额度卡片" });
+    const panel = account.firstElementChild as HTMLElement;
+    const background = panel.firstElementChild as HTMLElement;
+    expect(grid.children).toHaveLength(4);
+    expect(within(grid.children[0] as HTMLElement).getByText("总 Token")).toBeInTheDocument();
+    expect(grid.children[1]).toContainElement(account);
+    expect(within(grid.children[2] as HTMLElement).getByText("缓存命中")).toBeInTheDocument();
+    expect(within(grid.children[3] as HTMLElement).getByText("预估费用")).toBeInTheDocument();
+    expect(account).toHaveClass("h-[144px]", "w-[304px]");
+    expect(panel).toHaveClass("absolute", "top-0", "min-h-[144px]", "p-[10px]");
+    expect(panel).not.toHaveClass("h-[144px]");
+    expect(background).toHaveClass("absolute", "inset-0", "rounded-3xl", "bg-muted");
+    expect(stack).toHaveClass("h-[100px]", "w-[284px]");
+    expect(Array.from(stack.children)).toHaveLength(2);
+    expect(within(stack).getByText("Codex·5H")).toBeInTheDocument();
+    expect(within(stack).getByText("Codex·Weekly")).toBeInTheDocument();
+    expect(within(stack).queryByText(/Gemini·/)).not.toBeInTheDocument();
+
+    const entries = Array.from(stack.children) as HTMLElement[];
+    expect(entries.every((entry) => entry.classList.contains("h-[92px]") && entry.classList.contains("w-full"))).toBe(true);
+    expect(entries.every((entry) => entry.style.visibility !== "hidden")).toBe(true);
+    fireEvent.pointerEnter(account, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(stack).toHaveAttribute("aria-expanded", "true");
+    expect(account).toHaveClass("z-50");
+    expect(stack.parentElement).not.toHaveClass("h-[100px]");
+    await waitFor(() => {
+      expect(entries.map((entry) => Number(entry.style.transform.match(/translateY\((\d+)px\)/)?.[1] ?? 0))).toEqual([0, 96]);
+    });
+    expect(stack).toHaveStyle({ height: "188px" });
+    expect(entries.every((entry) => entry.style.visibility !== "hidden")).toBe(true);
+    expect(within(stack).queryByText(/Gemini·/)).not.toBeInTheDocument();
+    expect(within(stack).getAllByRole("button", { name: "Codex 计划：Pro 20x" })).toHaveLength(2);
+    fireEvent.pointerLeave(account, { pointerId: 1, pointerType: "mouse", buttons: 0, relatedTarget: background });
+    expect(stack).toHaveAttribute("aria-expanded", "true");
+    fireEvent.pointerLeave(account, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(stack).toHaveAttribute("aria-expanded", "false");
+    expect(account).toHaveClass("z-0");
+    expect(entries.every((entry) => entry.style.visibility !== "hidden")).toBe(true);
+    expect(grid.children).toHaveLength(4);
+    expect(account).toHaveClass("h-[144px]");
+
+    fireEvent.click(within(account).getByRole("button", { name: "刷新账户额度" }));
+    expect(quota.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the contracted tray controls and routes actions through injected clients", async () => {
-    const client = fakeClient();
+    const client = fakeClient({
+      antigravityQuota: vi.fn(async () => { throw new Error("Gemini quota should not be requested by Tray"); }),
+      refreshAntigravityQuota: vi.fn(async () => { throw new Error("Gemini quota should not be refreshed by Tray"); }),
+    });
     const stop = vi.fn(async () => "stopped" as const);
     const ipc = vi.fn();
     (window as Window & { ipc?: unknown }).ipc = { postMessage: ipc };
     renderWithTheme(<TrayPanelPage options={{ client, revisionFeed, serviceClient: { getState: vi.fn(async () => "running" as const), stop } }} />);
 
     await waitFor(() => expect(screen.getByText("总 Token")).toBeInTheDocument());
+    await waitFor(() => expect(client.codexQuota).toHaveBeenCalledTimes(1));
+    expect(client.antigravityQuota).not.toHaveBeenCalled();
     expect(screen.getAllByRole("tab")).toHaveLength(3);
     expect(screen.getByText("缓存命中")).toBeInTheDocument();
     expect(screen.getByText("预估费用")).toBeInTheDocument();
-    expect(screen.getByText("剩余配额")).toBeInTheDocument();
+    expect(screen.getByText("账户额度")).toBeInTheDocument();
 
     const dashboard = screen.getByRole("button", { name: "打开 Dashboard" });
     const syncTime = screen.getByText(/^上次同步：/);
@@ -183,15 +287,17 @@ describe("TrayPanelPage", () => {
     const grid = screen.getByLabelText("KPI 指标");
     expect(grid).toHaveClass("grid", "grid-cols-[304px_304px]", "gap-4");
     expect(grid.children).toHaveLength(4);
-    for (const [index, title] of ["总 Token", "预估费用", "缓存命中", "剩余配额"].entries()) {
+    for (const [index, title] of ["总 Token", "账户额度", "缓存命中", "预估费用"].entries()) {
       expect(within(grid.children[index] as HTMLElement).getByText(title)).toBeInTheDocument();
-      expect(grid.children[index]).toHaveClass("h-36");
+      expect(grid.children[index]).toHaveClass(index === 1 ? "h-[144px]" : "h-36");
     }
     expect(dashboard).toHaveClass("border", "bg-card", "h-8");
-    expect(refresh).toHaveClass("h-8", "w-8");
-    expect(themeToggle).toHaveClass("rounded-xl", "border", "border-border", "bg-background", "p-2.5");
-    expect(themeToggle.querySelector(".h-5.w-5")).toBeInTheDocument();
-    expect(stopButton).toHaveClass("border-destructive/35", "text-destructive", "h-8", "w-8");
+    for (const action of [refresh, themeToggle, stopButton]) {
+      expect(action).toHaveClass("h-8", "w-8", "rounded-lg");
+      expect(action).not.toHaveClass("border", "border-border", "border-destructive/35");
+    }
+    expect(themeToggle.querySelector("svg")).toHaveClass("h-4", "w-4");
+    expect(stopButton).toHaveClass("text-destructive", "hover:bg-destructive/10", "hover:text-destructive");
     expect(screen.getByRole("tablist").closest(".p-4")).toHaveClass("gap-4");
     expect(toolbar).toHaveClass("gap-4");
     expect(syncTime).toHaveClass("ml-auto");
@@ -200,11 +306,25 @@ describe("TrayPanelPage", () => {
 
     fireEvent.click(refresh);
     expect(client.refresh).toHaveBeenCalledTimes(1);
+    const refreshQuota = screen.getByRole("button", { name: "刷新账户额度" });
+    expect(refreshQuota).toBeEnabled();
+    fireEvent.click(refreshQuota);
+    expect(client.refreshCodexQuota).toHaveBeenCalledTimes(1);
+    expect(client.refreshAntigravityQuota).not.toHaveBeenCalled();
+    await waitFor(() => expect(refreshQuota).toBeEnabled());
+    expect(refreshQuota).toHaveAccessibleName("刷新账户额度");
     fireEvent.click(dashboard);
     expect(ipc).toHaveBeenCalledWith("open-dashboard");
     fireEvent.click(stopButton);
     expect(stop).toHaveBeenCalledTimes(1);
     expect(stopButton).toBeDisabled();
+
+    const initialThemeLabel = themeToggle.getAttribute("aria-label");
+    const nextThemeLabel = initialThemeLabel === "Switch to dark mode" ? "Switch to light mode" : "Switch to dark mode";
+    fireEvent.click(themeToggle);
+    await waitFor(() => expect(themeToggle).toHaveAttribute("aria-label", nextThemeLabel));
+    fireEvent.click(themeToggle);
+    await waitFor(() => expect(themeToggle).toHaveAttribute("aria-label", initialThemeLabel));
   });
 
   it("restores the stop button and reports a toast when stopping fails", async () => {
@@ -290,7 +410,7 @@ describe("TrayPanelPage", () => {
       const { unmount } = renderWithTheme(
         <TrayPanelView
           view={viewFor({ refresh_state: refreshState, error_code: errorCode })}
-          quota={quota}
+          quota={quotaView()}
           stopping={false}
           onOpenDashboard={vi.fn()}
           onStop={vi.fn()}
@@ -308,7 +428,7 @@ describe("TrayPanelPage", () => {
     renderWithTheme(
       <TrayPanelView
         view={viewFor({ load_state: "error", refresh_state: "tracking_error", error_code: "HTTP_ERROR", retry_load: retryLoad, retry_refresh_status: retryStatus, request_refresh: requestRefresh })}
-        quota={quota}
+        quota={quotaView()}
         stopping={false}
         onOpenDashboard={vi.fn()}
         onStop={vi.fn()}
@@ -329,7 +449,10 @@ describe("TrayPanelPage", () => {
     renderWithTheme(
       <TrayPanelView
         view={viewFor({ metrics: null, load_state: "loading" })}
-        quota={{ ...quota, status: "loading", weekly: null }}
+        quota={quotaView({
+          codex: { ...codexQuota, status: "loading", session: null, weekly: null },
+          antigravity: { ...antigravityQuota, status: "loading", session: null, weekly: null },
+        })}
         stopping={false}
         onOpenDashboard={vi.fn()}
         onStop={vi.fn()}
@@ -340,6 +463,8 @@ describe("TrayPanelPage", () => {
     expect(screen.queryByText("总 Token")).not.toBeInTheDocument();
     const grid = screen.getByLabelText("KPI 加载中");
     expect(grid.children).toHaveLength(4);
-    for (const card of Array.from(grid.children)) expect(card).toHaveClass("h-36");
+    expect(grid.children[0]).toHaveClass("h-36");
+    expect(grid.children[1]).toHaveClass("h-[144px]");
+    for (const card of Array.from(grid.children).slice(2)) expect(card).toHaveClass("h-36");
   });
 });

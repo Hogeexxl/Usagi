@@ -6,6 +6,7 @@ import type {
   DashboardRange,
   SummaryUsageDto,
 } from "../data/types";
+import type { DashboardQuotaControllerView } from "../dashboard/useDashboardQuotaController";
 import { TrayPanelView, type TrayPanelViewModel } from "./TrayPanelPage";
 
 type Scenario = "M01" | "M02" | "M03" | "M04" | "M05" | "M06" | "M07" | "M08" | "M09";
@@ -93,7 +94,7 @@ const SESSION: CodexQuotaWindowDto = {
 const LONG_ACCOUNT_EMAIL = "tray-height-measurement-account-with-intentionally-long-name-0123456789@example-subdomain.example.com";
 const MEASUREMENT_ACCOUNT_EMAIL = "tray-height-measurement@example.com";
 
-const LOADING_QUOTA: CodexQuotaResponse = {
+const LOADING_CODEX_QUOTA: CodexQuotaResponse = {
   status: "loading",
   account_email: null,
   plan_type: null,
@@ -103,13 +104,22 @@ const LOADING_QUOTA: CodexQuotaResponse = {
   fetched_at_ms: null,
 };
 
-const UNAVAILABLE_QUOTA: CodexQuotaResponse = {
+const UNAVAILABLE_CODEX_QUOTA: CodexQuotaResponse = {
   status: "unavailable",
   account_email: null,
   plan_type: null,
   session: null,
   weekly: null,
   reset_credits_available: null,
+  fetched_at_ms: null,
+};
+
+const UNAVAILABLE_ANTIGRAVITY_QUOTA: DashboardQuotaControllerView["antigravity"] = {
+  status: "unavailable",
+  account_email: null,
+  plan_type: null,
+  session: null,
+  weekly: null,
   fetched_at_ms: null,
 };
 
@@ -122,6 +132,17 @@ function readyQuota(session: CodexQuotaWindowDto | null, accountEmail = MEASUREM
     weekly: WEEKLY,
     reset_credits_available: 999,
     fetched_at_ms: 1_800_000_000_000,
+  };
+}
+
+function quotaFor(codex: CodexQuotaResponse): DashboardQuotaControllerView {
+  return {
+    codex,
+    antigravity: UNAVAILABLE_ANTIGRAVITY_QUOTA,
+    refreshing: false,
+    refresh_error: false,
+    refresh_available: true,
+    refresh: noop,
   };
 }
 
@@ -148,42 +169,42 @@ function viewFor(
   };
 }
 
-const SPECIMENS: Record<Scenario, { view: TrayPanelViewModel; quota: CodexQuotaResponse }> = {
+const SPECIMENS: Record<Scenario, { view: TrayPanelViewModel; quota: DashboardQuotaControllerView }> = {
   M01: {
     view: viewFor(null, "loading", "idle"),
-    quota: LOADING_QUOTA,
+    quota: quotaFor(LOADING_CODEX_QUOTA),
   },
   M02: {
     view: viewFor(ZERO_USAGE, "ready", "idle"),
-    quota: UNAVAILABLE_QUOTA,
+    quota: quotaFor(UNAVAILABLE_CODEX_QUOTA),
   },
   M03: {
     view: viewFor(null, "error", "idle", "HTTP_ERROR"),
-    quota: readyQuota(null),
+    quota: quotaFor(readyQuota(null)),
   },
   M04: {
     view: viewFor(ZERO_USAGE, "ready", "tracking_error", "HTTP_ERROR"),
-    quota: readyQuota(null),
+    quota: quotaFor(readyQuota(null)),
   },
   M05: {
     view: viewFor(null, "error", "tracking_error", "HTTP_ERROR"),
-    quota: readyQuota(SESSION),
+    quota: quotaFor(readyQuota(SESSION)),
   },
   M06: {
     view: viewFor(ZERO_USAGE, "ready", "source_changed", "SOURCE_CHANGED"),
-    quota: readyQuota(SESSION),
+    quota: quotaFor(readyQuota(SESSION)),
   },
   M07: {
     view: viewFor(ZERO_USAGE, "ready", "failed", "HTTP_ERROR"),
-    quota: readyQuota(SESSION),
+    quota: quotaFor(readyQuota(SESSION)),
   },
   M08: {
     view: viewFor(LARGE_USAGE, "ready", "idle"),
-    quota: readyQuota(SESSION),
+    quota: quotaFor(readyQuota(SESSION)),
   },
   M09: {
     view: viewFor(ZERO_USAGE, "ready", "idle"),
-    quota: readyQuota(SESSION, LONG_ACCOUNT_EMAIL),
+    quota: quotaFor(readyQuota(SESSION, LONG_ACCOUNT_EMAIL)),
   },
 };
 
@@ -239,12 +260,69 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
   }
 }
 
+function m09ExpandedStack(): HTMLElement {
+  const stack = document.querySelector<HTMLElement>('[role="group"][aria-label="账户额度卡片"]');
+  if (!stack || stack.getAttribute("aria-expanded") !== "true") {
+    throw new Error("M09 account quota stack is not expanded");
+  }
+
+  const labels = ["Codex·5H", "Codex·Weekly"];
+  for (const label of labels) {
+    const labelElement = Array.from(stack.querySelectorAll<HTMLElement>("*")).find(
+      (element) => element.textContent?.trim() === label,
+    );
+    const card = labelElement?.closest<HTMLElement>(".absolute");
+    if (!card || card.getAttribute("aria-hidden") !== "false" || getComputedStyle(card).visibility === "hidden") {
+      throw new Error(`M09 quota card is not visible: ${label}`);
+    }
+  }
+  if (stack.querySelector('[aria-label*="Gemini"]')) throw new Error("M09 unexpectedly rendered a Gemini card");
+  return stack;
+}
+
+function m09LastCodexTrigger(): HTMLButtonElement {
+  const stack = m09ExpandedStack();
+  const triggers = Array.from(
+    stack.querySelectorAll<HTMLButtonElement>('button[aria-label="Codex 计划：Pro 20x"]'),
+  );
+  if (triggers.length !== 2) throw new Error(`M09 expected two Codex plan badges, got ${triggers.length}`);
+
+  const lastTrigger = triggers[triggers.length - 1];
+  const weeklyLabel = Array.from(stack.querySelectorAll<HTMLElement>("*")).find(
+    (element) => element.textContent?.trim() === "Codex·Weekly",
+  );
+  if (!weeklyLabel || lastTrigger.closest(".absolute") !== weeklyLabel.closest(".absolute")) {
+    throw new Error("M09 last Codex badge is not on the Codex weekly card");
+  }
+  return lastTrigger;
+}
+
 async function openM09Popover(): Promise<void> {
   await waitFor(
-    () => document.querySelector<HTMLButtonElement>('button[aria-label="Pro 20x"]') !== null,
-    "M09 quota trigger missing",
+    () => document.querySelector<HTMLElement>('[role="group"][aria-label="账户额度卡片"]') !== null,
+    "M09 account quota stack missing",
   );
-  const trigger = document.querySelector<HTMLButtonElement>('button[aria-label="Pro 20x"]');
+  const stack = document.querySelector<HTMLElement>('[role="group"][aria-label="账户额度卡片"]');
+  if (!stack) throw new Error("M09 account quota stack missing");
+  stack.dispatchEvent(
+    new PointerEvent("pointerover", {
+      bubbles: true,
+      pointerId: 1,
+      pointerType: "mouse",
+      buttons: 0,
+    }),
+  );
+  await waitFor(() => {
+    try {
+      m09ExpandedStack();
+      return true;
+    } catch {
+      return false;
+    }
+  }, "M09 two-card Codex quota stack did not expand");
+  await waitForStableLayout();
+
+  const trigger = m09LastCodexTrigger();
   const hoverRoot = trigger?.parentElement;
   if (!trigger || !hoverRoot) throw new Error("M09 quota hover root missing");
   hoverRoot.dispatchEvent(
@@ -260,21 +338,22 @@ async function openM09Popover(): Promise<void> {
     const emailVisible = Array.from(document.querySelectorAll<HTMLElement>("[data-popover-portal]"))
       .some((portal) => portal.textContent?.includes(LONG_ACCOUNT_EMAIL));
     return expanded && emailVisible;
-  }, "M09 quota popover did not open");
+  }, "M09 Codex weekly popover did not open");
 }
 
 function measurementElements(root: HTMLElement, scenario: Scenario): HTMLElement[] {
   const elements = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))];
   if (scenario !== "M09") return elements;
 
-  const trigger = document.querySelector<HTMLButtonElement>('button[aria-label="Pro 20x"]');
-  if (!trigger || trigger.getAttribute("aria-expanded") !== "true") throw new Error("M09 quota trigger is not expanded");
+  const trigger = m09LastCodexTrigger();
+  if (trigger.getAttribute("aria-expanded") !== "true") throw new Error("M09 Codex weekly trigger is not expanded");
   const contentId = trigger.getAttribute("aria-controls");
   if (!contentId) throw new Error("M09 quota popover controls missing");
   const content = document.getElementById(contentId);
   if (!content) throw new Error("M09 quota popover content missing");
   const portal = content.closest<HTMLElement>("[data-popover-portal]");
   if (!portal || portal.hasAttribute("inert") || portal.closest("[inert]")) throw new Error("M09 quota popover portal is inert or missing");
+  if (!portal.textContent?.includes(LONG_ACCOUNT_EMAIL)) throw new Error("M09 Codex account email is missing from the portal");
   elements.push(portal, ...Array.from(portal.querySelectorAll<HTMLElement>("*")));
   return elements;
 }
@@ -298,6 +377,9 @@ function measure(scenario: Scenario): MeasureSuccess {
       throw new Error("measurement element has a non-finite rect");
     }
     if (rect.width === 0 && rect.height === 0) continue;
+    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+      throw new Error("measurement element overflows the measurement window vertically");
+    }
     const left = rect.left - rootRect.left;
     const right = rect.right - rootRect.left;
     const bottom = rect.bottom - rootRect.top;

@@ -60,13 +60,24 @@ export type CodexQuotaWindowDto = {
   reset_at_ms: number | null;
 };
 
+export type QuotaSnapshotStatus = "loading" | "ready" | "auth_required" | "unavailable";
+
 export type CodexQuotaResponse = {
-  status: "loading" | "ready" | "auth_required" | "unavailable";
+  status: QuotaSnapshotStatus;
   account_email: string | null;
   plan_type: string | null;
   session: CodexQuotaWindowDto | null;
   weekly: CodexQuotaWindowDto | null;
   reset_credits_available: number | null;
+  fetched_at_ms: number | null;
+};
+
+export type AntigravityQuotaResponse = {
+  status: QuotaSnapshotStatus;
+  account_email: string | null;
+  plan_type: string | null;
+  session: CodexQuotaWindowDto | null;
+  weekly: CodexQuotaWindowDto | null;
   fetched_at_ms: number | null;
 };
 

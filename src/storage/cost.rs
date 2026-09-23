@@ -3,8 +3,9 @@
 use crate::{
     cost::{
         BundledPricingRepository, COST_ALGORITHM_VERSION, CostEstimateOutcome, CostEstimator,
-        PRICING_CATALOG_VERSION, UnknownCostReason, UsageCostGranularity,
+        PRICING_CATALOG_VERSION, UsageCostGranularity,
     },
+    source::SourceId,
     usage::normalized::NormalizedTokenUsage,
 };
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -18,18 +19,22 @@ use super::{Result as StorageResult, StorageError};
 pub(crate) fn estimate_event_cost(
     repository: &BundledPricingRepository,
     estimator: &CostEstimator,
+    source: &SourceId,
     model: &str,
     occurred_at_ms: i64,
     granularity: UsageCostGranularity,
     usage: &NormalizedTokenUsage,
 ) -> StorageResult<Option<i64>> {
-    let pricing = repository.resolve(model, occurred_at_ms);
-    let outcome = match pricing {
-        Some(pricing) => estimator
-            .estimate_with(usage, pricing, granularity)
-            .map_err(|_| StorageError::invalid_state("usage cost estimation failed"))?,
-        None => CostEstimateOutcome::Unknown(UnknownCostReason::UnknownModel),
-    };
+    let outcome = crate::cost::estimate_for_source(
+        repository,
+        estimator,
+        source,
+        model,
+        occurred_at_ms,
+        granularity,
+        usage,
+    )
+    .map_err(|_| StorageError::invalid_state("usage cost estimation failed"))?;
     Ok(match outcome {
         CostEstimateOutcome::Known(cost) => Some(cost.total_nanos_usd),
         CostEstimateOutcome::Unknown(_) => None,
@@ -65,10 +70,14 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
     )?;
     let mut rows = statement.query([])?;
     let mut updates = Vec::new();
-    use crate::source::SourceId;
     while let Some(row) = rows.next()? {
         let source: String = row.get(0)?;
-        let estimated_cost = if source == SourceId::CODEX.as_str() {
+        let source_id = match source.as_str() {
+            value if value == SourceId::CODEX.as_str() => Some(SourceId::CODEX),
+            value if value == SourceId::ANTIGRAVITY.as_str() => Some(SourceId::ANTIGRAVITY),
+            _ => None,
+        };
+        let estimated_cost = if let Some(source_id) = source_id {
             let event_kind: String = row.get(3)?;
             let granularity = match event_kind.as_str() {
                 "normal" | "recovered" => UsageCostGranularity::RequestScoped,
@@ -89,6 +98,7 @@ pub(crate) fn refresh_usage_costs_if_needed(connection: &mut Connection) -> Stor
             estimate_event_cost(
                 &repository,
                 &estimator,
+                &source_id,
                 &model,
                 occurred_at_ms,
                 granularity,
@@ -163,7 +173,7 @@ mod tests {
     use crate::storage::migrations::migrate;
 
     #[test]
-    fn td_p4_cost_source_01_antigravity_cost_is_none_and_historical_cleared() {
+    fn td_p4_cost_source_01_source_aware_cost_backfill() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         migrate(&mut conn, 0).unwrap();
@@ -192,10 +202,30 @@ mod tests {
             [],
         ).unwrap();
 
-        // Antigravity event: model='gpt-5.6-sol', historical non-NULL cost
+        // The same Gemini route model stays unknown when Codex is the source.
+        conn.execute(
+            "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
+             VALUES ('codex', 1, 'ev-codex-gemini', 'normal', 100, 'codex:1', 'codex:1', 'gemini-3.8-flash', 1000, 0, 500, 0, 1500, 'complete', 100, 123456)",
+            [],
+        ).unwrap();
+
+        // An Antigravity Google model receives its matching Standard estimate.
+        conn.execute(
+            "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
+             VALUES ('antigravity', 1, 'ev-antigravity-flash', 'normal', 100, 'antigravity:1', 'antigravity:1', 'gemini-3.8-flash', 1000, 0, 500, 0, 1500, 'complete', 100, NULL)",
+            [],
+        ).unwrap();
+
+        // Unpriced Antigravity model: historical non-NULL cost is cleared.
         conn.execute(
             "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
              VALUES ('antigravity', 1, 'ev-antigravity', 'normal', 100, 'antigravity:1', 'antigravity:1', 'gpt-5.6-sol', 1000, 0, 500, 0, 1500, 'partial', 100, 999999)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO usage_events(source, source_epoch, event_id, event_kind, occurred_at_ms, thread_id, root_session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, quality_status, created_at_ms, estimated_cost_nanos_usd)
+             VALUES ('antigravity', 1, 'ev-antigravity-pro', 'normal', 100, 'antigravity:1', 'antigravity:1', 'gemini-3.8-pro', 1000, 0, 500, 0, 1500, 'complete', 100, 999999)",
             [],
         ).unwrap();
 
@@ -216,7 +246,7 @@ mod tests {
         let refreshed = refresh_usage_costs_if_needed(&mut conn).unwrap();
         assert!(refreshed, "refresh should have occurred");
 
-        // Check Codex event has cost computed
+        // OpenAI pricing for Codex remains unchanged.
         let codex_cost: Option<i64> = conn.query_row(
             "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='codex' AND event_id='ev-codex'",
             [],
@@ -224,7 +254,20 @@ mod tests {
         ).unwrap();
         assert!(codex_cost.is_some(), "Codex event must have computed cost");
 
-        // Check Antigravity event cost was cleared to NULL
+        let codex_gemini_cost: Option<i64> = conn.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='codex' AND event_id='ev-codex-gemini'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(codex_gemini_cost, None);
+
+        let antigravity_flash_cost: Option<i64> = conn.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='antigravity' AND event_id='ev-antigravity-flash'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(antigravity_flash_cost, Some(2_625_000));
+
         let antigravity_cost: Option<i64> = conn.query_row(
             "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='antigravity' AND event_id='ev-antigravity'",
             [],
@@ -232,8 +275,15 @@ mod tests {
         ).unwrap();
         assert_eq!(
             antigravity_cost, None,
-            "Antigravity event cost must be NULL"
+            "unpriced Antigravity event cost must be NULL"
         );
+
+        let antigravity_pro_cost: Option<i64> = conn.query_row(
+            "SELECT estimated_cost_nanos_usd FROM usage_events WHERE source='antigravity' AND event_id='ev-antigravity-pro'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(antigravity_pro_cost, None);
 
         // Revision should have bumped because active costs changed
         let new_rev: i64 = conn

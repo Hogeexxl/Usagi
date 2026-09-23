@@ -6,6 +6,7 @@ mod discovery;
 mod normalization;
 mod project;
 mod protobuf;
+pub mod quota;
 mod reader;
 mod snapshot;
 mod storage;

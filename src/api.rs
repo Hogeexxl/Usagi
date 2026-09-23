@@ -23,6 +23,7 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    antigravity::quota::{AntigravityQuotaResponse, AntigravityQuotaService},
     codex::CodexSessionErrorSidecar,
     codex::quota::{CodexQuotaResponse, CodexQuotaService},
     ingestion::{CommitFailureKind, ScanHandle, ScanShutdownError},
@@ -54,6 +55,7 @@ pub struct AppContext {
     pub scanner: ScanHandle,
     pub source_registry: SourceRegistry,
     pub codex_quota_service: Arc<CodexQuotaService>,
+    pub antigravity_quota_service: Arc<AntigravityQuotaService>,
     pub codex_session_error_sidecar: Arc<CodexSessionErrorSidecar>,
     pub update_service: Arc<UpdateService>,
     pub browser_opener: Arc<dyn BrowserOpener>,
@@ -196,6 +198,12 @@ fn build_router(state: ApiState, frontend: static_assets::FrontendSource) -> Rou
     let api = public_v1::routes()
         .route("/health", get(health))
         .route("/codex/quota", get(codex_quota))
+        .route("/codex/quota/refresh", post(codex_quota_refresh))
+        .route("/antigravity/quota", get(antigravity_quota))
+        .route(
+            "/antigravity/quota/refresh",
+            post(antigravity_quota_refresh),
+        )
         .route("/revision", get(revision))
         .route("/status", get(status))
         .route("/usage/summary", get(summary))
@@ -238,6 +246,32 @@ async fn health() -> Response {
 
 async fn codex_quota(State(state): State<ApiState>) -> Json<CodexQuotaResponse> {
     Json(state.context.codex_quota_service.snapshot())
+}
+
+async fn codex_quota_refresh(State(state): State<ApiState>) -> Json<CodexQuotaResponse> {
+    Json(
+        state
+            .context
+            .codex_quota_service
+            .refresh_now_and_reset_timer()
+            .await,
+    )
+}
+
+async fn antigravity_quota(State(state): State<ApiState>) -> Json<AntigravityQuotaResponse> {
+    Json(state.context.antigravity_quota_service.snapshot())
+}
+
+async fn antigravity_quota_refresh(
+    State(state): State<ApiState>,
+) -> Json<AntigravityQuotaResponse> {
+    Json(
+        state
+            .context
+            .antigravity_quota_service
+            .refresh_now_and_reset_timer()
+            .await,
+    )
 }
 
 #[derive(Deserialize)]

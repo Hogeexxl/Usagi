@@ -1,10 +1,11 @@
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
+import { Moon, RefreshCw, Sun } from "lucide-react";
 
 import { createRevisionFeed, type RevisionFeed } from "../data/revisionFeed";
 import type { ServiceClient } from "../data/serviceClient";
-import { ActionSwapText } from "../ui/beui/action-swap";
+import { ActionSwapIcon, ActionSwapText } from "../ui/beui/action-swap";
 import { Button } from "../ui/beui/button";
-import { ThemeToggle } from "../ui/beui/theme-toggle";
+import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { ChartSection } from "./charts/ChartSection";
 import { useDashboardChartsController } from "./charts/useDashboardChartsController";
 import { FilterControls } from "./FilterControls";
@@ -17,9 +18,8 @@ import { SessionSection } from "./session/SessionSection";
 import { createSourceDisplayLookup } from "./shared/sourceDisplay";
 import { useSessionDetailController } from "./session/useSessionDetailController";
 import { useSessionTableController } from "./session/useSessionTableController";
-import { SyncButton } from "./SyncButton";
 import { UpdateButton } from "./UpdateButton";
-import { useCodexQuotaController } from "./useCodexQuotaController";
+import { useDashboardQuotaController } from "./useDashboardQuotaController";
 import { useDashboardController, type DashboardControllerOptions } from "./useDashboardController";
 
 const LazySessionDetailDrawer = lazy(() =>
@@ -50,7 +50,8 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
     });
   }
   const view = useDashboardController({ ...options, revisionFeed: feedRef.current });
-  const quota = useCodexQuotaController({ client: options?.client });
+  const quota = useDashboardQuotaController({ client: options?.client });
+  const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const sessionScope = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.sessions, view.range, view.filters);
   const sessions = useSessionTableController(sessionScope.range, sessionScope.filters, { client: options?.client, revisionFeed: feedRef.current });
   const detail = useSessionDetailController(sessionScope.range, sessionScope.filters, {
@@ -70,6 +71,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
   const loadError = loadErrorMessage(view.load_state);
   const refreshError = refreshErrorMessage(view.refresh_state, view.error_code);
   const refreshEnabled = view.error_code !== "STATUS_NOT_READY" && (view.refresh_state === "idle" || view.refresh_state === "failed");
+  const refreshAnimating = view.refresh_state === "requesting" || view.refresh_state === "running";
   const syncText = formatLastSyncTime(view.last_scan_completed_at_ms);
 
   return (
@@ -86,14 +88,31 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 上次同步：
                 <ActionSwapText key={syncText} value={syncText} animation="blur">{syncText}</ActionSwapText>
               </span>
-              <SyncButton disabled={!refreshEnabled} refreshState={view.refresh_state} lastSyncAtMs={view.last_scan_completed_at_ms} onClick={view.request_refresh} />
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="同步数据"
+                title="同步数据"
+                disabled={!refreshEnabled}
+                onClick={view.request_refresh}
+              >
+                <RefreshCw className={`h-4 w-4${refreshAnimating ? " animate-spin" : ""}`} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={themeToggle.mounted && themeToggle.isDark ? "Switch to light mode" : "Switch to dark mode"}
+                onClick={themeToggle.toggle}
+              >
+                {themeToggle.mounted ? (
+                  <ActionSwapIcon value={themeToggle.isDark ? "dark" : "light"} animation="blur" className="h-4 w-4">
+                    {themeToggle.isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                  </ActionSwapIcon>
+                ) : (
+                  <span className="h-4 w-4" aria-hidden="true" />
+                )}
+              </Button>
               <ServiceButton client={options?.serviceClient} />
-              <ThemeToggle
-                variant="circle-blur"
-                start="bottom-up"
-                className="rounded-xl border border-border bg-background p-2.5"
-                iconClassName="h-5 w-5"
-              />
             </div>
           </header>
 
@@ -127,7 +146,16 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           </section>
 
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
-            <MetricGrid usage={view.metrics} modelFilterActive={view.modelFilterActive} quota={quota} />
+            <MetricGrid
+              usage={view.metrics}
+              modelFilterActive={view.modelFilterActive}
+              codexQuota={quota.codex}
+              antigravityQuota={quota.antigravity}
+              onRefreshQuota={quota.refresh}
+              quotaRefreshing={quota.refreshing}
+              quotaRefreshError={quota.refresh_error}
+              quotaRefreshAvailable={quota.refresh_available}
+            />
           </section>
           <SessionSection view={sessions} detail={detail} sourceDisplay={sourceDisplay} />
           <ChartSection view={charts} />

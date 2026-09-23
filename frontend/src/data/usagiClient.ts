@@ -32,6 +32,7 @@ import {
   type ProjectDistributionResponse,
   type SkillsUsageResponse,
   type DistributionUsageDto,
+  type AntigravityQuotaResponse,
   type CodexQuotaResponse,
   type CodexQuotaWindowDto,
 } from "./types";
@@ -641,6 +642,26 @@ function parseCodexQuota(value: unknown): CodexQuotaResponse {
   };
 }
 
+function parseAntigravityQuota(value: unknown): AntigravityQuotaResponse {
+  const record = requiredRecord(value);
+  const status = requiredString(record, "status");
+  if (status !== "loading" && status !== "ready" && status !== "auth_required" && status !== "unavailable") {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const sessionValue = record.session;
+  const session = sessionValue === null ? null : parseCodexQuotaWindow(sessionValue, 18_000);
+  const weeklyValue = record.weekly;
+  const weekly = weeklyValue === null ? null : parseCodexQuotaWindow(weeklyValue, 604_800);
+  return {
+    status,
+    account_email: nullableString(record, "account_email"),
+    plan_type: nullableString(record, "plan_type"),
+    session,
+    weekly,
+    fetched_at_ms: nullableSafeInteger(record, "fetched_at_ms"),
+  };
+}
+
 function parseRevision(value: unknown): RevisionResponse {
   const record = requiredRecord(value);
   return {
@@ -812,8 +833,37 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
+async function postQuotaJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      signal,
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "X-Usagi-Request": "1",
+      },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new UsagiClientError("HTTP_ERROR", 0);
+  }
+  if (!response.ok) throw await parseError(response);
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new UsagiClientError("HTTP_ERROR", response.status);
+  }
+  return body as T;
+}
+
 export type UsagiClient = {
   codexQuota(signal?: AbortSignal): Promise<CodexQuotaResponse>;
+  antigravityQuota(signal?: AbortSignal): Promise<AntigravityQuotaResponse>;
+  refreshCodexQuota(signal?: AbortSignal): Promise<CodexQuotaResponse>;
+  refreshAntigravityQuota(signal?: AbortSignal): Promise<AntigravityQuotaResponse>;
   filterOptions(signal?: AbortSignal): Promise<FilterOptionsResponse>;
   summary(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<SummaryResponse>;
   modelDistribution(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<ModelDistributionResponse>;
@@ -964,6 +1014,18 @@ export const usagiClient: UsagiClient & UsagiUpdateClient = {
   async codexQuota(signal) {
     const body = await getJson<unknown>("/api/codex/quota", signal);
     return parseCodexQuota(body);
+  },
+  async antigravityQuota(signal) {
+    const body = await getJson<unknown>("/api/antigravity/quota", signal);
+    return parseAntigravityQuota(body);
+  },
+  async refreshCodexQuota(signal) {
+    const body = await postQuotaJson<unknown>("/api/codex/quota/refresh", signal);
+    return parseCodexQuota(body);
+  },
+  async refreshAntigravityQuota(signal) {
+    const body = await postQuotaJson<unknown>("/api/antigravity/quota/refresh", signal);
+    return parseAntigravityQuota(body);
   },
   async filterOptions(signal) {
     const body = await getJson<unknown>("/api/usage/filter-options", signal);

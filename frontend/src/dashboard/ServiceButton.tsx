@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { LoaderCircle, Power } from "lucide-react";
 
 import { serviceClient, type ServiceClient, type ServiceState } from "../data/serviceClient";
 import { AnimatedToastStack, useAnimatedToastStack } from "../ui/beui/animated-toast-stack";
-import { StatefulButton } from "../ui/beui/button";
+import { Button } from "../ui/beui/button";
 
 type ViewState = ServiceState | "loading" | "stopping" | "error";
 
@@ -66,18 +67,17 @@ export function ServiceButton({ client = serviceClient }: { client?: ServiceClie
 
   return (
     <>
-      <StatefulButton
-        state={state === "stopping" ? "loading" : "idle"}
-        variant="outline"
-        size="sm"
-        ripple={false}
-        loadingText="停止中…"
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="停止服务"
+        title={state === "stopping" ? "停止中…" : "停止服务"}
         disabled={state !== "running"}
         onClick={stopService}
-        className="border-destructive/35 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
       >
-        停止服务
-      </StatefulButton>
+        {state === "stopping" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
+      </Button>
       <AnimatedToastStack
         toasts={toast.toasts}
         onDismiss={toast.dismissToast}

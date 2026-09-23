@@ -13,6 +13,7 @@ use axum::{
 use tower::ServiceExt;
 
 use crate::{
+    antigravity::quota::AntigravityQuotaService,
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
     codex::{CodexAdapter, CodexConfig, CodexSessionErrorSidecar},
@@ -64,11 +65,25 @@ impl ApiFixture {
     }
 
     pub fn with_quota_service(label: &str, codex_quota_service: Arc<CodexQuotaService>) -> Self {
-        Self::with_updates_and_quota_service(
+        Self::with_updates_and_quota_services(
             label,
             UpdateService::unavailable(),
             Arc::new(SystemBrowser),
             Some(codex_quota_service),
+            None,
+        )
+    }
+
+    pub fn with_antigravity_quota_service(
+        label: &str,
+        antigravity_quota_service: Arc<AntigravityQuotaService>,
+    ) -> Self {
+        Self::with_updates_and_quota_services(
+            label,
+            UpdateService::unavailable(),
+            Arc::new(SystemBrowser),
+            None,
+            Some(antigravity_quota_service),
         )
     }
 
@@ -81,10 +96,11 @@ impl ApiFixture {
     }
 
     pub fn track_d(label: &str) -> Self {
-        Self::with_updates_and_quota_service_and_registry(
+        Self::with_updates_and_quota_services_and_registry(
             label,
             UpdateService::unavailable(),
             Arc::new(SystemBrowser),
+            None,
             None,
             true,
         )
@@ -96,20 +112,39 @@ impl ApiFixture {
         browser_opener: Arc<dyn BrowserOpener>,
         quota_service: Option<Arc<CodexQuotaService>>,
     ) -> Self {
-        Self::with_updates_and_quota_service_and_registry(
+        Self::with_updates_and_quota_services_and_registry(
             label,
             update_service,
             browser_opener,
             quota_service,
+            None,
             false,
         )
     }
 
-    fn with_updates_and_quota_service_and_registry(
+    fn with_updates_and_quota_services(
         label: &str,
         update_service: Arc<UpdateService>,
         browser_opener: Arc<dyn BrowserOpener>,
-        quota_service: Option<Arc<CodexQuotaService>>,
+        codex_quota_service: Option<Arc<CodexQuotaService>>,
+        antigravity_quota_service: Option<Arc<AntigravityQuotaService>>,
+    ) -> Self {
+        Self::with_updates_and_quota_services_and_registry(
+            label,
+            update_service,
+            browser_opener,
+            codex_quota_service,
+            antigravity_quota_service,
+            false,
+        )
+    }
+
+    fn with_updates_and_quota_services_and_registry(
+        label: &str,
+        update_service: Arc<UpdateService>,
+        browser_opener: Arc<dyn BrowserOpener>,
+        codex_quota_service: Option<Arc<CodexQuotaService>>,
+        antigravity_quota_service: Option<Arc<AntigravityQuotaService>>,
         register_antigravity: bool,
     ) -> Self {
         let root = TempRoot::new(label);
@@ -141,13 +176,16 @@ impl ApiFixture {
         wait_scan(&ledger);
         let (process_shutdown, process_shutdown_receiver) = ProcessShutdown::channel();
         let codex_quota_service =
-            quota_service.unwrap_or_else(|| CodexQuotaService::unavailable(&home));
+            codex_quota_service.unwrap_or_else(|| CodexQuotaService::unavailable(&home));
+        let antigravity_quota_service =
+            antigravity_quota_service.unwrap_or_else(AntigravityQuotaService::unavailable);
         let app = QueryApi::router_with_shutdown(
             AppContext {
                 ledger: Arc::clone(&ledger),
                 scanner: scanner.clone(),
                 source_registry: registry,
                 codex_quota_service,
+                antigravity_quota_service,
                 codex_session_error_sidecar: Arc::new(CodexSessionErrorSidecar),
                 update_service,
                 browser_opener,

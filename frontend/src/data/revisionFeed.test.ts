@@ -7,6 +7,9 @@ function clientWithRevision(revision: number): UsagiClient {
   return {
     filterOptions: vi.fn(),
     codexQuota: vi.fn(),
+    antigravityQuota: vi.fn(),
+    refreshCodexQuota: vi.fn(),
+    refreshAntigravityQuota: vi.fn(),
     summary: vi.fn(),
     modelDistribution: vi.fn(),
     projectDistribution: vi.fn(),

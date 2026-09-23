@@ -1,6 +1,7 @@
 //! Bundled model pricing for the cost domain.
 
-use super::registry::{ModelProvider, ModelRegistry};
+use super::registry::{ModelRegistry, PricingProvider};
+use crate::source::SourceId;
 
 /// Per-token rates expressed in USD nanodollars.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,8 +76,9 @@ impl ModelPricing {
 }
 
 include!("litellm_catalog.rs");
+include!("google_catalog.rs");
 
-/// The immutable bundled Standard catalog.
+/// The immutable bundled OpenAI Standard catalog.
 pub const BUNDLED_PRICING_CATALOG: &[ModelPricing] = LITELLM_OPENAI_PRICING_CATALOG;
 
 /// Repository backed by the fixed bundled catalog.
@@ -91,8 +93,27 @@ impl BundledPricingRepository {
     pub fn resolve(&self, model: &str, occurred_at_ms: i64) -> Option<&'static ModelPricing> {
         let resolution = ModelRegistry::new().resolve(model);
         match (resolution.pricing_provider, resolution.pricing_target) {
-            (Some(ModelProvider::OpenAI), Some(target)) => {
+            (Some(PricingProvider::OpenAI), Some(target)) => {
                 resolve_from_catalog(BUNDLED_PRICING_CATALOG, target, occurred_at_ms)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a pricing rule using both the event's source and model identity.
+    pub fn resolve_for_source(
+        &self,
+        source: &SourceId,
+        model: &str,
+        occurred_at_ms: i64,
+    ) -> Option<&'static ModelPricing> {
+        let resolution = ModelRegistry::new().resolve_for_source(source, model);
+        match (resolution.pricing_provider, resolution.pricing_target) {
+            (Some(PricingProvider::OpenAI), Some(target)) => {
+                resolve_from_catalog(BUNDLED_PRICING_CATALOG, target, occurred_at_ms)
+            }
+            (Some(PricingProvider::Google), Some(target)) => {
+                resolve_from_catalog(GOOGLE_STANDARD_PRICING_CATALOG, target, occurred_at_ms)
             }
             _ => None,
         }
@@ -294,12 +315,46 @@ mod tests {
 
     #[test]
     fn t_mu04_a04_missing_cache_read_stays_unpriced() {
-        let registry = ModelRegistry::new();
         let repository = BundledPricingRepository::new();
 
         for model in ["gpt-3.5-turbo", "gpt-5-pro", "ft:gpt-4o-2024-11-20"] {
-            assert_eq!(registry.resolve(model).provider, ModelProvider::OpenAI);
+            assert_eq!(
+                ModelRegistry::new().resolve(model).provider,
+                super::super::registry::ModelProvider::OpenAI
+            );
             assert!(repository.resolve(model, 0).is_none(), "{model}");
         }
+    }
+
+    #[test]
+    fn google_standard_rates_require_antigravity_source_and_match_litellm_projection() {
+        let repository = BundledPricingRepository::new();
+
+        for model in ["gemini-3.7-flash", "gemini-3.8-flash"] {
+            for occurred_at_ms in [0, i64::MAX] {
+                let pricing = repository
+                    .resolve_for_source(&SourceId::ANTIGRAVITY, model, occurred_at_ms)
+                    .expect("Google Standard pricing");
+                assert_eq!(pricing.canonical_model_id, model);
+                assert_eq!(pricing.short_context, TokenRates::new(750, 75, None, 3_750));
+            }
+        }
+
+        assert!(repository.resolve("gemini-3.8-flash", 0).is_none());
+        assert!(
+            repository
+                .resolve_for_source(&SourceId::CODEX, "gemini-3.8-flash", 0)
+                .is_none()
+        );
+        assert!(
+            repository
+                .resolve_for_source(&SourceId::ANTIGRAVITY, "gemini-3.8-pro", 0)
+                .is_none()
+        );
+        assert!(
+            repository
+                .resolve_for_source(&SourceId::ANTIGRAVITY, "gpt-5.6-sol", 0)
+                .is_none()
+        );
     }
 }

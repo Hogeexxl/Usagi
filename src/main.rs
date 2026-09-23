@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 
 use usagi::{
+    antigravity::quota::AntigravityQuotaService,
     antigravity::{AntigravityAdapter, AntigravityConfig, AntigravityConfigResolution},
     api::{AppContext, ProcessShutdown, QueryApi},
     codex::quota::CodexQuotaService,
@@ -151,6 +152,13 @@ where
             CodexQuotaService::unavailable(codex_resolution.quota_home())
         }
     };
+    let antigravity_quota_service = match AntigravityQuotaService::new() {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("Usagi Antigravity quota unavailable: {error}");
+            AntigravityQuotaService::unavailable()
+        }
+    };
     let (process_shutdown, mut shutdown_requested) = ProcessShutdown::channel();
     let update_service = match update_factory() {
         Ok(service) => service,
@@ -167,6 +175,7 @@ where
             scanner,
             source_registry: source_registry.clone(),
             codex_quota_service: Arc::clone(&codex_quota_service),
+            antigravity_quota_service: Arc::clone(&antigravity_quota_service),
             codex_session_error_sidecar: Arc::clone(&codex_session_error_sidecar),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),
@@ -183,6 +192,7 @@ where
             scanner,
             source_registry,
             codex_quota_service: Arc::clone(&codex_quota_service),
+            antigravity_quota_service: Arc::clone(&antigravity_quota_service),
             codex_session_error_sidecar: Arc::clone(&codex_session_error_sidecar),
             update_service: Arc::clone(&update_service),
             browser_opener: Arc::clone(&browser_opener),
@@ -214,6 +224,7 @@ where
     on_ready(address);
 
     let codex_quota_task = codex_quota_service.spawn_background();
+    let antigravity_quota_task = antigravity_quota_service.spawn_background();
 
     if let Err(error) = browser::open_dashboard_at(browser_opener.as_ref(), address) {
         eprintln!("Usagi server is ready, but the browser could not be opened: {error}");
@@ -229,6 +240,8 @@ where
     let _ = update_task.await;
     codex_quota_task.abort();
     let _ = codex_quota_task.await;
+    antigravity_quota_task.abort();
+    let _ = antigravity_quota_task.await;
     result
 }
 

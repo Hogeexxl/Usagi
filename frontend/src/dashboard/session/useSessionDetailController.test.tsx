@@ -107,6 +107,9 @@ function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
     getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })),
     refresh: vi.fn(),
     ...overrides,
+    antigravityQuota: overrides.antigravityQuota ?? vi.fn(),
+    refreshCodexQuota: overrides.refreshCodexQuota ?? vi.fn(),
+    refreshAntigravityQuota: overrides.refreshAntigravityQuota ?? vi.fn(),
   };
 }
 

@@ -360,7 +360,25 @@ test("C1 desktop 1512px matches the approved v0.2.0 dashboard geometry", async (
   expect(await selectedRangeTab.evaluate((node) => getComputedStyle(node).fontSize)).toBe("14px");
 
   const syncButton = page.getByRole("button", { name: "同步数据", exact: true });
-  expect(await syncButton.evaluate((node) => getComputedStyle(node).fontSize)).toBe("12px");
+  const themeButton = page.getByRole("button", { name: /Switch to (light|dark) mode/ });
+  const stopButton = page.getByRole("button", { name: "停止服务" });
+  await expect(syncButton).toHaveAttribute("title", "同步数据");
+  const controlButtons = [syncButton, themeButton, stopButton];
+  for (const controlButton of controlButtons) {
+    await expect(controlButton).toHaveClass(/h-8/);
+    await expect(controlButton).toHaveClass(/w-8/);
+    await expect(controlButton).toHaveClass(/rounded-lg/);
+    expect(await controlButton.evaluate((node) => {
+      const { width, height } = node.getBoundingClientRect();
+      return [Math.round(width), Math.round(height)];
+    })).toEqual([32, 32]);
+    const iconBox = await controlButton.locator("svg").boundingBox();
+    expect(iconBox?.width).toBeCloseTo(16, 0);
+    expect(iconBox?.height).toBeCloseTo(16, 0);
+  }
+  await expect(syncButton).toHaveClass(/text-muted-foreground/);
+  await expect(themeButton).toHaveClass(/text-muted-foreground/);
+  await expect(stopButton).toHaveClass(/text-destructive/);
 
   const filterTrigger = page.getByRole("button", { name: "模型筛选，全部", exact: true });
   const filterStyle = await filterTrigger.evaluate((node) => {
@@ -444,13 +462,12 @@ test("C2 covers the approved v0.2.0 core interaction flow", async ({ page }) => 
 
   await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains("dark"))).toBe(true);
   const themeToggle = page.getByRole("button", { name: "Switch to light mode" });
-  await expect(themeToggle).toHaveClass(/rounded-xl/);
-  await expect(themeToggle).toHaveClass(/border-border/);
-  await expect(themeToggle).toHaveClass(/bg-background/);
-  await expect(themeToggle).toHaveClass(/p-2\.5/);
+  await expect(themeToggle).toHaveClass(/h-8/);
+  await expect(themeToggle).toHaveClass(/w-8/);
+  await expect(themeToggle).toHaveClass(/rounded-lg/);
   const themeIconBox = await themeToggle.locator("svg").boundingBox();
-  expect(themeIconBox?.width).toBeCloseTo(20, 0);
-  expect(themeIconBox?.height).toBeCloseTo(20, 0);
+  expect(themeIconBox?.width).toBeCloseTo(16, 0);
+  expect(themeIconBox?.height).toBeCloseTo(16, 0);
   const supportsViewTransition = await page.evaluate(() => "startViewTransition" in document);
   await themeToggle.click();
   if (supportsViewTransition) {
@@ -594,7 +611,7 @@ test("T-Q-008 Codex Quota stays last, fixed-width, and overflow-free at required
   const kpi = page.getByLabel("KPI 指标");
   const cards = kpi.locator(":scope > *");
   await expect(cards).toHaveCount(5);
-  await expect(cards.last().getByText("剩余配额")).toBeVisible();
+  await expect(cards.last().getByText("账户额度")).toBeVisible();
   const cardWidths = await cards.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().width)));
   expect(cardWidths.slice(1)).toEqual([236, 236, 236, 236]);
   expect(cardWidths[0]).toBeLessThan(236);

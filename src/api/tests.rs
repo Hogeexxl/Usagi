@@ -16,6 +16,10 @@ use tokio::sync::{Mutex, Notify};
 use tower::ServiceExt;
 
 use crate::{
+    antigravity::quota::{
+        AntigravityQuotaService, QuotaFetchError as AntigravityQuotaFetchError,
+        QuotaPayload as AntigravityQuotaPayload, QuotaProvider as AntigravityQuotaProvider,
+    },
     codex::quota::{
         CodexQuotaService, CodexQuotaStatus, QuotaFetchError, QuotaProvider, ReadyPayload,
     },
@@ -100,6 +104,25 @@ fn quota_fixture_provider() -> QuotaFixtureProvider {
     }
 }
 
+#[derive(Clone)]
+struct AntigravityQuotaFixtureProvider {
+    calls: Arc<AtomicUsize>,
+    payload: AntigravityQuotaPayload,
+}
+
+impl AntigravityQuotaProvider for AntigravityQuotaFixtureProvider {
+    fn fetch<'a>(
+        &'a self,
+        _now_ms: i64,
+    ) -> BoxFuture<'a, Result<AntigravityQuotaPayload, AntigravityQuotaFetchError>> {
+        async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.payload.clone())
+        }
+        .boxed()
+    }
+}
+
 impl ReleaseProvider for BlockingProvider {
     fn fetch_latest(&self) -> BoxFuture<'_, Result<ReleaseInfo, UpdateFailureKind>> {
         async move {
@@ -180,6 +203,88 @@ async fn t_q_004_quota_refresh_isolated_from_scanner_refresh_and_ledger_state() 
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     fixture.scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn manual_quota_refresh_routes_return_the_fresh_snapshot() {
+    let codex_provider = quota_fixture_provider();
+    let codex_calls = Arc::clone(&codex_provider.calls);
+    let codex_service = CodexQuotaService::with_provider_and_clock(
+        "/tmp/codex-quota-manual-api-test",
+        Arc::new(codex_provider),
+        Arc::new(|| 1_700_000_000_000),
+    );
+    let codex_fixture =
+        support::ApiFixture::with_quota_service("quota-manual-codex", codex_service);
+    let codex_response = codex_fixture
+        .call(Method::POST, "/api/codex/quota/refresh", &[])
+        .await;
+    assert_eq!(codex_response.status(), StatusCode::OK);
+    let codex_body = json_body(codex_response).await;
+    assert_eq!(codex_body["status"], "ready");
+    assert_eq!(codex_body["plan_type"], "prolite");
+    assert_eq!(codex_body["weekly"]["used_percent"], 55.0);
+    assert_eq!(codex_body["fetched_at_ms"], 1_700_000_000_000_i64);
+    assert_eq!(codex_calls.load(Ordering::SeqCst), 1);
+    codex_fixture.scanner.shutdown().unwrap();
+
+    let antigravity_provider = AntigravityQuotaFixtureProvider {
+        calls: Arc::new(AtomicUsize::new(0)),
+        payload: AntigravityQuotaPayload {
+            account_email: Some("antigravity.fixture@example.test".to_owned()),
+            plan_type: Some("Ultra".to_owned()),
+            session: Some(crate::codex::quota::CodexQuotaWindow {
+                used_percent: 61.5,
+                remaining_percent: 38.5,
+                limit_window_seconds: 18_000,
+                reset_at_ms: Some(1_700_000_180_000),
+            }),
+            weekly: None,
+        },
+    };
+    let antigravity_calls = Arc::clone(&antigravity_provider.calls);
+    let antigravity_service = AntigravityQuotaService::with_provider_and_clock(
+        Arc::new(antigravity_provider),
+        Arc::new(|| 1_700_000_000_000),
+    );
+    let antigravity_fixture = support::ApiFixture::with_antigravity_quota_service(
+        "quota-manual-antigravity",
+        antigravity_service,
+    );
+    let loading = antigravity_fixture
+        .call(Method::GET, "/api/antigravity/quota", &[])
+        .await;
+    let loading_body = json_body(loading).await;
+    assert_eq!(loading_body["status"], "loading");
+    assert_eq!(loading_body.get("account_email"), Some(&Value::Null));
+    let antigravity_response = antigravity_fixture
+        .call(Method::POST, "/api/antigravity/quota/refresh", &[])
+        .await;
+    assert_eq!(antigravity_response.status(), StatusCode::OK);
+    let antigravity_body = json_body(antigravity_response).await;
+    assert!(antigravity_body.get("account_email").is_some());
+    assert_eq!(
+        antigravity_body,
+        json!({
+            "status": "ready",
+            "account_email": "antigravity.fixture@example.test",
+            "plan_type": "Ultra",
+            "session": {
+                "used_percent": 61.5,
+                "remaining_percent": 38.5,
+                "limit_window_seconds": 18_000,
+                "reset_at_ms": 1_700_000_180_000_i64
+            },
+            "weekly": null,
+            "fetched_at_ms": 1_700_000_000_000_i64
+        })
+    );
+    assert_eq!(antigravity_calls.load(Ordering::SeqCst), 1);
+    let updated = antigravity_fixture
+        .call(Method::GET, "/api/antigravity/quota", &[])
+        .await;
+    assert_eq!(json_body(updated).await, antigravity_body);
+    antigravity_fixture.scanner.shutdown().unwrap();
 }
 
 #[tokio::test]

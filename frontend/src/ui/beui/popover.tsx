@@ -538,7 +538,7 @@ export function PopoverContent({
   const layout = usePopoverPortalPosition(
     triggerRef,
     measureRef,
-    portalReady,
+    portalReady && open,
   );
 
   useEffect(() => setPortalReady(true), []);

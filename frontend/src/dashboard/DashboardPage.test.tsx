@@ -3,10 +3,10 @@ import { StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { UsagiClient } from "../data/usagiClient";
-import { UsagiClientError, type ApiErrorCode, type CodexQuotaResponse, type StatusResponse } from "../data/types";
+import { UsagiClientError, type AntigravityQuotaResponse, type ApiErrorCode, type CodexQuotaResponse, type StatusResponse } from "../data/types";
 import { ThemeProvider } from "../theme/ThemeProvider";
 import { DashboardPage } from "./DashboardPage";
-import { useCodexQuotaController } from "./useCodexQuotaController";
+import { useDashboardQuotaController } from "./useDashboardQuotaController";
 
 const summary = (range: "today" | "yesterday") => ({
   range: { key: range, start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" },
@@ -84,6 +84,26 @@ const quotaReady: CodexQuotaResponse = {
   fetched_at_ms: 1_786_076_580_000,
 };
 
+const quotaUnavailable: CodexQuotaResponse = { ...quotaLoading, status: "unavailable" };
+
+const antigravityQuotaReady: AntigravityQuotaResponse = {
+  status: "ready",
+  account_email: "gemini@example.com",
+  plan_type: "google_ai_pro",
+  session: { used_percent: 20, remaining_percent: 80, limit_window_seconds: 18000, reset_at_ms: 1_786_100_000_000 },
+  weekly: { used_percent: 65, remaining_percent: 35, limit_window_seconds: 604800, reset_at_ms: 1_786_508_580_000 },
+  fetched_at_ms: 1_786_076_580_000,
+};
+
+const antigravityQuotaUnavailable: AntigravityQuotaResponse = {
+  status: "unavailable",
+  account_email: null,
+  plan_type: null,
+  session: null,
+  weekly: null,
+  fetched_at_ms: null,
+};
+
 const offsetHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 
 function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
@@ -112,15 +132,10 @@ function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
         skills: [],
       })),
       })),
-    codexQuota: vi.fn(async () => ({
-      status: "unavailable" as const,
-      account_email: null,
-      plan_type: null,
-      session: null,
-      weekly: null,
-      reset_credits_available: null,
-      fetched_at_ms: null,
-    })),
+    codexQuota: vi.fn(async () => quotaUnavailable),
+    antigravityQuota: vi.fn(async () => antigravityQuotaUnavailable),
+    refreshCodexQuota: vi.fn(async () => quotaUnavailable),
+    refreshAntigravityQuota: vi.fn(async () => antigravityQuotaUnavailable),
     getSessionSnapshot: vi.fn(async () => sessionSnapshot),
     getSessionRows: vi.fn(async ({ range }) => ({
       range: { ...sessionSnapshot.range, key: range.key },
@@ -172,8 +187,15 @@ function QuotaProbe({
   project?: string;
   revision?: number;
 }) {
-  const quota = useCodexQuotaController({ client });
-  return <output data-testid="quota-probe" data-range={range} data-model={model} data-project={project} data-revision={revision}>{quota.status}</output>;
+  const quota = useDashboardQuotaController({ client });
+  return (
+    <>
+      <button type="button" onClick={quota.refresh} disabled={!quota.refresh_available || quota.refreshing}>Refresh quota</button>
+      <output data-testid="quota-probe" data-range={range} data-model={model} data-project={project} data-revision={revision}>
+        {quota.codex.status}:{quota.antigravity.status}:{quota.refreshing ? "refreshing" : "idle"}
+      </output>
+    </>
+  );
 }
 
 async function flushQuotaPromises() {
@@ -188,7 +210,7 @@ function totalTokenCard() {
 }
 
 describe("DashboardPage v0.2.1", () => {
-  it("T-Q-006 controller reads immediately, retries loading after 1s, then polls every 300s", async () => {
+  it("T-Q-006 controller reads both providers, retries loading after 1s, then polls every 300s", async () => {
     vi.useFakeTimers();
     try {
       const codexQuota = vi.fn()
@@ -204,7 +226,7 @@ describe("DashboardPage v0.2.1", () => {
       await act(async () => { vi.advanceTimersByTime(1); });
       await flushQuotaPromises();
       expect(codexQuota).toHaveBeenCalledTimes(2);
-      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready");
+      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready:unavailable:idle");
 
       await act(async () => { vi.advanceTimersByTime(299_999); });
       expect(codexQuota).toHaveBeenCalledTimes(2);
@@ -266,12 +288,47 @@ describe("DashboardPage v0.2.1", () => {
       const client = fakeClient({ codexQuota });
       const rendered = render(<QuotaProbe client={client} />);
       await flushQuotaPromises();
-      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready");
+      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready:unavailable:idle");
       await act(async () => { vi.advanceTimersByTime(300_000); });
       await flushQuotaPromises();
       expect(codexQuota).toHaveBeenCalledTimes(2);
-      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready");
+      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready:unavailable:idle");
       rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes both quota snapshots and restarts the frontend poll timer from the click", async () => {
+    vi.useFakeTimers();
+    try {
+      const codexQuota = vi.fn(async () => quotaReady);
+      const antigravityQuota = vi.fn(async () => antigravityQuotaReady);
+      const refreshCodexQuota = vi.fn(async () => quotaReady);
+      const refreshAntigravityQuota = vi.fn(async () => antigravityQuotaReady);
+      const client = fakeClient({ codexQuota, antigravityQuota, refreshCodexQuota, refreshAntigravityQuota });
+      render(<QuotaProbe client={client} />);
+      await flushQuotaPromises();
+
+      // Move past part of the initial polling interval so the refresh must reset it.
+      await act(async () => { vi.advanceTimersByTime(120_000); });
+
+      const refresh = screen.getByRole("button", { name: "Refresh quota" });
+      expect(refresh).toBeEnabled();
+      fireEvent.click(refresh);
+      fireEvent.click(refresh);
+      expect(refreshCodexQuota).toHaveBeenCalledTimes(1);
+      expect(refreshAntigravityQuota).toHaveBeenCalledTimes(1);
+      await flushQuotaPromises();
+      expect(screen.getByTestId("quota-probe")).toHaveTextContent("ready:ready:idle");
+
+      await act(async () => { vi.advanceTimersByTime(299_999); });
+      expect(codexQuota).toHaveBeenCalledTimes(1);
+      expect(antigravityQuota).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(1); });
+      await flushQuotaPromises();
+      expect(codexQuota).toHaveBeenCalledTimes(2);
+      expect(antigravityQuota).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -441,14 +498,18 @@ describe("DashboardPage v0.2.1", () => {
 
     const sync = screen.getByRole("button", { name: "同步数据" });
     const stop = screen.getByRole("button", { name: "停止服务" });
-    for (const button of [sync, stop]) {
-      expect(button).toHaveClass("h-8", "px-3", "text-xs", "gap-1.5", "rounded-full");
-      expect(button).not.toHaveClass("h-10");
-    }
+    expect(sync).toHaveClass("h-8", "w-8", "rounded-lg", "text-muted-foreground");
+    expect(sync.querySelector("svg")).toHaveClass("h-4", "w-4");
+    expect(sync).toHaveAttribute("title", "同步数据");
+    expect(stop).toHaveClass("h-8", "w-8", "rounded-lg", "text-destructive");
+    expect(stop.querySelector("svg")).toHaveClass("h-4", "w-4");
 
     const theme = screen.getByRole("button", { name: "Switch to light mode" });
-    expect(theme).toHaveClass("rounded-xl", "border", "border-border", "bg-background", "p-2.5");
-    expect(theme.querySelector("svg")).toHaveClass("h-5", "w-5");
+    expect(theme).toHaveClass("h-8", "w-8", "rounded-lg", "text-muted-foreground");
+    expect(theme.querySelector("svg")).toHaveClass("h-4", "w-4");
+    const syncGroup = document.querySelector<HTMLElement>(".dashboard-sync-group");
+    if (!syncGroup) throw new Error("Dashboard sync group not found");
+    expect(within(syncGroup).getAllByRole("button")).toEqual([sync, theme, stop]);
     expect(screen.getByText(/上次同步：/)).toHaveClass("text-muted-foreground");
   });
 
@@ -507,7 +568,9 @@ describe("DashboardPage v0.2.1", () => {
     await waitFor(() => expect(screen.getAllByText("同步状态获取失败").length).toBeGreaterThan(0));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     screen.getByRole("button", { name: "重试" }).click();
-    await waitFor(() => expect(screen.getAllByText("同步中…").length).toBeGreaterThan(0));
+    const syncButton = screen.getByRole("button", { name: "同步数据" });
+    await waitFor(() => expect(syncButton.querySelector("svg")).toHaveClass("animate-spin"));
+    expect(syncButton).toBeDisabled();
     expect(client.refresh).toHaveBeenCalledTimes(1);
   });
 

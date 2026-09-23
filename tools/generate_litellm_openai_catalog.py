@@ -18,22 +18,25 @@ from pathlib import Path
 from typing import Any
 
 
-SOURCE_REF = "eeb7732fc11fd47762ca84cc3fb7cc74235d7097"
+SOURCE_REF = "721d39f476428a0e8f5991fef94669e53bd20df1"
 SOURCE_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/"
     f"{SOURCE_REF}/model_prices_and_context_window.json"
 )
-SOURCE_SHA256 = "f68d88c12610ea31ab355a1293fde55aeed6fa78a1f4b182c67be47d80b1d202"
-VERIFIED_AT = "2026-09-12"
+SOURCE_SHA256 = "83cc2d6257437025ef7f8a56533d596159e915a199647ba1e3a37f3f706bc734"
+VERIFIED_AT = "2026-09-23"
 NANODOLLARS_PER_DOLLAR = Decimal("1000000000")
 THRESHOLD_INPUT_TOKENS = 272_000
 
 TARGET_MODELS = (
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
+ADDED_MODELS = ("gpt-6-luna", "gpt-6-sol")
 
 JSON_KEYS = (
     (
@@ -61,6 +64,14 @@ EXPECTED_RATES: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, 
         (10_000, 1_000, 12_500, 50_000),
         (20_000, 2_000, 25_000, 75_000),
     ),
+    "gpt-6-sol": (
+        (2_000, 200, 2_500, 10_000),
+        (4_000, 400, 5_000, 15_000),
+    ),
+    "gpt-6-luna": (
+        (100, 10, 125, 500),
+        (200, 20, 250, 750),
+    ),
     "gpt-5.6-sol": (
         (4_000, 400, 5_000, 20_000),
         (8_000, 800, 10_000, 30_000),
@@ -77,6 +88,8 @@ EXPECTED_RATES: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, 
 
 MODEL_CONSTANTS = {
     "gpt-6-astra": "SNAPSHOT_GPT_6_ASTRA_PRICING",
+    "gpt-6-sol": "SNAPSHOT_GPT_6_SOL_PRICING",
+    "gpt-6-luna": "SNAPSHOT_GPT_6_LUNA_PRICING",
     "gpt-5.6-sol": "SNAPSHOT_GPT_5_6_SOL_PRICING",
     "gpt-5.6-terra": "SNAPSHOT_GPT_5_6_TERRA_PRICING",
     "gpt-5.6-luna": "SNAPSHOT_GPT_5_6_LUNA_PRICING",
@@ -105,7 +118,7 @@ class GenerationError(Exception):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the four-model Usagi LiteLLM catalog candidate."
+        description="Generate the six-model Usagi LiteLLM catalog candidate."
     )
     parser.add_argument("--input", required=True, type=Path, help="pinned LiteLLM JSON")
     parser.add_argument("--catalog", required=True, type=Path, help="current Rust catalog")
@@ -218,6 +231,7 @@ def update_header(source: str) -> str:
         raise GenerationError("catalog source header is missing its terminating blank line")
 
     newline = "\r\n" if "\r\n" in source else "\n"
+    model_list = ", ".join(TARGET_MODELS)
     metadata = {
         "LITELLM_SNAPSHOT_SOURCE_URL": f"// LITELLM_SNAPSHOT_SOURCE_URL: {SOURCE_URL}",
         "LITELLM_SNAPSHOT_SOURCE_REF": f"// LITELLM_SNAPSHOT_SOURCE_REF: {SOURCE_REF}",
@@ -229,8 +243,8 @@ def update_header(source: str) -> str:
             f"// LITELLM_SNAPSHOT_VERIFIED_AT: {VERIFIED_AT}"
         ),
         "LITELLM_SNAPSHOT_SCOPE": (
-            "// LITELLM_SNAPSHOT_SCOPE: this round updates only four target models "
-            "(gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna)"
+            "// LITELLM_SNAPSHOT_SCOPE: this round updates only six target models "
+            f"({model_list})"
         ),
     }
 
@@ -261,51 +275,51 @@ def replace_model_ids(source: str) -> str:
 
     for model in TARGET_MODELS:
         count = ids.count(model)
-        if model == "gpt-6-astra":
-            if count > 1:
-                raise GenerationError("snapshot identity for gpt-6-astra is duplicated")
-        elif count != 1:
+        if count > 1 or (count == 0 and model not in ADDED_MODELS):
             raise GenerationError(f"snapshot identity for {model} must occur exactly once")
 
-    if "gpt-6-astra" not in ids:
-        marker = '    "gpt-5.6-terra",\n'
-        if body.count(marker) != 1:
-            raise GenerationError("cannot locate insertion point for gpt-6-astra identity")
-        body = body.replace(marker, marker + '    "gpt-6-astra",\n', 1)
+    for model in ADDED_MODELS:
+        if model in ids:
+            continue
+        next_id = next((model_id for model_id in ids if model_id > model), None)
+        if next_id is None:
+            body += f'    "{model}",\n'
+        else:
+            marker = f'    "{next_id}",\n'
+            if body.count(marker) != 1:
+                raise GenerationError(f"cannot locate insertion point for {model} identity")
+            body = body.replace(marker, f'    "{model}",\n' + marker, 1)
+        ids.append(model)
+        ids.sort()
 
     return source[: match.start("body")] + body + source[match.end("body") :]
 
 
 def replace_target_blocks(source: str, rates: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]) -> str:
+    missing_models: list[str] = []
     for model in TARGET_MODELS:
         constant = MODEL_CONSTANTS[model]
         pattern = re.compile(CONSTANT_RE_TEMPLATE.format(name=re.escape(constant)))
         matches = list(pattern.finditer(source))
-        if model == "gpt-6-astra":
-            if len(matches) > 1:
-                raise GenerationError(f"pricing constant for {model} is duplicated")
-        elif len(matches) != 1:
+        if len(matches) > 1 or (len(matches) == 0 and model not in ADDED_MODELS):
             raise GenerationError(f"pricing constant for {model} must occur exactly once")
 
         if matches:
             match = matches[0]
             source = source[: match.start()] + model_block(model, rates[model]) + source[match.end() :]
+        else:
+            missing_models.append(model)
 
-    if not re.search(
-        rf"(?ms)^pub const {re.escape(MODEL_CONSTANTS['gpt-6-astra'])}: ModelPricing",
-        source,
-    ):
-        terra_constant = MODEL_CONSTANTS["gpt-5.6-terra"]
-        terra_pattern = re.compile(CONSTANT_RE_TEMPLATE.format(name=re.escape(terra_constant)))
-        terra = terra_pattern.search(source)
-        if terra is None:
-            raise GenerationError("cannot locate insertion point for Astra pricing constant")
-        source = (
-            source[: terra.end()]
-            + "\n"
-            + model_block("gpt-6-astra", rates["gpt-6-astra"])
-            + source[terra.end() :]
+    if missing_models:
+        missing_models = [model for model in ADDED_MODELS if model in missing_models]
+        catalog = CATALOG_RE.search(source)
+        if catalog is None:
+            raise GenerationError("cannot locate catalog insertion point for new pricing constants")
+        prefix = source[: catalog.start()].rstrip()
+        blocks = "\n\n".join(
+            model_block(model, rates[model]).rstrip() for model in missing_models
         )
+        source = prefix + "\n\n" + blocks + "\n\n" + source[catalog.start() :]
     return source
 
 
@@ -316,22 +330,26 @@ def replace_catalog_reference(source: str) -> str:
     match = matches[0]
     body = match.group("body")
     astra_constant = MODEL_CONSTANTS["gpt-6-astra"]
-    terra_constant = MODEL_CONSTANTS["gpt-5.6-terra"]
 
+    missing_models: list[str] = []
     for model in TARGET_MODELS:
         constant = MODEL_CONSTANTS[model]
         count = len(re.findall(rf"(?m)^\s*{re.escape(constant)},\s*$", body))
-        if model == "gpt-6-astra":
-            if count > 1:
-                raise GenerationError(f"pricing catalog entry for {model} is duplicated")
-        elif count != 1:
+        if count > 1 or (count == 0 and model not in ADDED_MODELS):
             raise GenerationError(f"pricing catalog entry for {model} must occur exactly once")
+        if count == 0:
+            missing_models.append(model)
 
-    if not re.search(rf"(?m)^\s*{re.escape(astra_constant)},\s*$", body):
-        marker = f"    {terra_constant},\n"
+    if missing_models:
+        marker = f"    {astra_constant},\n"
         if body.count(marker) != 1:
-            raise GenerationError("cannot locate insertion point for Astra catalog entry")
-        body = body.replace(marker, marker + f"    {astra_constant},\n", 1)
+            raise GenerationError("cannot locate insertion point for new GPT-6 catalog entries")
+        references = "".join(
+            f"    {MODEL_CONSTANTS[model]},\n"
+            for model in ADDED_MODELS
+            if model in missing_models
+        )
+        body = body.replace(marker, marker + references, 1)
 
     return source[: match.start("body")] + body + source[match.end("body") :]
 

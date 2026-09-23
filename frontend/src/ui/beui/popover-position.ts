@@ -71,11 +71,18 @@ export function usePopoverPortalPosition<
     const trigger = triggerRef.current;
     const content = contentRef.current;
     const observer = new ResizeObserver(update);
+    let frame = 0;
+    const updateFrame = () => {
+      update();
+      frame = window.requestAnimationFrame(updateFrame);
+    };
+    frame = window.requestAnimationFrame(updateFrame);
     if (trigger) observer.observe(trigger);
     if (content) observer.observe(content);
     window.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
     return () => {
+      window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);

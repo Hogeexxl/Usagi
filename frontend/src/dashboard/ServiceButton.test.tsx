@@ -23,8 +23,14 @@ describe("ServiceButton v0.2.0", () => {
 
     const stopButton = await screen.findByRole("button", { name: "停止服务" });
     expect(stopButton).toHaveClass("text-destructive");
+    expect(stopButton).toHaveClass("h-8", "w-8", "rounded-lg");
+    expect(stopButton.querySelector("svg")).toHaveClass("h-4", "w-4");
     stopButton.click();
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止中…" })).toBeDisabled());
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "停止服务" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "停止服务" })).toHaveAttribute("title", "停止中…");
+      expect(screen.getByRole("button", { name: "停止服务" }).querySelector("svg")).toHaveClass("animate-spin");
+    });
     expect(screen.getByText("正在停止服务")).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Dismiss toast" })).not.toBeInTheDocument();

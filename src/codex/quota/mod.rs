@@ -154,6 +154,7 @@ pub struct CodexQuotaService {
     provider: Arc<dyn QuotaProvider>,
     state: RwLock<ServiceState>,
     flight: tokio::sync::Mutex<Option<Arc<QuotaFlight>>>,
+    timer_reset: watch::Sender<Option<time::Instant>>,
     clock: Clock,
 }
 
@@ -185,6 +186,7 @@ impl CodexQuotaService {
         clock: Clock,
     ) -> Arc<Self> {
         let codex_home = codex_home.into();
+        let (timer_reset, _) = watch::channel(None);
         Arc::new(Self {
             auth_path: codex_home.join("auth.json"),
             provider,
@@ -193,6 +195,7 @@ impl CodexQuotaService {
                 last_good: None,
             }),
             flight: tokio::sync::Mutex::new(None),
+            timer_reset,
             clock,
         })
     }
@@ -233,6 +236,13 @@ impl CodexQuotaService {
         snapshot
     }
 
+    /// Refresh on demand and schedule the next background refresh five minutes from the request.
+    pub async fn refresh_now_and_reset_timer(&self) -> CodexQuotaResponse {
+        self.timer_reset
+            .send_replace(Some(time::Instant::now() + REFRESH_INTERVAL));
+        self.refresh_now().await
+    }
+
     async fn perform_fetch(&self) -> CodexQuotaResponse {
         let fetched_at_ms = (self.clock)();
         let result = self.provider.fetch(&self.auth_path, fetched_at_ms).await;
@@ -269,9 +279,33 @@ impl CodexQuotaService {
     }
 
     pub async fn run_background(self: Arc<Self>) {
+        let mut timer_reset = self.timer_reset.subscribe();
+        let _ = self.refresh_now().await;
+        let mut deadline = (*timer_reset.borrow_and_update())
+            .unwrap_or_else(|| time::Instant::now() + REFRESH_INTERVAL);
         loop {
-            let _ = self.refresh_now().await;
-            time::sleep(REFRESH_INTERVAL).await;
+            tokio::select! {
+                _ = time::sleep_until(deadline) => {
+                    self.timer_reset.send_if_modified(|current| {
+                        if *current == Some(deadline) {
+                            *current = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    let _ = self.refresh_now().await;
+                    deadline = time::Instant::now() + REFRESH_INTERVAL;
+                }
+                changed = timer_reset.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    if let Some(next) = *timer_reset.borrow_and_update() {
+                        deadline = next;
+                    }
+                }
+            }
         }
     }
 
@@ -432,6 +466,35 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
         assert_eq!(service.snapshot().status, CodexQuotaStatus::Ready);
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_refresh_resets_the_background_deadline_from_request_time() {
+        let provider = Arc::new(FixtureProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            results: Mutex::new(vec![Ok(payload()), Ok(payload()), Ok(payload())]),
+            entered: None,
+            release: None,
+        });
+        let service = service(provider.clone());
+        let task = Arc::clone(&service).spawn_background();
+        tokio::task::yield_now().await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(240)).await;
+        service.refresh_now_and_reset_timer().await;
+        tokio::task::yield_now().await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(Duration::from_secs(299)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
         task.abort();
         let _ = task.await;
     }

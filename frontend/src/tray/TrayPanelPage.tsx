@@ -1,20 +1,20 @@
-import { ArrowUpRight, Power, RefreshCw } from "lucide-react";
+import { ArrowUpRight, Moon, Power, RefreshCw, Sun } from "lucide-react";
 import { useState } from "react";
 
-import type { CodexQuotaResponse } from "../data/types";
 import { serviceClient, type ServiceClient } from "../data/serviceClient";
+import { ActionSwapIcon } from "../ui/beui/action-swap";
 import { AnimatedToastStack, useAnimatedToastStack } from "../ui/beui/animated-toast-stack";
 import { Button } from "../ui/beui/button";
-import { ThemeToggle } from "../ui/beui/theme-toggle";
+import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { formatLastSyncTime } from "../dashboard/format";
-import { CacheHitMetric, CodexQuotaCard, EstimatedCostMetric, SkeletonCard, TotalTokenMetric } from "../dashboard/MetricGrid";
+import { AccountQuotaCard, CacheHitMetric, EstimatedCostMetric, SkeletonCard, TotalTokenMetric } from "../dashboard/MetricGrid";
 import { RangeSelector } from "../dashboard/RangeSelector";
 import {
   useDashboardController,
   type DashboardControllerOptions,
   type DashboardViewModel,
 } from "../dashboard/useDashboardController";
-import { useCodexQuotaController } from "../dashboard/useCodexQuotaController";
+import { useDashboardQuotaController, type DashboardQuotaControllerView } from "../dashboard/useDashboardQuotaController";
 
 type WryWindow = Window & {
   ipc: { postMessage(message: string): void };
@@ -40,7 +40,7 @@ export type TrayPanelViewModel = Pick<
 
 export type TrayPanelViewProps = {
   view: TrayPanelViewModel;
-  quota: CodexQuotaResponse;
+  quota: DashboardQuotaControllerView;
   stopping: boolean;
   onOpenDashboard: () => void;
   onStop: () => void;
@@ -59,6 +59,7 @@ function refreshErrorMessage(refreshState: TrayPanelViewModel["refresh_state"], 
 }
 
 export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }: TrayPanelViewProps) {
+  const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const loadError = loadErrorMessage(view.load_state);
   const refreshError = refreshErrorMessage(view.refresh_state, view.error_code);
   const refreshEnabled =
@@ -90,18 +91,26 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
         >
           <RefreshCw className={`h-4 w-4${refreshAnimating ? " animate-spin" : ""}`} />
         </Button>
-        <ThemeToggle
-          variant="circle-blur"
-          start="bottom-up"
-          className="rounded-xl border border-border bg-background p-2.5"
-          iconClassName="h-5 w-5"
-        />
         <Button
-          variant="outline"
+          variant="ghost"
+          size="icon"
+          aria-label={themeToggle.mounted && themeToggle.isDark ? "Switch to light mode" : "Switch to dark mode"}
+          onClick={themeToggle.toggle}
+        >
+          {themeToggle.mounted ? (
+            <ActionSwapIcon value={themeToggle.isDark ? "dark" : "light"} animation="blur" className="h-4 w-4">
+              {themeToggle.isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </ActionSwapIcon>
+          ) : (
+            <span className="h-4 w-4" aria-hidden="true" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
           size="icon"
           aria-label="停止服务"
           title="停止服务"
-          className="border-destructive/35 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
           disabled={stopping}
           onClick={onStop}
         >
@@ -131,19 +140,31 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
 
       <div className="grid grid-cols-[304px_304px] gap-4 [&>*]:col-span-1" aria-label={view.metrics ? "KPI 指标" : "KPI 加载中"}>
         {view.metrics === null ? (
+          <SkeletonCard />
+        ) : (
+          <TotalTokenMetric usage={view.metrics} />
+        )}
+        <AccountQuotaCard
+          codex={quota.codex}
+          antigravity={quota.antigravity}
+          onRefresh={quota.refresh}
+          refreshing={quota.refreshing}
+          refreshError={quota.refresh_error}
+          refreshAvailable={quota.refresh_available}
+          wide
+          showGemini={false}
+        />
+        {view.metrics === null ? (
           <>
-            <SkeletonCard />
             <SkeletonCard />
             <SkeletonCard />
           </>
         ) : (
           <>
-            <TotalTokenMetric usage={view.metrics} />
-            <EstimatedCostMetric usage={view.metrics} glare={false} />
             <CacheHitMetric usage={view.metrics} glare={false} />
+            <EstimatedCostMetric usage={view.metrics} glare={false} />
           </>
         )}
-        <CodexQuotaCard quota={quota} glare={false} />
       </div>
     </div>
   );
@@ -151,7 +172,7 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
 
 export function TrayPanelPage({ options }: { options?: TrayPanelPageOptions }) {
   const view = useDashboardController(options);
-  const quota = useCodexQuotaController({ client: options?.client });
+  const quota = useDashboardQuotaController({ client: options?.client, codexOnly: true });
   const stopClient = options?.serviceClient ?? serviceClient;
   const [stopping, setStopping] = useState(false);
   const toast = useAnimatedToastStack();

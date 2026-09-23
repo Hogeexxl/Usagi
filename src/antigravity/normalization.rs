@@ -6,6 +6,9 @@ use crate::antigravity::project::{WorkspaceEvaluation, evaluate_summary_workspac
 use crate::antigravity::protobuf::{
     MAX_TITLE_BYTES, ProtoError, RawAntigravityUsageCandidate, parse_step_metadata,
 };
+use crate::cost::{
+    BundledPricingRepository, CostEstimateOutcome, CostEstimator, UsageCostGranularity,
+};
 use crate::domain::{
     AgentRole, MetadataQualityStatus, Patch, ProjectKind, ResolvedThreadPatch, SessionIdentity,
 };
@@ -68,6 +71,20 @@ impl AntigravityUsageRecord {
             total_tokens,
         )
         .map_err(|e| e.to_string())?;
+        let outcome = crate::cost::estimate_for_source(
+            &BundledPricingRepository::new(),
+            &CostEstimator::new(),
+            &SourceId::ANTIGRAVITY,
+            &self.model,
+            self.occurred_at_ms,
+            UsageCostGranularity::RequestScoped,
+            &usage,
+        )
+        .map_err(|_| "usage cost estimation failed".to_string())?;
+        let estimated_cost_nanos_usd = match outcome {
+            CostEstimateOutcome::Known(cost) => Some(cost.total_nanos_usd),
+            CostEstimateOutcome::Unknown(_) => None,
+        };
 
         Ok(CanonicalUsageEventWrite {
             event_id,
@@ -78,7 +95,7 @@ impl AntigravityUsageRecord {
             turn_key: None,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
-            estimated_cost_nanos_usd: None,
+            estimated_cost_nanos_usd,
             usage,
             created_at_ms: self.occurred_at_ms,
         })
@@ -771,6 +788,23 @@ mod tests {
         assert_eq!(event.usage.output_tokens, 11);
         assert_eq!(event.usage.reasoning_tokens, 4);
         assert_eq!(event.usage.total_tokens, 21);
+        assert_eq!(event.estimated_cost_nanos_usd, None);
+
+        let flash_record = AntigravityUsageRecord {
+            model: "gemini-3.8-flash".into(),
+            ..record.clone()
+        };
+        let flash_event = flash_record.to_canonical_event("conversation").unwrap();
+        assert_eq!(flash_event.estimated_cost_nanos_usd, Some(46_725));
+
+        let unverified_record = AntigravityUsageRecord {
+            model: "gpt-5.6-sol".into(),
+            ..record.clone()
+        };
+        let unverified_event = unverified_record
+            .to_canonical_event("conversation")
+            .unwrap();
+        assert_eq!(unverified_event.estimated_cost_nanos_usd, None);
     }
 
     #[test]

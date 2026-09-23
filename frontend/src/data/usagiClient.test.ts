@@ -163,6 +163,41 @@ describe("usagiClient DTO seam", () => {
     }
   });
 
+  it("reads Antigravity quota and accepts both quota refresh snapshots", async () => {
+    const antigravity = {
+      status: "ready",
+      account_email: "gemini@example.com",
+      plan_type: "google_ai_pro",
+      session: { used_percent: 20, remaining_percent: 80, limit_window_seconds: 18000, reset_at_ms: 1_786_100_000_000 },
+      weekly: { used_percent: 65, remaining_percent: 35, limit_window_seconds: 604800, reset_at_ms: 1_786_508_580_000 },
+      fetched_at_ms: 1_786_076_580_000,
+    };
+    const codex = {
+      status: "ready",
+      account_email: "hoge@example.com",
+      plan_type: "prolite",
+      session: null,
+      weekly: { used_percent: 55, remaining_percent: 45, limit_window_seconds: 604800, reset_at_ms: 1_786_508_580_000 },
+      reset_credits_available: 2,
+      fetched_at_ms: 1_786_076_580_000,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(antigravity), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(codex), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(antigravity), { status: 200 }));
+
+    await expect(usagiClient.antigravityQuota()).resolves.toEqual(antigravity);
+    await expect(usagiClient.refreshCodexQuota()).resolves.toEqual(codex);
+    await expect(usagiClient.refreshAntigravityQuota()).resolves.toEqual(antigravity);
+    expect(fetchMock.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ["/api/antigravity/quota", "GET"],
+      ["/api/codex/quota/refresh", "POST"],
+      ["/api/antigravity/quota/refresh", "POST"],
+    ]);
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: "same-origin", headers: { Accept: "application/json", "X-Usagi-Request": "1" } });
+  });
+
   it("t_s07_001 parses typed options and canonicalizes every summary filter shape", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(

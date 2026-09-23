@@ -149,7 +149,7 @@ function TextSlot({
                   key={index}
                   custom={index * CASCADE_STAGGER}
                   variants={CASCADE_LETTER_VARIANTS}
-                  className="inline-block whitespace-pre will-change-[opacity,filter,transform]"
+                  className="inline-block whitespace-pre"
                 >
                   {char}
                 </motion.span>

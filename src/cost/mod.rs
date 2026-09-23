@@ -10,13 +10,31 @@ pub use registry::ModelRegistry;
 pub const COST_ALGORITHM_VERSION: i64 = 1;
 
 /// Bundled pricing catalog version.
-pub const PRICING_CATALOG_VERSION: i64 = 4;
+pub const PRICING_CATALOG_VERSION: i64 = 5;
 
 /// Whether usage represents one model request or a compensation over events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsageCostGranularity {
     RequestScoped,
     AggregateCompensation,
+}
+
+/// Estimate the cost for a source-owned model using that source's pricing projection.
+pub(crate) fn estimate_for_source(
+    repository: &BundledPricingRepository,
+    estimator: &CostEstimator,
+    source: &crate::source::SourceId,
+    model: &str,
+    occurred_at_ms: i64,
+    granularity: UsageCostGranularity,
+    usage: &crate::usage::NormalizedTokenUsage,
+) -> Result<CostEstimateOutcome, estimator::CostEstimationError> {
+    let Some(pricing) = repository.resolve_for_source(source, model, occurred_at_ms) else {
+        return Ok(CostEstimateOutcome::Unknown(
+            UnknownCostReason::UnknownModel,
+        ));
+    };
+    estimator.estimate_with(usage, pricing, granularity)
 }
 
 /// Map a canonical usage event kind to its estimator granularity.
