@@ -103,6 +103,7 @@ const row: SessionItemDto = {
   project_path: "/work/Usagi",
   last_activity_at_ms: detail.last_activity_at_ms,
   models_used: detail.main.models_used,
+  model_efforts: detail.main.model_usage.map(({ model, reasoning_effort }) => ({ model, reasoning_effort })),
   subagent_count: 2,
   inclusive_usage: detail.main.inclusive_usage,
   self_usage: detail.main.self_usage,
@@ -156,6 +157,80 @@ describe("SessionDetailDrawer v0.2.0", () => {
     expect(summary).toHaveTextContent("3,601");
     expect(summary).toHaveTextContent("$1.20");
     expect(screen.queryByText(/复制/)).not.toBeInTheDocument();
+  });
+
+  it("strips Antigravity namespaces from the visible main and subagent IDs only", () => {
+    const antigravityId = "antigravity:123e4567-e89b-12d3-a456-426614174000";
+    const antigravityDetail: SessionDetailResponse = {
+      ...detail,
+      source: "antigravity",
+      root_session_id: antigravityId,
+      main: {
+        ...detail.main,
+        source: "antigravity",
+        native_session_id: antigravityId,
+        root_session_id: antigravityId,
+        thread_id: antigravityId,
+      },
+      subagents: detail.subagents.map((item, index) => ({
+        ...item,
+        source: "antigravity",
+        ...(index === 0 ? { native_session_id: antigravityId, thread_id: antigravityId } : {}),
+        root_session_id: antigravityId,
+      })),
+    };
+    const antigravityRow: SessionItemDto = {
+      ...row,
+      source: "antigravity",
+      native_session_id: antigravityId,
+      root_session_id: antigravityId,
+    };
+    render(
+      <SessionDetailDrawer
+        view={view({ detail: antigravityDetail, selected_row: antigravityRow, selected_root_session_id: antigravityId })}
+        timezone="Asia/Shanghai"
+      />,
+    );
+
+    const mainId = screen.getByText("123e4567-e89b-12d3-a456-426614174000");
+    expect(mainId).toBeInTheDocument();
+    expect(mainId).not.toHaveTextContent("antigravity:");
+
+    fireEvent.click(screen.getByRole("button", { name: "Recent subagent" }));
+    const region = screen.getByRole("region", { name: "Recent subagent" });
+    const threadId = region.querySelector("dt")?.nextElementSibling as HTMLElement;
+    expect(threadId).toHaveTextContent("123e4567-e89b-12d3-a456-426614174000");
+    expect(threadId).not.toHaveTextContent("antigravity:");
+  });
+
+  it("wraps long IDs in the header and subagent card without changing their visible text", () => {
+    const longId = `antigravity:${"a".repeat(96)}`;
+    const antigravityDetail: SessionDetailResponse = {
+      ...detail,
+      source: "antigravity",
+      root_session_id: longId,
+      main: { ...detail.main, source: "antigravity", root_session_id: longId },
+      subagents: detail.subagents.map((item, index) => ({
+        ...item,
+        source: "antigravity",
+        ...(index === 0 ? { thread_id: longId } : {}),
+      })),
+    };
+    render(
+      <SessionDetailDrawer
+        view={view({ detail: antigravityDetail, selected_root_session_id: longId })}
+        timezone="Asia/Shanghai"
+      />,
+    );
+
+    const mainId = screen.getByText("a".repeat(96));
+    expect(mainId).toHaveClass("min-w-0", "break-all");
+    fireEvent.click(screen.getByRole("button", { name: "Recent subagent" }));
+    const region = screen.getByRole("region", { name: "Recent subagent" });
+    const threadId = region.querySelector("dt")?.nextElementSibling as HTMLElement;
+    expect(threadId).toHaveTextContent("a".repeat(96));
+    expect(threadId).toHaveClass("min-w-0", "break-all");
+    expect(threadId).not.toHaveClass("whitespace-nowrap");
   });
 
   it("TD-P5-DRAWER-01 verifies Source and Project rows, ordering, styling and null fallback [INV-DETAIL-01] ~ [INV-DETAIL-03]", () => {
@@ -372,7 +447,8 @@ describe("SessionDetailDrawer v0.2.0", () => {
     const metadata = region.querySelector("dl") as HTMLElement;
     const threadId = metadata.querySelector("dt")?.nextElementSibling as HTMLElement;
     expect(threadId.textContent).toBe("123e4567-e89b-12d3-a456-426614174000");
-    expect(threadId).toHaveClass("whitespace-nowrap");
+    expect(threadId).toHaveClass("min-w-0", "break-all");
+    expect(threadId).not.toHaveClass("whitespace-nowrap");
     expect(threadId).not.toHaveClass("truncate");
     expect(threadId).not.toHaveAttribute("aria-describedby");
     expect(threadId).not.toHaveAttribute("title");

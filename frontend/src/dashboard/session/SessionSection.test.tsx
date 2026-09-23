@@ -58,6 +58,10 @@ const item: SessionItemDto = {
   project_path: "/work/Usagi",
   last_activity_at_ms: Date.UTC(2026, 7, 10, 8, 9),
   models_used: ["gpt-5", "o4-mini"],
+  model_efforts: [
+    { model: "gpt-5", reasoning_effort: "high" },
+    { model: "o4-mini", reasoning_effort: null },
+  ],
   subagent_count: 2,
   inclusive_usage: { ...usage, total_tokens: 5_678 },
   self_usage: { ...usage, total_tokens: 1_234 },
@@ -191,8 +195,8 @@ describe("SessionSection v0.2.0", () => {
       "项目",
       "模型",
       "合计 Token",
-      "sub数量",
-      "缓存命中率",
+      "sub数",
+      "缓存率",
       "合计费用",
     ]);
 
@@ -200,8 +204,12 @@ describe("SessionSection v0.2.0", () => {
     expect(headers[2].querySelector("button")).toBeNull();
     expect(headers[6].querySelector("button")).toBeNull();
     expect(headers.filter((header) => header.querySelector("button")).length).toBe(6);
+    for (const header of headers) {
+      const label = header.querySelector("button, span");
+      expect(label).toHaveClass("px-4");
+    }
 
-    for (const label of ["合计 Token", "缓存命中率", "合计费用"]) {
+    for (const label of ["合计 Token", "缓存率", "合计费用"]) {
       expect(screen.getByRole("button", { name: label })).toHaveClass("justify-end");
     }
 
@@ -212,6 +220,9 @@ describe("SessionSection v0.2.0", () => {
       expect(cells[index]).toHaveClass("text-right");
     }
     expect(cells[1]).toHaveTextContent("codex");
+    expect(cells[4]).toHaveTextContent("gpt-5 (high) +1");
+    expect(cells[4].querySelector("span")).toHaveAttribute("title", "gpt-5 (high), o4-mini (—)");
+    expect(cells[4].querySelector("span")).toHaveAttribute("aria-label", "gpt-5 (high), o4-mini (—)");
     expect(cells[5]).toHaveTextContent("5,678");
     expect(cells[6]).toHaveTextContent("2");
     expect(cells[5].querySelector(".tabular-nums")).toBeTruthy();
@@ -224,10 +235,10 @@ describe("SessionSection v0.2.0", () => {
       "98pt",
       "",
       "150px",
-      "140pt",
+      "215px",
       "150px",
-      "128px",
-      "80pt",
+      "80px",
+      "127px",
       "120px",
       "0px",
     ]);
@@ -250,8 +261,8 @@ describe("SessionSection v0.2.0", () => {
       "项目",
       "模型",
       "合计 Token",
-      "sub数量",
-      "缓存命中率",
+      "sub数",
+      "缓存率",
       "合计费用",
     ]);
 
@@ -262,10 +273,10 @@ describe("SessionSection v0.2.0", () => {
       "98pt",
       "",
       "150px",
-      "140pt",
+      "215px",
       "150px",
-      "128px",
-      "80pt",
+      "80px",
+      "127px",
       "120px",
       "0px",
     ]);

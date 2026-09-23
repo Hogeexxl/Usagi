@@ -39,6 +39,7 @@ function item(id: string, total = 3): SessionItemDto {
     project_path: "/work/Usagi",
     last_activity_at_ms: 1_700_000_000_000,
     models_used: ["gpt-5"],
+    model_efforts: [{ model: "gpt-5", reasoning_effort: null }],
     subagent_count: 0,
     inclusive_usage: { ...usage, total_tokens: total },
     self_usage: { ...usage, total_tokens: total },

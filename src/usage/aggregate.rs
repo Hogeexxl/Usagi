@@ -374,8 +374,15 @@ pub struct SessionUsageRow {
     pub subagent_count: i64,
     pub last_activity_at_ms: i64,
     pub models_used: Vec<String>,
+    pub model_efforts: Vec<SessionModelEffort>,
     pub data_status: SessionDataStatus,
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionModelEffort {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -852,7 +859,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                     |row| row.get(0),
                 )
                 .map_err(map_sql_error)?;
-            let models_used = self.models_for_root(range, &root_session_id)?;
+            let (models_used, model_efforts) = self.models_for_root(range, &root_session_id)?;
             let data_status = status_for_totals(&inclusive_usage);
             output.push(SessionUsageRow {
                 root_session_id,
@@ -867,6 +874,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 subagent_count,
                 last_activity_at_ms,
                 models_used,
+                model_efforts,
                 data_status,
                 error_code: None,
             });
@@ -1597,7 +1605,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 |row| row.get(0),
             )
             .map_err(map_sql_error)?;
-        let models_used = self.models_for_root(range, root)?;
+        let (models_used, model_efforts) = self.models_for_root(range, root)?;
         let data_status = status_for_totals(&inclusive_usage);
         Ok(SessionUsageRow {
             root_session_id: root.to_owned(),
@@ -1612,6 +1620,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
             subagent_count,
             last_activity_at_ms,
             models_used,
+            model_efforts,
             data_status,
             error_code: None,
         })
@@ -1753,15 +1762,41 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         Ok((row.into_totals()?, values))
     }
 
-    fn models_for_root(&self, range: TimeRange, root: &str) -> Result<Vec<String>, AggregateError> {
-        let mut statement = self.connection.prepare("SELECT ue.model FROM source_usage_epochs sue CROSS JOIN usage_events ue WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch AND ue.root_session_id=?1 AND ue.thread_id=ue.root_session_id AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3 GROUP BY ue.model ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model").map_err(map_sql_error)?;
-        statement
+    fn models_for_root(
+        &self,
+        range: TimeRange,
+        root: &str,
+    ) -> Result<(Vec<String>, Vec<SessionModelEffort>), AggregateError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT ue.model, ue.reasoning_effort
+             FROM source_usage_epochs sue CROSS JOIN usage_events ue
+             WHERE sue.source=ue.source AND sue.active_epoch=ue.source_epoch
+               AND ue.root_session_id=?1 AND ue.thread_id=ue.root_session_id
+               AND ue.occurred_at_ms>=?2 AND ue.occurred_at_ms<?3
+             GROUP BY ue.model, ue.reasoning_effort
+             ORDER BY MIN(ue.occurred_at_ms), MIN(ue.event_id), ue.model,
+                      ue.reasoning_effort",
+            )
+            .map_err(map_sql_error)?;
+        let rows = statement
             .query_map(params![root, range.start_ms, range.end_ms], |row| {
-                row.get(0)
+                Ok(SessionModelEffort {
+                    model: row.get(0)?,
+                    reasoning_effort: row.get(1)?,
+                })
             })
             .map_err(map_sql_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_sql_error)
+            .map_err(map_sql_error)?;
+        let mut models_used = Vec::new();
+        for model in &rows {
+            if !models_used.iter().any(|existing| existing == &model.model) {
+                models_used.push(model.model.clone());
+            }
+        }
+        Ok((models_used, rows))
     }
 }
 
@@ -2049,6 +2084,7 @@ fn error_session_row(error: &SessionErrorProjection) -> SessionUsageRow {
         subagent_count: error.subagent_count,
         last_activity_at_ms: error.last_activity_at_ms,
         models_used: Vec::new(),
+        model_efforts: Vec::new(),
         data_status: SessionDataStatus::Error,
         error_code: Some(error.error_code.clone()),
     }
@@ -3446,6 +3482,32 @@ mod tests {
                 ("m-child", Some("medium")),
                 ("m-child", Some("high")),
             ]
+        );
+        let session_row = reader
+            .sessions(TimeRange::new(0, 9).unwrap(), SessionPageRequest::new(10))
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| row.root_session_id == "root")
+            .unwrap();
+        assert_eq!(session_row.models_used, detail.main.models_used);
+        assert_eq!(
+            session_row.model_efforts,
+            detail
+                .main
+                .model_usage
+                .iter()
+                .map(|usage| SessionModelEffort {
+                    model: usage.model.clone(),
+                    reasoning_effort: usage.reasoning_effort.clone(),
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            session_row
+                .model_efforts
+                .iter()
+                .all(|usage| usage.model != "m-child")
         );
         let mut child_usage = TokenTotals::zero();
         for block in &detail.subagents[0].model_usage {

@@ -19,8 +19,8 @@ use crate::antigravity::normalization::{
 };
 use crate::antigravity::protobuf::{
     MAX_PROTO_MESSAGE_BYTES, ParseGenMetadataResult, RawAntigravityUsageCandidate,
-    SQLITE_BLOB_DIGEST_CHUNK_BYTES, parse_gen_metadata_data, parse_step_payload_response_id,
-    parse_trajectory_metadata_blob_workspace,
+    SQLITE_BLOB_DIGEST_CHUNK_BYTES, parse_executor_metadata_data, parse_gen_metadata_data,
+    parse_step_payload_response_id,
 };
 
 pub const ANTIGRAVITY_DATABASE_BUSY: &str = "ANTIGRAVITY_DATABASE_BUSY";
@@ -180,7 +180,10 @@ pub fn read_summary_snapshot(
         .prepare(
             "SELECT typeof(conversation_id), conversation_id, typeof(title), title,
                     typeof(workspace_uris), workspace_uris,
-                    typeof(last_modified_time), last_modified_time
+                    typeof(last_modified_time), last_modified_time,
+                    typeof(preview), preview,
+                    typeof(parent_conversation_id), parent_conversation_id,
+                    typeof(nesting_depth), nesting_depth
              FROM conversation_summaries",
         )
         .map_err(map_rusqlite_error)?;
@@ -218,7 +221,7 @@ pub fn read_summary_snapshot(
 
         // Title
         let title_type: String = row.get(2).map_err(map_rusqlite_error)?;
-        let (title, title_invalid) = match title_type.as_str() {
+        let (mut title, mut title_invalid) = match title_type.as_str() {
             "null" => (None, false),
             "text" => match row.get_ref(3).map_err(map_rusqlite_error)? {
                 ValueRef::Text(bytes)
@@ -234,6 +237,27 @@ pub fn read_summary_snapshot(
             },
             _ => (None, true),
         };
+        if title.as_deref().is_none_or(|value| value.trim().is_empty()) {
+            let preview_type: String = row.get(8).map_err(map_rusqlite_error)?;
+            let (preview, preview_invalid) = match (
+                preview_type.as_str(),
+                row.get_ref(9).map_err(map_rusqlite_error)?,
+            ) {
+                ("null", ValueRef::Null) => (None, false),
+                ("text", ValueRef::Text(bytes))
+                    if bytes.len() <= crate::antigravity::protobuf::MAX_TITLE_BYTES =>
+                {
+                    match String::from_utf8(bytes.to_vec()) {
+                        Ok(value) => (Some(value), false),
+                        Err(_) => (None, true),
+                    }
+                }
+                ("text", ValueRef::Text(_)) => (None, true),
+                _ => (None, preview_type != "null"),
+            };
+            title = preview;
+            title_invalid = preview_invalid || (title.is_none() && title_invalid);
+        }
 
         // Workspace URIs
         let ws_type: String = row.get(4).map_err(map_rusqlite_error)?;
@@ -264,6 +288,55 @@ pub fn read_summary_snapshot(
             },
             _ => None,
         };
+        let parent_type: String = row.get(10).map_err(map_rusqlite_error)?;
+        let parent_conversation_id = match (
+            parent_type.as_str(),
+            row.get_ref(11).map_err(map_rusqlite_error)?,
+        ) {
+            ("null", ValueRef::Null) => None,
+            ("text", ValueRef::Text(bytes)) => {
+                let parent = std::str::from_utf8(bytes).map_err(|error| {
+                    ReaderError::Invalid(format!(
+                        "parent_conversation_id is not valid UTF-8: {error}"
+                    ))
+                })?;
+                let parent = parent.trim();
+                if parent.is_empty() {
+                    None
+                } else {
+                    Some(
+                        Uuid::parse_str(parent)
+                            .map_err(|error| {
+                                ReaderError::Invalid(format!(
+                                    "invalid parent_conversation_id: {error}"
+                                ))
+                            })?
+                            .hyphenated()
+                            .to_string(),
+                    )
+                }
+            }
+            _ => {
+                return Err(ReaderError::Invalid(
+                    "parent_conversation_id is not text or NULL".into(),
+                ));
+            }
+        };
+        let nesting_type: String = row.get(12).map_err(map_rusqlite_error)?;
+        let nesting_depth = match (
+            nesting_type.as_str(),
+            row.get_ref(13).map_err(map_rusqlite_error)?,
+        ) {
+            ("integer", ValueRef::Integer(value)) => value,
+            _ => {
+                return Err(ReaderError::Invalid(
+                    "nesting_depth is not an integer".into(),
+                ));
+            }
+        };
+        if nesting_depth < 0 {
+            return Err(ReaderError::Invalid("negative nesting_depth".into()));
+        }
 
         // Check summary uniqueness [INV-EXT-03]
         if rows_map.contains_key(&parsed_uuid) {
@@ -280,6 +353,8 @@ pub fn read_summary_snapshot(
                 last_modified_time_ms,
                 title_invalid,
                 workspace_invalid,
+                parent_conversation_id,
+                nesting_depth,
             },
         );
     }
@@ -312,8 +387,11 @@ fn probe_summary_schema(tx: &Transaction<'_>) -> Result<(), ReaderError> {
     for req in [
         "conversation_id",
         "title",
+        "preview",
         "workspace_uris",
         "last_modified_time",
+        "parent_conversation_id",
+        "nesting_depth",
     ] {
         if !col_names.iter().any(|c| c == req) {
             return Err(ReaderError::SchemaUnsupported(format!(
@@ -404,7 +482,7 @@ pub fn probe_conversation_schema(conn: &Connection) -> Result<(), ReaderError> {
             vec!["idx", "step_type", "metadata", "step_payload"],
         ),
         ("gen_metadata", vec!["idx", "data"]),
-        ("trajectory_metadata_blob", vec!["id", "data"]),
+        ("executor_metadata", vec!["data"]),
     ] {
         let mut stmt = conn
             .prepare(&format!("PRAGMA table_info({table})"))
@@ -456,7 +534,7 @@ pub struct RawConversationSnapshotData {
     pub candidates: Vec<RawAntigravityUsageCandidate>,
     pub initial_quarantines: Vec<AntigravityQuarantineRecord>,
     pub step_index: BTreeMap<String, Vec<StepIndexEntry>>,
-    pub trajectory_workspace: Option<String>,
+    pub executor_models: HashMap<Vec<u8>, String>,
     pub observed_gen_max_idx: i64,
     pub observed_step_max_idx: i64,
 }
@@ -588,7 +666,40 @@ pub fn read_conversation_snapshot(
         });
     }
 
-    // 3. Read gen_metadata rows
+    // 3. Read selected models keyed by execution identity.
+    let mut executor_models = HashMap::new();
+    let mut executor_stmt = tx
+        .prepare("SELECT typeof(data), length(data), data FROM executor_metadata")
+        .map_err(map_rusqlite_error)?;
+    let mut executor_rows = executor_stmt.query([]).map_err(map_rusqlite_error)?;
+    while let Some(row) = executor_rows.next().map_err(map_rusqlite_error)? {
+        if cancellation.load(Ordering::Relaxed) {
+            return Err(ReaderError::Cancelled);
+        }
+
+        let data_type: String = row.get(0).map_err(map_rusqlite_error)?;
+        if data_type != "blob" {
+            return Err(ReaderError::Invalid(format!(
+                "executor_metadata.data is {data_type}, expected blob"
+            )));
+        }
+        let data_len: usize = row.get(1).map_err(map_rusqlite_error)?;
+        if data_len > MAX_PROTO_MESSAGE_BYTES {
+            return Err(ReaderError::Invalid(format!(
+                "executor_metadata.data exceeds limit: {data_len}"
+            )));
+        }
+        let data: Vec<u8> = row.get(2).map_err(map_rusqlite_error)?;
+        if let Some((id, model)) = parse_executor_metadata_data(&data)
+            .map_err(|error| ReaderError::Invalid(format!("invalid executor metadata: {error}")))?
+        {
+            if executor_models.insert(id, model).is_some() {
+                return Err(ReaderError::Invalid("duplicate executor identity".into()));
+            }
+        }
+    }
+
+    // 4. Read gen_metadata rows
     let mut gen_stmt = tx
         .prepare(
             "SELECT rowid, idx, typeof(data), length(data)
@@ -682,40 +793,6 @@ pub fn read_conversation_snapshot(
         // blob_bytes dropped here!
     }
 
-    // 4. Read trajectory_metadata_blob.  Probe the dynamic type and length
-    // before materializing the blob so NULL, non-BLOB, and oversized values
-    // remain an unavailable fallback rather than an allocation or source
-    // failure.
-    let mut trajectory_workspace: Option<String> = None;
-    let blob_shape: Option<(String, Option<i64>)> = tx
-        .query_row(
-            "SELECT typeof(data), length(data)
-             FROM trajectory_metadata_blob WHERE id = 'main'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(map_rusqlite_error)?;
-
-    if let Some((blob_type, blob_len)) = blob_shape {
-        if blob_type == "blob"
-            && blob_len.is_some_and(|length| {
-                length >= 0 && (length as u64) <= MAX_PROTO_MESSAGE_BYTES as u64
-            })
-        {
-            let blob_data: Vec<u8> = tx
-                .query_row(
-                    "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(map_rusqlite_error)?;
-            if let Ok(workspace) = parse_trajectory_metadata_blob_workspace(&blob_data) {
-                trajectory_workspace = workspace;
-            }
-        }
-    }
-
     if cancellation.load(Ordering::Relaxed) {
         return Err(ReaderError::Cancelled);
     }
@@ -725,7 +802,7 @@ pub fn read_conversation_snapshot(
         candidates,
         initial_quarantines,
         step_index,
-        trajectory_workspace,
+        executor_models,
         observed_gen_max_idx,
         observed_step_max_idx,
     })
@@ -792,22 +869,38 @@ mod tests {
             "CREATE TABLE conversation_summaries (
                 conversation_id TEXT,
                 title TEXT,
+                preview TEXT,
                 workspace_uris TEXT,
-                last_modified_time TEXT
+                last_modified_time TEXT,
+                parent_conversation_id TEXT,
+                nesting_depth INTEGER
             );
             INSERT INTO conversation_summaries VALUES (
                 '49e69e84-d3f2-4f56-8c17-4ea8ded58b31',
-                'title', NULL, NULL
+                '', 'preview title', '[]', NULL,
+                'e0e43570-1c56-4abc-a44c-31fe15d433df', 2
+            );
+            INSERT INTO conversation_summaries VALUES (
+                '9e0af76d-36e1-48d2-8cae-292a03cab056',
+                'summary title', 'different preview', '[]', NULL, NULL, 0
             );",
         )
         .unwrap();
 
         let snapshot = read_summary_snapshot(&conn, &AtomicBool::new(false)).unwrap();
+        let summary = &snapshot.rows["49e69e84-d3f2-4f56-8c17-4ea8ded58b31"];
+        assert_eq!(summary.title.as_deref(), Some("preview title"));
+        assert_eq!(summary.workspace_uris.as_deref(), Some("[]"));
         assert_eq!(
-            snapshot.rows["49e69e84-d3f2-4f56-8c17-4ea8ded58b31"]
+            summary.parent_conversation_id.as_deref(),
+            Some("e0e43570-1c56-4abc-a44c-31fe15d433df")
+        );
+        assert_eq!(summary.nesting_depth, 2);
+        assert_eq!(
+            snapshot.rows["9e0af76d-36e1-48d2-8cae-292a03cab056"]
                 .title
                 .as_deref(),
-            Some("title")
+            Some("summary title")
         );
 
         drop(conn);
@@ -824,6 +917,8 @@ mod tests {
         .unwrap();
         conn.execute("CREATE TABLE gen_metadata (idx INT, data BLOB)", [])
             .unwrap();
+        conn.execute("CREATE TABLE executor_metadata (idx INT, data BLOB)", [])
+            .unwrap();
         conn.execute("CREATE TABLE trajectory_meta (cascade_id TEXT)", [])
             .unwrap();
         conn.execute(
@@ -831,12 +926,6 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute(
-            "CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)",
-            [],
-        )
-        .unwrap();
-
         // 1. steps.idx = -1
         conn.execute("INSERT INTO steps VALUES (-1, 15, x'', x'')", [])
             .unwrap();
@@ -857,6 +946,8 @@ mod tests {
         .unwrap();
         conn.execute("CREATE TABLE gen_metadata (idx INT, data BLOB)", [])
             .unwrap();
+        conn.execute("CREATE TABLE executor_metadata (idx INT, data BLOB)", [])
+            .unwrap();
         conn.execute("CREATE TABLE trajectory_meta (cascade_id TEXT)", [])
             .unwrap();
         conn.execute(
@@ -864,12 +955,6 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute(
-            "CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)",
-            [],
-        )
-        .unwrap();
-
         conn.execute("INSERT INTO gen_metadata VALUES (0, NULL)", [])
             .unwrap();
         let ext_conn = open_external_db(&path).unwrap();
@@ -919,7 +1004,17 @@ mod tests {
             "49e69e84-d3f2-4f56-8c17-4ea8ded58b31"
         );
         assert_eq!(snapshot.candidates.len(), 2);
-        assert!(snapshot.trajectory_workspace.is_some());
+        assert_eq!(snapshot.executor_models.len(), 2);
+        for candidate in &snapshot.candidates {
+            let execution_id = candidate.execution_id.as_ref().unwrap();
+            assert_eq!(
+                snapshot
+                    .executor_models
+                    .get(execution_id)
+                    .map(String::as_str),
+                Some("gemini-3.8-flash")
+            );
+        }
 
         drop(conn);
         fs::remove_dir_all(temp_root).expect("remove temporary WAL fixture tree");

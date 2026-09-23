@@ -1,7 +1,6 @@
 //! Antigravity source module.
 
 mod adapter;
-mod annotation;
 mod config;
 mod discovery;
 mod normalization;
@@ -17,5 +16,5 @@ pub use config::{
     AntigravityConfigResolution,
 };
 
-/// Antigravity usage parser version (fixed to 1 in Track D).
-pub const ANTIGRAVITY_USAGE_PARSER_VERSION: i64 = 1;
+/// Antigravity usage parser version.
+pub const ANTIGRAVITY_USAGE_PARSER_VERSION: i64 = 2;

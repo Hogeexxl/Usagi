@@ -228,9 +228,11 @@ pub fn replace_conversation_quarantine(
 /// Target and plan for the Usage epoch state machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageEpochPlan {
-    /// Initial scan: will create transient Build 1 / 1 in transaction.
+    /// Initial scan: create the first build in the current parser version.
     InitialCreate { next_build_epoch: i64 },
-    /// Active scan: already established active epoch, compare and write to Active target directly.
+    /// Existing version-1 usage must be rebuilt before writing with parser version 2.
+    Migrate { next_build_epoch: i64 },
+    /// Active scan: compare and write to the current epoch directly.
     Active { epoch: i64 },
 }
 
@@ -258,9 +260,18 @@ pub fn validate_usage_epoch(conn: &Connection) -> Result<UsageEpochPlan, Antigra
                 next_build_epoch: 1,
             })
         }
-        Some((n, 1, None, None)) if n > 0 => {
-            // Valid active: n > 0 / 1 / NULL / NULL
+        Some((n, 2, None, None)) if n > 0 => {
+            // Current active: n > 0 / 2 / NULL / NULL
             Ok(UsageEpochPlan::Active { epoch: n })
+        }
+        Some((n, 1, None, None)) if n > 0 => {
+            // A version-1 epoch is read-only history; the next scan rebuilds all
+            // canonical usage in a fresh version-2 epoch.
+            Ok(UsageEpochPlan::Migrate {
+                next_build_epoch: n.checked_add(1).ok_or_else(|| {
+                    AntigravityStorageError::EpochInvalid("usage epoch overflow".into())
+                })?,
+            })
         }
         Some((_, _, Some(_), _)) | Some((_, _, _, Some(_))) => {
             Err(AntigravityStorageError::EpochInvalid(
@@ -270,7 +281,7 @@ pub fn validate_usage_epoch(conn: &Connection) -> Result<UsageEpochPlan, Antigra
         Some((0, parser, None, None)) if parser != 0 => Err(AntigravityStorageError::EpochInvalid(
             format!("invalid parser version {parser} for active epoch 0"),
         )),
-        Some((n, parser, None, None)) if n > 0 && parser != 1 => {
+        Some((n, parser, None, None)) if n > 0 && parser != 2 => {
             Err(AntigravityStorageError::EpochInvalid(format!(
                 "invalid parser version {parser} for active epoch {n}"
             )))
@@ -339,9 +350,22 @@ mod tests {
             }
         );
 
-        // 3. Active 1 / 1 / NULL / NULL -> Active { epoch: 1 }
+        // 3. Active version 1 -> migration build
         conn.execute(
             "UPDATE source_usage_epochs SET active_epoch = 1, active_parser_version = 1 WHERE source = 'antigravity'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            validate_usage_epoch(&conn).unwrap(),
+            UsageEpochPlan::Migrate {
+                next_build_epoch: 2
+            }
+        );
+
+        // 4. Active version 2 -> Active { epoch: 1 }
+        conn.execute(
+            "UPDATE source_usage_epochs SET active_epoch = 1, active_parser_version = 2 WHERE source = 'antigravity'",
             [],
         )
         .unwrap();
@@ -350,7 +374,7 @@ mod tests {
             UsageEpochPlan::Active { epoch: 1 }
         );
 
-        // 4. Durable build non-null -> Error
+        // 5. Durable build non-null -> Error
         conn.execute(
             "UPDATE source_usage_epochs SET build_epoch = 2, build_parser_version = 1 WHERE source = 'antigravity'",
             [],
@@ -361,7 +385,7 @@ mod tests {
             ANTIGRAVITY_USAGE_EPOCH_INVALID
         );
 
-        // 5. Active epoch 1 with wrong parser version -> Error
+        // 6. Active epoch 1 with unsupported parser version -> Error
         conn.execute(
             "UPDATE source_usage_epochs SET build_epoch = NULL, build_parser_version = NULL, active_parser_version = 99 WHERE source = 'antigravity'",
             [],

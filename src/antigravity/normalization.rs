@@ -1,13 +1,10 @@
 //! Candidate pipeline normalization and Session metadata patch construction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::antigravity::annotation::AnnotationTitleResult;
-use crate::antigravity::project::{
-    WorkspaceEvaluation, evaluate_blob_workspace, evaluate_summary_workspace,
-};
+use crate::antigravity::project::{WorkspaceEvaluation, evaluate_summary_workspace};
 use crate::antigravity::protobuf::{
-    MAX_TITLE_BYTES, ProtoError, RawAntigravityUsageCandidate, RawModelField, parse_step_metadata,
+    MAX_TITLE_BYTES, ProtoError, RawAntigravityUsageCandidate, parse_step_metadata,
 };
 use crate::domain::{
     AgentRole, MetadataQualityStatus, Patch, ProjectKind, ResolvedThreadPatch, SessionIdentity,
@@ -20,7 +17,6 @@ pub const USAGE_RESPONSE_ID_MISSING: &str = "USAGE_RESPONSE_ID_MISSING";
 pub const USAGE_RESPONSE_ID_INVALID: &str = "USAGE_RESPONSE_ID_INVALID";
 pub const USAGE_RESPONSE_ID_CONFLICT: &str = "USAGE_RESPONSE_ID_CONFLICT";
 pub const USAGE_MODEL_MISSING: &str = "USAGE_MODEL_MISSING";
-pub const USAGE_MODEL_INVALID: &str = "USAGE_MODEL_INVALID";
 pub const USAGE_STEP_NOT_FOUND: &str = "USAGE_STEP_NOT_FOUND";
 pub const USAGE_STEP_NOT_UNIQUE: &str = "USAGE_STEP_NOT_UNIQUE";
 pub const USAGE_STEP_KIND_MISMATCH: &str = "USAGE_STEP_KIND_MISMATCH";
@@ -38,6 +34,8 @@ pub struct AntigravityUsageRecord {
     pub gen_idx: i64,
     pub response_id: String,
     pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub root_session_id: String,
     pub occurred_at_ms: i64,
     pub uncached_input_tokens: i64,
     pub cached_tokens: i64,
@@ -76,10 +74,10 @@ impl AntigravityUsageRecord {
             kind: EventKind::Normal,
             occurred_at_ms: self.occurred_at_ms,
             thread_id: identity.thread_id.clone(),
-            root_session_id: identity.thread_id,
+            root_session_id: self.root_session_id.clone(),
             turn_key: None,
             model: self.model.clone(),
-            reasoning_effort: None,
+            reasoning_effort: self.reasoning_effort.clone(),
             estimated_cost_nanos_usd: None,
             usage,
             created_at_ms: self.occurred_at_ms,
@@ -117,6 +115,8 @@ pub fn normalize_candidates(
     candidates: Vec<RawAntigravityUsageCandidate>,
     initial_quarantines: Vec<AntigravityQuarantineRecord>,
     step_index: &BTreeMap<String, Vec<StepIndexEntry>>,
+    executor_models: &HashMap<Vec<u8>, String>,
+    root_session_id: &str,
 ) -> NormalizedUsagePipelineOutcome {
     let mut outcome = NormalizedUsagePipelineOutcome {
         valid_records: Vec::new(),
@@ -172,21 +172,23 @@ pub fn normalize_candidates(
         let c = group.into_iter().next().unwrap();
 
         // 4. Resolve model
-        let model = match resolve_model(&c.model_display_name, &c.response_model) {
-            Ok(m) => m,
-            Err(reason) => {
-                outcome
-                    .quarantine_records
-                    .push(AntigravityQuarantineRecord {
-                        conversation_id: conversation_id.to_string(),
-                        payload_digest: c.payload_digest,
-                        gen_idx: Some(c.gen_idx),
-                        response_id: Some(resp_id),
-                        reason_code: reason,
-                    });
-                continue;
-            }
+        let Some(selected_model) = c
+            .execution_id
+            .as_ref()
+            .and_then(|id| executor_models.get(id))
+        else {
+            outcome
+                .quarantine_records
+                .push(AntigravityQuarantineRecord {
+                    conversation_id: conversation_id.to_string(),
+                    payload_digest: c.payload_digest,
+                    gen_idx: Some(c.gen_idx),
+                    response_id: Some(resp_id),
+                    reason_code: USAGE_MODEL_MISSING,
+                });
+            continue;
         };
+        let (model, reasoning_effort) = split_selected_model(selected_model);
 
         // 5. Step matching
         let matching_steps = step_index.get(&resp_id);
@@ -407,6 +409,8 @@ pub fn normalize_candidates(
             gen_idx: c.gen_idx,
             response_id: resp_id,
             model,
+            reasoning_effort,
+            root_session_id: root_session_id.to_owned(),
             occurred_at_ms: decoded_meta.occurred_at_ms,
             uncached_input_tokens: uncached_input,
             cached_tokens,
@@ -419,27 +423,14 @@ pub fn normalize_candidates(
     outcome
 }
 
-fn resolve_model(
-    primary: &RawModelField,
-    fallback: &RawModelField,
-) -> Result<String, &'static str> {
-    match primary {
-        RawModelField::Valid(m) => Ok(m.clone()),
-        RawModelField::Invalid => Err(USAGE_MODEL_INVALID),
-        RawModelField::Missing | RawModelField::Empty => match fallback {
-            RawModelField::Valid(m) => Ok(m.clone()),
-            RawModelField::Invalid => Err(USAGE_MODEL_INVALID),
-            RawModelField::Missing | RawModelField::Empty => Err(USAGE_MODEL_MISSING),
-        },
+fn split_selected_model(selected: &str) -> (String, Option<String>) {
+    if let Some((model, effort)) = selected.rsplit_once('-')
+        && matches!(effort, "low" | "medium" | "high" | "tiered")
+    {
+        (model.to_owned(), Some(effort.to_owned()))
+    } else {
+        (selected.to_owned(), None)
     }
-}
-
-/// Normalized title resolution from summary or annotation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResolvedTitle {
-    Set(String),
-    Clear,
-    Keep,
 }
 
 /// Metadata read from `conversation_summaries.db` for a conversation.
@@ -450,97 +441,136 @@ pub struct DiscoveredSummaryRow {
     pub last_modified_time_ms: Option<i64>,
     pub(crate) title_invalid: bool,
     pub(crate) workspace_invalid: bool,
+    pub parent_conversation_id: Option<String>,
+    pub nesting_depth: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AntigravityHierarchy {
+    pub parent_thread_id: Option<String>,
+    pub root_session_id: String,
+    pub agent_role: AgentRole,
+}
+
+/// Resolve a session's hierarchy from authoritative summary rows.
+pub fn resolve_hierarchy(
+    conversation_id: &str,
+    summary: &DiscoveredSummaryRow,
+    summaries: &HashMap<String, DiscoveredSummaryRow>,
+) -> Result<AntigravityHierarchy, String> {
+    if summary.nesting_depth < 0 {
+        return Err(format!("negative nesting_depth for {conversation_id}"));
+    }
+
+    let parent_thread_id = summary
+        .parent_conversation_id
+        .as_deref()
+        .map(antigravity_thread_id)
+        .transpose()?;
+    let mut current_id = conversation_id.to_owned();
+    let mut current_summary = summary;
+    let mut visited = BTreeSet::new();
+
+    let root_id = loop {
+        if !visited.insert(current_id.clone()) {
+            return Err(format!("parent conversation cycle includes {current_id}"));
+        }
+
+        match current_summary.nesting_depth {
+            0 => {
+                if let Some(parent_id) = current_summary.parent_conversation_id.as_deref() {
+                    if visited.contains(parent_id) {
+                        return Err(format!("parent conversation cycle includes {parent_id}"));
+                    }
+                    return Err(format!(
+                        "root conversation {current_id} has parent {parent_id}"
+                    ));
+                }
+                break current_id;
+            }
+            depth => {
+                let parent_id = current_summary
+                    .parent_conversation_id
+                    .as_deref()
+                    .ok_or_else(|| format!("nested conversation {current_id} has no parent"))?;
+                if visited.contains(parent_id) {
+                    return Err(format!("parent conversation cycle includes {parent_id}"));
+                }
+                let parent_summary = summaries.get(parent_id).ok_or_else(|| {
+                    format!("missing parent summary {parent_id} for {current_id}")
+                })?;
+                if parent_summary.nesting_depth != depth - 1 {
+                    return Err(format!(
+                        "nesting_depth mismatch between {current_id} and parent {parent_id}"
+                    ));
+                }
+                current_id = parent_id.to_owned();
+                current_summary = parent_summary;
+            }
+        }
+    };
+
+    Ok(AntigravityHierarchy {
+        parent_thread_id,
+        root_session_id: antigravity_thread_id(&root_id)?,
+        agent_role: if summary.parent_conversation_id.is_some() {
+            AgentRole::Subagent
+        } else {
+            AgentRole::Main
+        },
+    })
+}
+
+fn antigravity_thread_id(conversation_id: &str) -> Result<String, String> {
+    SessionIdentity::namespaced(SourceId::ANTIGRAVITY, conversation_id)
+        .map(|identity| identity.thread_id)
+        .map_err(|error| format!("invalid conversation ID {conversation_id}: {error}"))
 }
 
 /// Construct `ResolvedThreadPatch` according to Sections 4.5 and 4.6 truth tables.
 pub fn build_metadata_patch(
     conversation_id: &str,
-    summary: Option<&DiscoveredSummaryRow>,
-    annotation_title_result: AnnotationTitleResult,
-    blob_workspace: Option<&str>,
+    summary: &DiscoveredSummaryRow,
+    hierarchy: &AntigravityHierarchy,
     valid_usage_max_occurred_at_ms: Option<i64>,
 ) -> (ResolvedThreadPatch, MetadataQualityStatus) {
     let identity = SessionIdentity::namespaced(SourceId::ANTIGRAVITY, conversation_id).unwrap();
 
     let mut is_partial = false;
-    let mut has_clear = false;
-
     // 1. Resolve Title
-    let (title_patch, title_quality_partial) =
-        resolve_patch_title(summary, &annotation_title_result);
+    let (title_patch, title_quality_partial) = resolve_patch_title(summary);
     if title_quality_partial {
         is_partial = true;
     }
-    if matches!(title_patch, Patch::Clear) {
-        has_clear = true;
-    }
-
     // 2. Resolve Workspace
-    let (project_name, project_path, project_kind, ws_quality_partial) = match summary {
-        Some(s) => {
-            let workspace = if s.workspace_invalid {
-                WorkspaceEvaluation::Unknown
-            } else {
-                evaluate_summary_workspace(s.workspace_uris.as_deref())
-            };
-            match workspace {
-                WorkspaceEvaluation::Projectless => {
-                    has_clear = true;
-                    (
-                        Patch::Clear,
-                        Patch::Clear,
-                        Patch::Set(ProjectKind::Projectless),
-                        false,
-                    )
-                }
-                WorkspaceEvaluation::Project {
-                    project_name,
-                    project_path,
-                } => (
-                    Patch::Set(project_name),
-                    Patch::Set(project_path),
-                    Patch::Set(ProjectKind::Project),
-                    false,
-                ),
-                WorkspaceEvaluation::Unknown => {
-                    has_clear = true;
-                    (
-                        Patch::Clear,
-                        Patch::Clear,
-                        Patch::Set(ProjectKind::Unknown),
-                        true,
-                    )
-                }
-                WorkspaceEvaluation::Keep => (Patch::Keep, Patch::Keep, Patch::Keep, true),
-            }
-        }
-        None => {
-            // DB fallback
-            is_partial = true; // summary missing is always Partial
-            match evaluate_blob_workspace(blob_workspace) {
-                WorkspaceEvaluation::Projectless => {
-                    has_clear = true;
-                    (
-                        Patch::Clear,
-                        Patch::Clear,
-                        Patch::Set(ProjectKind::Projectless),
-                        false,
-                    )
-                }
-                WorkspaceEvaluation::Project {
-                    project_name,
-                    project_path,
-                } => (
-                    Patch::Set(project_name),
-                    Patch::Set(project_path),
-                    Patch::Set(ProjectKind::Project),
-                    false,
-                ),
-                WorkspaceEvaluation::Unknown | WorkspaceEvaluation::Keep => {
-                    (Patch::Keep, Patch::Keep, Patch::Keep, true)
-                }
-            }
-        }
+    let workspace = if summary.workspace_invalid {
+        WorkspaceEvaluation::Unknown
+    } else {
+        evaluate_summary_workspace(summary.workspace_uris.as_deref())
+    };
+    let (project_name, project_path, project_kind, ws_quality_partial) = match workspace {
+        WorkspaceEvaluation::Projectless => (
+            Patch::Clear,
+            Patch::Clear,
+            Patch::Set(ProjectKind::Projectless),
+            false,
+        ),
+        WorkspaceEvaluation::Project {
+            project_name,
+            project_path,
+        } => (
+            Patch::Set(project_name),
+            Patch::Set(project_path),
+            Patch::Set(ProjectKind::Project),
+            false,
+        ),
+        WorkspaceEvaluation::Unknown => (
+            Patch::Clear,
+            Patch::Clear,
+            Patch::Set(ProjectKind::Unknown),
+            true,
+        ),
+        WorkspaceEvaluation::Keep => (Patch::Keep, Patch::Keep, Patch::Keep, true),
     };
 
     if ws_quality_partial {
@@ -548,16 +578,9 @@ pub fn build_metadata_patch(
     }
 
     // 3. Resolve updated_at_ms and resolved_at_ms
-    let (updated_at_patch, resolved_at_ms) = match summary {
-        Some(s) => match s.last_modified_time_ms {
-            Some(time_ms) if time_ms >= 0 => (Patch::Set(time_ms), time_ms),
-            _ => {
-                is_partial = true; // last_modified_time invalid -> Partial
-                let fallback_time = valid_usage_max_occurred_at_ms.unwrap_or(0);
-                (Patch::Keep, fallback_time)
-            }
-        },
-        None => {
+    let (updated_at_patch, resolved_at_ms) = match summary.last_modified_time_ms {
+        Some(time_ms) if time_ms >= 0 => (Patch::Set(time_ms), time_ms),
+        _ => {
             is_partial = true;
             let fallback_time = valid_usage_max_occurred_at_ms.unwrap_or(0);
             (Patch::Keep, fallback_time)
@@ -574,9 +597,12 @@ pub fn build_metadata_patch(
         thread_id: identity.thread_id.clone(),
         source: identity.source,
         native_session_id: identity.native_session_id,
-        parent_thread_id: Patch::Keep,
-        root_session_id: Patch::Set(identity.thread_id),
-        agent_role: Patch::Set(AgentRole::Main),
+        parent_thread_id: match &hierarchy.parent_thread_id {
+            Some(parent) => Patch::Set(parent.clone()),
+            None => Patch::Clear,
+        },
+        root_session_id: Patch::Set(hierarchy.root_session_id.clone()),
+        agent_role: Patch::Set(hierarchy.agent_role),
         title: title_patch,
         project_name,
         project_path,
@@ -587,74 +613,35 @@ pub fn build_metadata_patch(
         archived: Patch::Keep,
         metadata_quality_status: quality,
         resolved_at_ms,
-        full_resolution: has_clear,
+        full_resolution: true,
     };
 
     (patch, quality)
 }
 
-fn resolve_patch_title(
-    summary: Option<&DiscoveredSummaryRow>,
-    annotation_res: &AnnotationTitleResult,
-) -> (Patch<String>, bool) {
-    match summary {
-        Some(s) => {
-            let normalized_summary_title = if s.title_invalid {
-                Some(Err(()))
-            } else {
-                match &s.title {
-                    Some(t) => {
-                        let trimmed = t.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else if trimmed.len() > MAX_TITLE_BYTES
-                            || trimmed.chars().any(char::is_control)
-                        {
-                            Some(Err(())) // Invalid
-                        } else {
-                            Some(Ok(trimmed.to_string())) // Valid
-                        }
-                    }
-                    None => None, // SQL NULL is a missing title, not corruption
+fn resolve_patch_title(summary: &DiscoveredSummaryRow) -> (Patch<String>, bool) {
+    let normalized_summary_title = if summary.title_invalid {
+        Some(Err(()))
+    } else {
+        match &summary.title {
+            Some(t) => {
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.len() > MAX_TITLE_BYTES || trimmed.chars().any(char::is_control) {
+                    Some(Err(())) // Invalid
+                } else {
+                    Some(Ok(trimmed.to_string())) // Valid
                 }
-            };
+            }
+            None => None, // SQL NULL is a missing title, not corruption
+        }
+    };
 
-            match normalized_summary_title {
-                Some(Ok(title)) => (Patch::Set(title), false),
-                Some(Err(())) => {
-                    // Summary title invalid -> quality is Partial, try annotation fallback
-                    match annotation_res {
-                        AnnotationTitleResult::Valid(annot_title) => {
-                            (Patch::Set(annot_title.clone()), true)
-                        }
-                        _ => (Patch::Clear, true),
-                    }
-                }
-                None => {
-                    // Summary title missing or trim empty
-                    match annotation_res {
-                        AnnotationTitleResult::Valid(annot_title) => {
-                            (Patch::Set(annot_title.clone()), false)
-                        }
-                        AnnotationTitleResult::Empty | AnnotationTitleResult::NotFound => {
-                            (Patch::Clear, false)
-                        }
-                        AnnotationTitleResult::Malformed => (Patch::Clear, true),
-                        AnnotationTitleResult::ReadFailure(_) => (Patch::Clear, true),
-                        AnnotationTitleResult::SecurityEscape(_) => (Patch::Clear, true),
-                    }
-                }
-            }
-        }
-        None => {
-            // Summary row missing
-            match annotation_res {
-                AnnotationTitleResult::Valid(annot_title) => {
-                    (Patch::Set(annot_title.clone()), true)
-                }
-                _ => (Patch::Keep, true),
-            }
-        }
+    match normalized_summary_title {
+        Some(Ok(title)) => (Patch::Set(title), false),
+        Some(Err(())) => (Patch::Clear, true),
+        None => (Patch::Clear, false),
     }
 }
 
@@ -662,147 +649,201 @@ fn resolve_patch_title(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_td_p1_model_fallback_01_truth_table() {
-        // 1. Primary Valid -> Valid (no fallback)
-        assert_eq!(
-            resolve_model(
-                &RawModelField::Valid("flash".into()),
-                &RawModelField::Valid("pro".into())
-            ),
-            Ok("flash".into())
-        );
-
-        // 2. Primary Missing, fallback Valid -> Valid
-        assert_eq!(
-            resolve_model(&RawModelField::Missing, &RawModelField::Valid("pro".into())),
-            Ok("pro".into())
-        );
-
-        // 3. Primary Empty, fallback Valid -> Valid
-        assert_eq!(
-            resolve_model(&RawModelField::Empty, &RawModelField::Valid("pro".into())),
-            Ok("pro".into())
-        );
-
-        // 4. Primary Invalid, fallback Valid -> USAGE_MODEL_INVALID (never masked!)
-        assert_eq!(
-            resolve_model(&RawModelField::Invalid, &RawModelField::Valid("pro".into())),
-            Err(USAGE_MODEL_INVALID)
-        );
-
-        // 5. Primary Missing, fallback Invalid -> USAGE_MODEL_INVALID
-        assert_eq!(
-            resolve_model(&RawModelField::Missing, &RawModelField::Invalid),
-            Err(USAGE_MODEL_INVALID)
-        );
-
-        // 6. Both Missing -> USAGE_MODEL_MISSING
-        assert_eq!(
-            resolve_model(&RawModelField::Missing, &RawModelField::Missing),
-            Err(USAGE_MODEL_MISSING)
-        );
+    fn summary(parent: Option<&str>, depth: i64) -> DiscoveredSummaryRow {
+        DiscoveredSummaryRow {
+            title: Some("Title".into()),
+            workspace_uris: Some("[]".into()),
+            last_modified_time_ms: Some(123),
+            title_invalid: false,
+            workspace_invalid: false,
+            parent_conversation_id: parent.map(str::to_owned),
+            nesting_depth: depth,
+        }
     }
 
-    #[test]
-    fn test_td_p3_gen_dup_01_duplicate_response_id_precedence() {
-        let cid = "effa6389-921a-497e-87e0-5a2962526c07";
-        let c1 = RawAntigravityUsageCandidate {
-            gen_idx: 0,
-            payload_digest: "digest1".into(),
-            response_id: Some("resp-dup".into()),
-            model_display_name: RawModelField::Invalid, // Model is invalid!
-            response_model: RawModelField::Missing,
-            uncached_input_tokens: Some(100),
-            cached_tokens: Some(0),
-            output_tokens: Some(50),
-            reasoning_tokens: Some(0),
-        };
-        let c2 = RawAntigravityUsageCandidate {
-            gen_idx: 1,
-            payload_digest: "digest2".into(),
-            response_id: Some("resp-dup".into()),
-            model_display_name: RawModelField::Valid("gemini-3.8-flash".into()),
-            response_model: RawModelField::Missing,
-            uncached_input_tokens: Some(200),
-            cached_tokens: Some(0),
-            output_tokens: Some(60),
-            reasoning_tokens: Some(0),
-        };
-
-        let step_index = BTreeMap::new();
-        let outcome = normalize_candidates(cid, vec![c1, c2], Vec::new(), &step_index);
-        assert_eq!(outcome.valid_records.len(), 0);
-        assert_eq!(outcome.quarantine_records.len(), 2);
-        // Both MUST receive USAGE_RESPONSE_ID_CONFLICT, NOT USAGE_MODEL_INVALID!
-        for q in &outcome.quarantine_records {
-            assert_eq!(q.reason_code, USAGE_RESPONSE_ID_CONFLICT);
+    fn candidate(
+        gen_idx: i64,
+        execution_id: Vec<u8>,
+        response_id: &str,
+    ) -> RawAntigravityUsageCandidate {
+        RawAntigravityUsageCandidate {
+            gen_idx,
+            payload_digest: format!("digest-{gen_idx}"),
+            response_id: Some(response_id.to_owned()),
+            execution_id: Some(execution_id),
+            uncached_input_tokens: Some(7),
+            cached_tokens: Some(3),
+            output_tokens: Some(11),
+            reasoning_tokens: Some(4),
         }
     }
 
     #[test]
-    fn test_td_p3_meta_time_01_summary_malformed_time() {
-        let cid = "effa6389-921a-497e-87e0-5a2962526c07";
-        let summary = DiscoveredSummaryRow {
-            title: Some("Valid Title".into()),
-            workspace_uris: Some("[]".into()),
-            last_modified_time_ms: None, // Malformed time!
-            title_invalid: false,
-            workspace_invalid: false,
-        };
-
-        let (patch, quality) = build_metadata_patch(
-            cid,
-            Some(&summary),
-            AnnotationTitleResult::NotFound,
-            None,
-            Some(123456789), // valid Usage max
-        );
-
-        assert_eq!(patch.title, Patch::Set("Valid Title".into()));
-        assert_eq!(patch.project_kind, Patch::Set(ProjectKind::Projectless));
-        assert_eq!(patch.updated_at_ms, Patch::Keep); // updated_at_ms is Keep!
-        assert_eq!(patch.resolved_at_ms, 123456789); // fallback to usage max!
-        assert_eq!(quality, MetadataQualityStatus::Partial);
+    fn selected_model_slug_splits_only_known_effort_suffixes() {
+        for (slug, expected_model, expected_effort) in [
+            ("gemini-3.8-flash-high", "gemini-3.8-flash", Some("high")),
+            (
+                "gemini-3.8-flash-medium",
+                "gemini-3.8-flash",
+                Some("medium"),
+            ),
+            ("gemini-3.8-flash-low", "gemini-3.8-flash", Some("low")),
+            (
+                "gemini-3.8-flash-tiered",
+                "gemini-3.8-flash",
+                Some("tiered"),
+            ),
+            ("gemini-3.8-flash", "gemini-3.8-flash", None),
+        ] {
+            assert_eq!(
+                split_selected_model(slug),
+                (
+                    expected_model.to_owned(),
+                    expected_effort.map(str::to_owned)
+                )
+            );
+        }
     }
 
     #[test]
-    fn test_td_p1_num_01_invalid_timestamp_has_timestamp_reason() {
-        let candidate = RawAntigravityUsageCandidate {
-            gen_idx: 0,
-            payload_digest: "digest".into(),
-            response_id: Some("response".into()),
-            model_display_name: RawModelField::Valid("model".into()),
-            response_model: RawModelField::Missing,
-            uncached_input_tokens: Some(1),
-            cached_tokens: Some(0),
-            output_tokens: Some(1),
-            reasoning_tokens: Some(0),
-        };
-        let mut timestamp = Vec::new();
-        timestamp.extend([0x0a, 0x02, 0x08, 0x01]); // timestamp has no nanos issue
-        timestamp.extend([0x18, 0x02]); // source = 2
-        // Replace timestamp payload with an invalid negative/overflow value.
-        timestamp.splice(
-            0..4,
-            [
-                0x0a, 0x0b, 0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
-            ],
+    fn duplicate_response_ids_are_quarantined_before_model_lookup() {
+        let candidates = vec![
+            candidate(0, vec![1], "resp-dup"),
+            candidate(1, vec![2], "resp-dup"),
+        ];
+        let outcome = normalize_candidates(
+            "conversation",
+            candidates,
+            Vec::new(),
+            &BTreeMap::new(),
+            &HashMap::new(),
+            "antigravity:root",
         );
+
+        assert!(outcome.valid_records.is_empty());
+        assert_eq!(outcome.quarantine_records.len(), 2);
+        assert!(
+            outcome
+                .quarantine_records
+                .iter()
+                .all(|record| record.reason_code == USAGE_RESPONSE_ID_CONFLICT)
+        );
+    }
+
+    #[test]
+    fn executor_model_is_matched_by_execution_id_and_usage_is_preserved() {
         let mut steps = BTreeMap::new();
         steps.insert(
             "response".into(),
             vec![StepIndexEntry {
                 step_idx: 1,
-                metadata_bytes: Some(timestamp),
+                metadata_bytes: Some(vec![0x0a, 0x02, 0x08, 0x01, 0x18, 0x02]),
             }],
         );
-        let outcome = normalize_candidates("conversation", vec![candidate], Vec::new(), &steps);
-        assert_eq!(outcome.valid_records.len(), 0);
-        assert_eq!(outcome.quarantine_records.len(), 1);
+        let mut executor_models = HashMap::new();
+        executor_models.insert(vec![1], "gemini-3.8-flash-low".into());
+        executor_models.insert(vec![2], "gemini-3.8-pro-high".into());
+
+        let outcome = normalize_candidates(
+            "conversation",
+            vec![candidate(0, vec![2], "response")],
+            Vec::new(),
+            &steps,
+            &executor_models,
+            "antigravity:root",
+        );
+
+        assert!(outcome.quarantine_records.is_empty());
+        let record = &outcome.valid_records[0];
+        assert_eq!(record.model, "gemini-3.8-pro");
+        assert_eq!(record.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(record.root_session_id, "antigravity:root");
+        assert_eq!(record.uncached_input_tokens, 7);
+        assert_eq!(record.cached_tokens, 3);
+        assert_eq!(record.output_tokens, 11);
+        assert_eq!(record.reasoning_tokens, 4);
+
+        let event = record.to_canonical_event("conversation").unwrap();
+        assert_eq!(event.model, "gemini-3.8-pro");
+        assert_eq!(event.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(event.usage.input_tokens, 10);
+        assert_eq!(event.usage.cached_tokens, 3);
+        assert_eq!(event.usage.output_tokens, 11);
+        assert_eq!(event.usage.reasoning_tokens, 4);
+        assert_eq!(event.usage.total_tokens, 21);
+    }
+
+    #[test]
+    fn hierarchy_resolves_nested_sessions_to_the_topmost_root() {
+        let root_id = "root-id";
+        let parent_id = "parent-id";
+        let child_id = "child-id";
+        let root = summary(None, 0);
+        let parent = summary(Some(root_id), 1);
+        let child = summary(Some(parent_id), 2);
+        let summaries = HashMap::from([
+            (root_id.into(), root.clone()),
+            (parent_id.into(), parent),
+            (child_id.into(), child.clone()),
+        ]);
+
+        let hierarchy = resolve_hierarchy(child_id, &child, &summaries).unwrap();
         assert_eq!(
-            outcome.quarantine_records[0].reason_code,
-            USAGE_TIMESTAMP_INVALID
+            hierarchy.parent_thread_id.as_deref(),
+            Some("antigravity:parent-id")
+        );
+        assert_eq!(hierarchy.root_session_id, "antigravity:root-id");
+        assert_eq!(hierarchy.agent_role, AgentRole::Subagent);
+
+        let root_hierarchy = resolve_hierarchy(root_id, &root, &summaries).unwrap();
+        assert_eq!(root_hierarchy.parent_thread_id, None);
+        assert_eq!(root_hierarchy.root_session_id, "antigravity:root-id");
+        assert_eq!(root_hierarchy.agent_role, AgentRole::Main);
+
+        let (patch, _) = build_metadata_patch(child_id, &child, &hierarchy, Some(123));
+        assert_eq!(
+            patch.parent_thread_id,
+            Patch::Set("antigravity:parent-id".into())
+        );
+        assert_eq!(
+            patch.root_session_id,
+            Patch::Set("antigravity:root-id".into())
+        );
+        assert_eq!(patch.agent_role, Patch::Set(AgentRole::Subagent));
+    }
+
+    #[test]
+    fn hierarchy_rejects_missing_ancestors_depth_mismatch_and_cycles() {
+        let child = summary(Some("missing-root"), 1);
+        assert!(
+            resolve_hierarchy("child", &child, &HashMap::new())
+                .unwrap_err()
+                .contains("missing parent summary")
+        );
+
+        let wrong_depth_parent = summary(None, 0);
+        let child = summary(Some("parent"), 2);
+        let summaries = HashMap::from([("parent".into(), wrong_depth_parent)]);
+        assert!(
+            resolve_hierarchy("child", &child, &summaries)
+                .unwrap_err()
+                .contains("nesting_depth mismatch")
+        );
+
+        let a = summary(Some("b"), 2);
+        let b = summary(Some("a"), 1);
+        let summaries = HashMap::from([("a".into(), a.clone()), ("b".into(), b)]);
+        assert!(
+            resolve_hierarchy("a", &a, &summaries)
+                .unwrap_err()
+                .contains("cycle")
+        );
+
+        let invalid_root = summary(Some("parent"), 0);
+        assert!(
+            resolve_hierarchy("invalid-root", &invalid_root, &HashMap::new())
+                .unwrap_err()
+                .contains("root conversation")
         );
     }
 }

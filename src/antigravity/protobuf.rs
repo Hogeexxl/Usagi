@@ -6,7 +6,6 @@ pub const MAX_PROTO_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LENGTH_DELIMITED_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PROTO_NESTING_DEPTH: usize = 32;
 pub const SQLITE_BLOB_DIGEST_CHUNK_BYTES: usize = 64 * 1024;
-pub const MAX_ANNOTATION_BYTES: u64 = 1024 * 1024;
 pub const MAX_RESPONSE_ID_BYTES: usize = 1024;
 pub const MAX_MODEL_BYTES: usize = 1024;
 pub const MAX_TITLE_BYTES: usize = 4096;
@@ -43,8 +42,8 @@ pub enum ProtoError {
     NestingDepthExceeded(usize),
     InvalidUtf8,
     StringTooLong(usize),
+    InvalidModelSlug,
     InvalidTimestamp,
-    DuplicateWorkspace,
 }
 
 impl fmt::Display for ProtoError {
@@ -68,10 +67,8 @@ impl fmt::Display for ProtoError {
             Self::StringTooLong(len) => {
                 write!(formatter, "string exceeds maximum allowed bytes: {len}")
             }
+            Self::InvalidModelSlug => formatter.write_str("invalid selected model slug"),
             Self::InvalidTimestamp => formatter.write_str("invalid timestamp in step metadata"),
-            Self::DuplicateWorkspace => {
-                formatter.write_str("multiple workspace URI fields in trajectory metadata")
-            }
         }
     }
 }
@@ -234,45 +231,13 @@ impl<'a> ProtoReader<'a> {
     }
 }
 
-/// Parsed RawModelField state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RawModelField {
-    Missing,
-    Empty,
-    Valid(String),
-    Invalid,
-}
-
-impl RawModelField {
-    pub fn from_raw_bytes(bytes: Option<&[u8]>) -> Self {
-        match bytes {
-            None => Self::Missing,
-            Some(raw) => {
-                let s = match std::str::from_utf8(raw) {
-                    Ok(s) => s,
-                    Err(_) => return Self::Invalid,
-                };
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    Self::Empty
-                } else if trimmed.len() > MAX_MODEL_BYTES || trimmed.chars().any(char::is_control) {
-                    Self::Invalid
-                } else {
-                    Self::Valid(trimmed.to_string())
-                }
-            }
-        }
-    }
-}
-
 /// Raw candidate parsed from a single `gen_metadata.data` row.
 #[derive(Clone, Debug)]
 pub struct RawAntigravityUsageCandidate {
     pub gen_idx: i64,
     pub payload_digest: String,
     pub response_id: Option<String>,
-    pub model_display_name: RawModelField,
-    pub response_model: RawModelField,
+    pub execution_id: Option<Vec<u8>>,
     pub uncached_input_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -307,6 +272,7 @@ pub fn parse_gen_metadata_data(
     };
 
     let mut chat_model_bytes: Option<&[u8]> = None;
+    let mut execution_id: Option<Vec<u8>> = None;
 
     while !reader.is_empty() {
         let (tag, wire) = match reader.read_tag() {
@@ -314,14 +280,23 @@ pub fn parse_gen_metadata_data(
             Err(err) => return ParseGenMetadataResult::Malformed(err),
         };
 
-        if tag == 1 && wire == WireType::LengthDelimited {
-            chat_model_bytes = match reader.read_bytes() {
-                Ok(b) => Some(b),
-                Err(err) => return ParseGenMetadataResult::Malformed(err),
-            };
-        } else {
-            if let Err(err) = reader.skip_field(wire) {
-                return ParseGenMetadataResult::Malformed(err);
+        match (tag, wire) {
+            (1, WireType::LengthDelimited) => {
+                chat_model_bytes = match reader.read_bytes() {
+                    Ok(b) => Some(b),
+                    Err(err) => return ParseGenMetadataResult::Malformed(err),
+                };
+            }
+            (4, WireType::LengthDelimited) => {
+                execution_id = match reader.read_bytes() {
+                    Ok(b) => Some(b.to_vec()),
+                    Err(err) => return ParseGenMetadataResult::Malformed(err),
+                };
+            }
+            (_, w) => {
+                if let Err(err) = reader.skip_field(w) {
+                    return ParseGenMetadataResult::Malformed(err);
+                }
             }
         }
     }
@@ -337,8 +312,6 @@ pub fn parse_gen_metadata_data(
     };
 
     let mut usage_bytes: Option<&[u8]> = None;
-    let mut model_display_bytes: Option<&[u8]> = None;
-    let mut response_model_bytes: Option<&[u8]> = None;
 
     while !cm_reader.is_empty() {
         let (tag, wire) = match cm_reader.read_tag() {
@@ -349,18 +322,6 @@ pub fn parse_gen_metadata_data(
         match (tag, wire) {
             (4, WireType::LengthDelimited) => {
                 usage_bytes = match cm_reader.read_bytes() {
-                    Ok(b) => Some(b),
-                    Err(err) => return ParseGenMetadataResult::Malformed(err),
-                };
-            }
-            (18, WireType::LengthDelimited) => {
-                model_display_bytes = match cm_reader.read_bytes() {
-                    Ok(b) => Some(b),
-                    Err(err) => return ParseGenMetadataResult::Malformed(err),
-                };
-            }
-            (19, WireType::LengthDelimited) => {
-                response_model_bytes = match cm_reader.read_bytes() {
                     Ok(b) => Some(b),
                     Err(err) => return ParseGenMetadataResult::Malformed(err),
                 };
@@ -471,20 +432,70 @@ pub fn parse_gen_metadata_data(
         }
     };
 
-    let model_display_name = RawModelField::from_raw_bytes(model_display_bytes);
-    let response_model = RawModelField::from_raw_bytes(response_model_bytes);
-
     ParseGenMetadataResult::Candidate(RawAntigravityUsageCandidate {
         gen_idx,
         payload_digest,
         response_id: normalized_response_id,
-        model_display_name,
-        response_model,
+        execution_id,
         uncached_input_tokens: input_tokens,
         cached_tokens: cache_read_tokens,
         output_tokens,
         reasoning_tokens: thinking_output_tokens,
     })
+}
+
+/// Read the execution identity and selected model from one executor row.
+pub fn parse_executor_metadata_data(data: &[u8]) -> Result<Option<(Vec<u8>, String)>, ProtoError> {
+    let mut reader = ProtoReader::new(data)?;
+    let mut execution_id = None;
+    let mut settings = None;
+    while !reader.is_empty() {
+        let (tag, wire) = reader.read_tag()?;
+        match (tag, wire) {
+            (9, WireType::LengthDelimited) => execution_id = Some(reader.read_bytes()?.to_vec()),
+            (10, WireType::LengthDelimited) => settings = Some(reader.read_bytes()?),
+            (_, wire) => reader.skip_field(wire)?,
+        }
+    }
+    let (Some(execution_id), Some(settings)) = (execution_id, settings) else {
+        return Ok(None);
+    };
+    let mut settings_reader = ProtoReader::with_depth(settings, 1)?;
+    let mut model_settings = None;
+    while !settings_reader.is_empty() {
+        let (tag, wire) = settings_reader.read_tag()?;
+        if (tag, wire) == (1, WireType::LengthDelimited) {
+            model_settings = Some(settings_reader.read_bytes()?);
+        } else {
+            settings_reader.skip_field(wire)?;
+        }
+    }
+    let Some(model_settings) = model_settings else {
+        return Ok(None);
+    };
+    let mut model_reader = ProtoReader::with_depth(model_settings, 2)?;
+    let mut model = None;
+    while !model_reader.is_empty() {
+        let (tag, wire) = model_reader.read_tag()?;
+        if (tag, wire) == (28, WireType::LengthDelimited) {
+            let raw = model_reader.read_bytes()?;
+            let value = std::str::from_utf8(raw)
+                .map_err(|_| ProtoError::InvalidUtf8)?
+                .trim();
+            if value.len() > MAX_MODEL_BYTES {
+                return Err(ProtoError::StringTooLong(value.len()));
+            }
+            if value.chars().any(char::is_control) {
+                return Err(ProtoError::InvalidModelSlug);
+            }
+            model = Some(value.to_owned());
+        } else {
+            model_reader.skip_field(wire)?;
+        }
+    }
+    Ok(model
+        .filter(|value| !value.is_empty())
+        .map(|value| (execution_id, value)))
 }
 
 /// Decode the semantic `responseId` from `steps.step_payload` (for `step_type = 15`).
@@ -633,33 +644,6 @@ pub fn parse_step_metadata(data: &[u8]) -> Result<DecodedStepMetadata, ProtoErro
     })
 }
 
-/// Decode workspace URI from `trajectory_metadata_blob`.
-/// Tag 7 is the primary workspace URI string.
-pub fn parse_trajectory_metadata_blob_workspace(data: &[u8]) -> Result<Option<String>, ProtoError> {
-    let mut reader = ProtoReader::new(data)?;
-    let mut workspace_uri: Option<String> = None;
-
-    while !reader.is_empty() {
-        let (tag, wire) = reader.read_tag()?;
-        if tag == 7 && wire == WireType::LengthDelimited {
-            if workspace_uri.is_some() {
-                return Err(ProtoError::DuplicateWorkspace);
-            }
-            let bytes = reader.read_bytes()?;
-            let s = std::str::from_utf8(bytes).map_err(|_| ProtoError::InvalidUtf8)?;
-            let trimmed = s.trim();
-            // Preserve an explicitly empty field as Some("") so the
-            // metadata resolver can distinguish Projectless from an absent
-            // fallback row (None => Keep).
-            workspace_uri = Some(trimmed.to_string());
-        } else {
-            reader.skip_field(wire)?;
-        }
-    }
-
-    Ok(workspace_uri)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +749,59 @@ mod tests {
             parse_gen_metadata_data(&data_10, 0, "digest".into()),
             ParseGenMetadataResult::Placeholder
         ));
+    }
+
+    #[test]
+    fn gen_metadata_reads_execution_id_and_ignores_display_model_fields() {
+        let execution_id = b"execution-opaque-id";
+        let mut usage = encode_field_test(2, WireType::Varint, &encode_varint_test(12));
+        usage.extend(encode_field_test(11, WireType::LengthDelimited, b"resp-1"));
+
+        let mut chat_model = encode_field_test(4, WireType::LengthDelimited, &usage);
+        chat_model.extend(encode_field_test(
+            18,
+            WireType::LengthDelimited,
+            b"display-model-must-not-be-used",
+        ));
+        chat_model.extend(encode_field_test(
+            19,
+            WireType::LengthDelimited,
+            b"response-model-must-not-be-used",
+        ));
+
+        let mut data = encode_field_test(1, WireType::LengthDelimited, &chat_model);
+        data.extend(encode_field_test(
+            4,
+            WireType::LengthDelimited,
+            execution_id,
+        ));
+
+        match parse_gen_metadata_data(&data, 7, "digest".into()) {
+            ParseGenMetadataResult::Candidate(candidate) => {
+                assert_eq!(
+                    candidate.execution_id.as_deref(),
+                    Some(execution_id.as_slice())
+                );
+                assert_eq!(candidate.response_id.as_deref(), Some("resp-1"));
+                assert_eq!(candidate.uncached_input_tokens, Some(12));
+            }
+            other => panic!("expected Candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn executor_metadata_reads_selected_model_path() {
+        let execution_id = b"execution-selected-model";
+        let model = b"gemini-3.8-pro-medium";
+        let model_settings = encode_field_test(28, WireType::LengthDelimited, model);
+        let settings = encode_field_test(1, WireType::LengthDelimited, &model_settings);
+        let mut data = encode_field_test(9, WireType::LengthDelimited, execution_id);
+        data.extend(encode_field_test(10, WireType::LengthDelimited, &settings));
+
+        assert_eq!(
+            parse_executor_metadata_data(&data).unwrap(),
+            Some((execution_id.to_vec(), "gemini-3.8-pro-medium".into()))
+        );
     }
 
     #[test]

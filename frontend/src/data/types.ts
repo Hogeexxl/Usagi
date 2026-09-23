@@ -159,12 +159,18 @@ export type SessionItemDto = {
   project_path: string | null;
   last_activity_at_ms: number;
   models_used: string[];
+  model_efforts: SessionModelEffortDto[];
   subagent_count: number;
   inclusive_usage: UsageDto | null;
   self_usage: UsageDto | null;
   subagent_usage: UsageDto | null;
   data_status: "complete" | "incomplete" | "error";
   error_code: string | null;
+};
+
+export type SessionModelEffortDto = {
+  model: string;
+  reasoning_effort: string | null;
 };
 
 export type SessionSortField =

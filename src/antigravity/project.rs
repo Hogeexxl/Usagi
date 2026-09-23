@@ -16,7 +16,7 @@ pub enum WorkspaceEvaluation {
     },
     /// Malformed, remote host, non-file, multiple URIs, root without basename, etc.
     Unknown,
-    /// SQL NULL, wrong SQLite type, unreadable fallback.
+    /// SQL NULL or a wrong SQLite type in `workspace_uris`.
     Keep,
 }
 
@@ -120,24 +120,6 @@ pub fn evaluate_summary_workspace(workspace_uris: Option<&str>) -> WorkspaceEval
     }
 }
 
-/// Evaluate DB fallback from `trajectory_metadata_blob`.
-pub fn evaluate_blob_workspace(workspace_uri: Option<&str>) -> WorkspaceEvaluation {
-    match workspace_uri {
-        // A missing/NULL fallback row is unavailable, not an explicit empty
-        // workspace.  Keep the existing projection in that case; only an
-        // explicitly present empty value means Projectless.
-        None => WorkspaceEvaluation::Keep,
-        Some(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                WorkspaceEvaluation::Projectless
-            } else {
-                evaluate_workspace_uri(trimmed)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_td_p1_workspace_auth_01_summary_and_fallback_matrix() {
+    fn test_td_p1_workspace_auth_01_summary_matrix() {
         // 1. Summary exists, explicit empty JSON array
         assert_eq!(
             evaluate_summary_workspace(Some("[]")),
@@ -266,24 +248,5 @@ mod tests {
 
         // 5. Summary exists, SQL NULL -> Keep
         assert_eq!(evaluate_summary_workspace(None), WorkspaceEvaluation::Keep);
-
-        // 6. Summary missing, blob explicit empty -> Projectless
-        assert_eq!(evaluate_blob_workspace(None), WorkspaceEvaluation::Keep);
-        assert_eq!(
-            evaluate_blob_workspace(Some("")),
-            WorkspaceEvaluation::Projectless
-        );
-
-        // 7. Summary missing, blob single valid URI
-        #[cfg(not(windows))]
-        {
-            assert_eq!(
-                evaluate_blob_workspace(Some("file:///synthetic/Antigravity%20%E9%A1%B9%E7%9B%AE")),
-                WorkspaceEvaluation::Project {
-                    project_name: "Antigravity 项目".into(),
-                    project_path: "/synthetic/Antigravity 项目".into()
-                }
-            );
-        }
     }
 }

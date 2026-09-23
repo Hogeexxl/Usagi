@@ -116,29 +116,38 @@ impl SourceAdapter for AntigravityAdapter {
             .with_private_state(|conn| validate_usage_epoch(conn))
             .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
 
-        let (target, is_initial_build) = match epoch_plan {
-            UsageEpochPlan::InitialCreate {
-                next_build_epoch: _,
-            } => {
+        let (target, build_epoch_to_activate) = match epoch_plan {
+            UsageEpochPlan::InitialCreate { next_build_epoch }
+            | UsageEpochPlan::Migrate { next_build_epoch } => {
                 txn.ensure_usage_epoch().map_err(|e| {
                     SourceAdapterError::with_code("ANTIGRAVITY_STORAGE_ERROR", e.to_string())
                 })?;
-                let _build = txn
+                let build_epoch = txn
                     .begin_or_resume_usage_build(ANTIGRAVITY_USAGE_PARSER_VERSION)
                     .map_err(|e| {
                         SourceAdapterError::with_code("ANTIGRAVITY_STORAGE_ERROR", e.to_string())
                     })?;
-                (UsageWriteTarget::Build, true)
+                if build_epoch != next_build_epoch {
+                    return Err(SourceAdapterError::with_code(
+                        crate::antigravity::storage::ANTIGRAVITY_USAGE_EPOCH_INVALID,
+                        format!(
+                            "usage build epoch plan expected {next_build_epoch}, got {build_epoch}"
+                        ),
+                    ));
+                }
+                (UsageWriteTarget::Build, Some(build_epoch))
             }
-            UsageEpochPlan::Active { epoch: _ } => (UsageWriteTarget::Active, false),
+            UsageEpochPlan::Active { epoch: _ } => (UsageWriteTarget::Active, None),
         };
+        let activates_build = build_epoch_to_activate.is_some();
 
         let mut metadata_visible_changed = false;
         let mut active_usage_inserted = false;
         let now_ms = now_ms();
 
-        // 4. In-transaction mutation sequence per [INV-TXN-02]
-        for conv in snapshot.conversations {
+        // 4. Upsert every thread before writing events. Child events reference
+        // their root thread, whose path may sort after the child conversation.
+        for conv in &snapshot.conversations {
             // [INV-CANCEL-01] Check before conversation mutation
             if cancellation.load(Ordering::Acquire) {
                 return Err(SourceAdapterError::with_code(
@@ -158,8 +167,19 @@ impl SourceAdapter for AntigravityAdapter {
                     metadata_visible_changed = true;
                 }
             }
+        }
 
-            // B. Canonical event compare & mutation-conflict quarantine
+        // 5. Write usage and source-private observation state after all related
+        // session metadata is available in the canonical ledger.
+        for conv in snapshot.conversations {
+            if cancellation.load(Ordering::Acquire) {
+                return Err(SourceAdapterError::with_code(
+                    "OPERATION_CANCELLED",
+                    "Antigravity scan was cancelled during conversation mutation",
+                ));
+            }
+
+            // A. Canonical event compare & mutation-conflict quarantine
             let mut mutation_conflicts = Vec::new();
             for (rec, event) in conv.valid_records {
                 if cancellation.load(Ordering::Acquire) {
@@ -201,7 +221,7 @@ impl SourceAdapter for AntigravityAdapter {
                 }
             }
 
-            // C. Conversation observation upsert (parent must precede child quarantine for FK)
+            // B. Conversation observation upsert before replacing its quarantine rows.
             txn.with_private_state(|conn| {
                 upsert_conversation_state(
                     conn,
@@ -213,7 +233,7 @@ impl SourceAdapter for AntigravityAdapter {
             })
             .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
 
-            // D. Conversation quarantine replace
+            // C. Conversation quarantine replace
             let mut all_quarantines = conv.source_quarantines;
             all_quarantines.extend(mutation_conflicts);
             txn.with_private_state(|conn| {
@@ -227,28 +247,30 @@ impl SourceAdapter for AntigravityAdapter {
             .map_err(|e| SourceAdapterError::with_code(e.code(), e.to_string()))?;
         }
 
-        // 5. Transient initial build activation (initial state only) [INV-TXN-02], [INV-REV-02]
-        if is_initial_build {
+        // 6. Activate the initial or migration build after every conversation
+        // has been written in full [INV-TXN-02], [INV-REV-02].
+        if let Some(build_epoch) = build_epoch_to_activate {
             if cancellation.load(Ordering::Acquire) {
                 return Err(SourceAdapterError::with_code(
                     "OPERATION_CANCELLED",
                     "Antigravity scan was cancelled before build activation",
                 ));
             }
-            txn.activate_usage_build(1, ANTIGRAVITY_USAGE_PARSER_VERSION)
+            txn.activate_usage_build(build_epoch, ANTIGRAVITY_USAGE_PARSER_VERSION)
                 .map_err(|e| {
                     SourceAdapterError::with_code("BUILD_ACTIVATION_FAILED", e.to_string())
                 })?;
         }
 
-        // 6. Revision closing per [INV-REV-02]
-        if metadata_visible_changed || active_usage_inserted {
+        // 7. Switching the active usage epoch invalidates usage views even
+        // when the new projection happens to equal the prior epoch [INV-REV-02].
+        if metadata_visible_changed || active_usage_inserted || activates_build {
             txn.bump_data_revision().map_err(|e| {
                 SourceAdapterError::with_code("BUMP_REVISION_FAILED", e.to_string())
             })?;
         }
 
-        // 7. Final cancellation check before commit [INV-CANCEL-01], [INV-TXN-02]
+        // 8. Final cancellation check before commit [INV-CANCEL-01], [INV-TXN-02]
         if cancellation.load(Ordering::Acquire) {
             return Err(SourceAdapterError::with_code(
                 "OPERATION_CANCELLED",
@@ -256,7 +278,7 @@ impl SourceAdapter for AntigravityAdapter {
             ));
         }
 
-        // 8. Commit
+        // 9. Commit
         txn.commit()
             .map_err(|e| SourceAdapterError::with_code("COMMIT_FAILED", e.to_string()))?;
 

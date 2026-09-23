@@ -34,7 +34,7 @@ export const sortableColumns: Array<{ field: SessionSortField; label: string }> 
   { field: "project", label: "项目" },
   { field: "model", label: "模型" },
   { field: "combined_total_tokens", label: "合计 Token" },
-  { field: "cache_hit_rate", label: "缓存命中率" },
+  { field: "cache_hit_rate", label: "缓存率" },
   { field: "combined_estimated_cost", label: "合计费用" },
 ];
 
@@ -117,10 +117,10 @@ export function SessionTable({
     {
       key: "model",
       header: "模型",
-      width: "140pt",
+      width: "215px",
       sortable: true,
       cell: (item) => {
-        const model = formatSessionModel(item.models_used);
+        const model = formatSessionModel(item.model_efforts);
         return <span className="block truncate" title={model.title} aria-label={model.accessibleName}>{model.text}</span>;
       },
     },
@@ -136,15 +136,15 @@ export function SessionTable({
     },
     {
       key: "subagent_count",
-      header: "sub数量",
-      width: "128px",
+      header: "sub数",
+      width: "80px",
       align: "right",
       cell: (item) => <span className="tabular-nums">{item.subagent_count}</span>,
     },
     {
       key: "cache_hit_rate",
-      header: "缓存命中率",
-      width: "80pt",
+      header: "缓存率",
+      width: "127px",
       sortable: true,
       align: "right",
       cell: (item) => item.inclusive_usage

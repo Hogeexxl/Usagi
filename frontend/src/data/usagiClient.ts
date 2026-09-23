@@ -318,6 +318,17 @@ function parseSessionItem(value: unknown): SessionItemDto {
   if (!Array.isArray(modelsValue) || modelsValue.some((model) => typeof model !== "string")) {
     throw new UsagiClientError("HTTP_ERROR", 200);
   }
+  const modelEffortsValue = record.model_efforts;
+  if (!Array.isArray(modelEffortsValue)) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  const modelEfforts = modelEffortsValue.map((value) => {
+    const modelEffort = requiredRecord(value);
+    return {
+      model: requiredString(modelEffort, "model"),
+      reasoning_effort: nullableString(modelEffort, "reasoning_effort"),
+    };
+  });
   const dataStatus = requiredSessionDataStatus(record, "data_status");
   const errorCode = nullableString(record, "error_code");
   const inclusiveUsage = record.inclusive_usage === null ? null : parseTokenUsage(record.inclusive_usage);
@@ -339,6 +350,7 @@ function parseSessionItem(value: unknown): SessionItemDto {
     project_path: nullableString(record, "project_path"),
     last_activity_at_ms: requiredSafeInteger(record, "last_activity_at_ms"),
     models_used: modelsValue,
+    model_efforts: modelEfforts,
     subagent_count: requiredSafeInteger(record, "subagent_count"),
     inclusive_usage: inclusiveUsage,
     self_usage: selfUsage,

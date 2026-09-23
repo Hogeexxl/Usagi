@@ -1,8 +1,8 @@
 //! In-memory snapshot taken from external Antigravity databases before transaction.
 //!
 //! Per `[INV-WAL-03]`, `[INV-EXT-04]`, `[INV-TXN-02]`, all external SQLite reads,
-//! schema probes, protobuf decodings, normalizations, and annotation reads happen
-//! here, prior to opening any Usagi write transaction.
+//! schema probes, protobuf decodings, and normalizations happen here, prior to
+//! opening any Usagi write transaction.
 
 use std::{
     collections::HashMap,
@@ -10,11 +10,11 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::antigravity::annotation::{AnnotationTitleResult, read_annotation_title};
 use crate::antigravity::config::AntigravityConfig;
 use crate::antigravity::discovery::discover_inventory;
 use crate::antigravity::normalization::{
-    AntigravityQuarantineRecord, AntigravityUsageRecord, build_metadata_patch, normalize_candidates,
+    AntigravityQuarantineRecord, AntigravityUsageRecord, build_metadata_patch,
+    normalize_candidates, resolve_hierarchy,
 };
 use crate::antigravity::reader::{ReaderError, open_external_db, read_conversation_snapshot};
 use crate::domain::{ResolvedThreadPatch, SessionIdentity};
@@ -89,29 +89,34 @@ pub fn take_source_snapshot(
         }
         seen_identities.insert(conversation_id.clone(), discovered.db_path.clone());
 
-        let summary_row = inventory.summary_map.rows.get(&conversation_id);
+        let summary_row = inventory
+            .summary_map
+            .rows
+            .get(&conversation_id)
+            .ok_or_else(|| {
+                SourceAdapterError::with_code(
+                    "ANTIGRAVITY_HIERARCHY_INVALID",
+                    format!("missing conversation summary for {conversation_id}"),
+                )
+            })?;
+        let hierarchy =
+            resolve_hierarchy(&conversation_id, summary_row, &inventory.summary_map.rows).map_err(
+                |error| SourceAdapterError::with_code("ANTIGRAVITY_HIERARCHY_INVALID", error),
+            )?;
 
         let norm = normalize_candidates(
             &conversation_id,
             data.candidates,
             data.initial_quarantines,
             &data.step_index,
+            &data.executor_models,
+            &hierarchy.root_session_id,
         );
 
         let max_time = norm.valid_records.iter().map(|r| r.occurred_at_ms).max();
 
-        let annotation_res = read_annotation_title(config, &conversation_id);
-        if let Some(error) = annotation_source_failure(&annotation_res) {
-            return Err(error);
-        }
-
-        let (patch, _quality) = build_metadata_patch(
-            &conversation_id,
-            summary_row,
-            annotation_res,
-            data.trajectory_workspace.as_deref(),
-            max_time,
-        );
+        let (patch, _quality) =
+            build_metadata_patch(&conversation_id, summary_row, &hierarchy, max_time);
 
         let mut valid_records = Vec::with_capacity(norm.valid_records.len());
         for record in norm.valid_records {
@@ -145,37 +150,4 @@ pub fn take_source_snapshot(
     }
 
     Ok(AntigravitySourceSnapshot { conversations })
-}
-
-fn annotation_source_failure(result: &AnnotationTitleResult) -> Option<SourceAdapterError> {
-    let message = match result {
-        AnnotationTitleResult::ReadFailure(message)
-        | AnnotationTitleResult::SecurityEscape(message) => message,
-        _ => return None,
-    };
-
-    Some(SourceAdapterError::with_code(
-        crate::antigravity::ANTIGRAVITY_CONFIG_INVALID,
-        message.clone(),
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn annotation_io_failure_aborts_source_before_patch_creation() {
-        let error = annotation_source_failure(&AnnotationTitleResult::ReadFailure(
-            "injected annotation read failure".into(),
-        ))
-        .expect("read failure must fail the source snapshot");
-
-        assert_eq!(error.code(), crate::antigravity::ANTIGRAVITY_CONFIG_INVALID);
-    }
-
-    #[test]
-    fn malformed_annotation_remains_available_for_patch_fallback() {
-        assert!(annotation_source_failure(&AnnotationTitleResult::Malformed).is_none());
-    }
 }

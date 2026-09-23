@@ -373,6 +373,7 @@ describe("DashboardPage v0.2.1", () => {
       project_path: null,
       last_activity_at_ms: 1,
       models_used: ["gpt-5"],
+      model_efforts: [{ model: "gpt-5", reasoning_effort: null }],
       subagent_count: 0,
       inclusive_usage: null,
       self_usage: null,

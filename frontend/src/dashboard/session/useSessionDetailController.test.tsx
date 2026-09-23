@@ -16,6 +16,7 @@ const row: SessionItemDto = {
   project_path: "/work/Usagi",
   last_activity_at_ms: 200,
   models_used: ["model-a"],
+  model_efforts: [{ model: "model-a", reasoning_effort: null }],
   subagent_count: 1,
   inclusive_usage: {
     input_tokens: 3,

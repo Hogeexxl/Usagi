@@ -51,6 +51,7 @@ const sessionItem = (root_session_id = "root-1") => ({
   project_path: "/work/Usagi",
   last_activity_at_ms: 1_700_000_000_000,
   models_used: ["gpt-5"],
+  model_efforts: [{ model: "gpt-5", reasoning_effort: "high" }],
   subagent_count: 1,
   inclusive_usage: sessionUsage,
   self_usage: sessionUsage,

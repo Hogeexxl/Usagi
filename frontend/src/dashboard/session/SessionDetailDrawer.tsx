@@ -12,6 +12,7 @@ import { formatRatio } from "../format";
 import { CostValue } from "../shared/CostValue";
 import {
   formatModelWithReasoningEffort,
+  formatSessionIdForDisplay,
   formatSessionTime,
   formatSessionTimeWithSeconds,
   formatSessionTitle,
@@ -85,7 +86,7 @@ function SubagentReceipt({ item, timezone }: { item: SubagentDetailDto; timezone
     <div>
       <dl className="grid grid-cols-[72px_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2 text-sm">
         <dt className="text-muted-foreground">Thread ID</dt>
-        <dd className="whitespace-nowrap text-right tabular-nums text-foreground">{item.thread_id}</dd>
+        <dd className="min-w-0 break-all text-right tabular-nums text-foreground">{formatSessionIdForDisplay(item.source, item.thread_id)}</dd>
         <dt className="text-muted-foreground">Last Active</dt>
         <dd className="text-right tabular-nums text-foreground" title={time.title}>{time.text}</dd>
       </dl>
@@ -280,6 +281,7 @@ export function SessionDetailDrawer({ view, timezone, sourceDisplay }: SessionDe
   const selected = view.selected_row;
   const title = formatSessionTitle(detail?.main.title ?? selected?.title ?? null);
   const rootSessionId = detail?.root_session_id ?? selected?.root_session_id ?? "";
+  const rootSessionIdSource = detail?.source ?? selected?.source ?? "";
   const timeValue = detail?.last_activity_at_ms ?? selected?.last_activity_at_ms ?? 0;
   const time = formatSessionTime(timeValue, timezone);
 
@@ -299,7 +301,7 @@ export function SessionDetailDrawer({ view, timezone, sourceDisplay }: SessionDe
               <Tooltip content={title} side="bottom" wrapperClassName="max-w-full">
                 <h2 id="session-detail-title" className="m-0 block truncate text-base font-semibold leading-6 text-foreground">{title}</h2>
               </Tooltip>
-              <p className="whitespace-nowrap text-sm leading-5 tabular-nums text-muted-foreground">{rootSessionId}</p>
+              <p className="min-w-0 break-all text-sm leading-5 tabular-nums text-muted-foreground">{formatSessionIdForDisplay(rootSessionIdSource, rootSessionId)}</p>
               <time className="block text-sm leading-5 tabular-nums text-muted-foreground" dateTime={timeValue > 0 ? new Date(timeValue).toISOString() : undefined} title={time.title}>{time.text}</time>
             </div>
             <div className="shrink-0">

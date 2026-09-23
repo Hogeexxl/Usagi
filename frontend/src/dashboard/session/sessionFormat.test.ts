@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatModelWithReasoningEffort,
+  formatSessionIdForDisplay,
   formatSessionModel,
   formatSessionProject,
   formatSessionTime,
@@ -11,11 +12,34 @@ import {
 } from "./sessionFormat";
 
 describe("Session presentation contract", () => {
-  it("keeps title/project/model fallbacks and exposes the full model list", () => {
+  it("removes the Antigravity namespace only for Antigravity IDs", () => {
+    expect(formatSessionIdForDisplay("antigravity", "antigravity:abc-123")).toBe("abc-123");
+    expect(formatSessionIdForDisplay("codex", "antigravity:abc-123")).toBe("antigravity:abc-123");
+    expect(formatSessionIdForDisplay("other", "antigravity:abc-123")).toBe("antigravity:abc-123");
+    expect(formatSessionIdForDisplay("antigravity", "abc-123")).toBe("abc-123");
+  });
+
+  it("keeps title/project/model fallbacks and exposes full model and effort pairs", () => {
     expect(formatSessionTitle("  ")).toBe("未命名 Session");
     expect(formatSessionProject(null)).toBe("未识别项目");
     expect(formatSessionModel([])).toMatchObject({ text: "unknown", accessibleName: "unknown" });
-    expect(formatSessionModel(["gpt-5", "o4-mini"])).toMatchObject({ text: "gpt-5 +1", title: "gpt-5, o4-mini" });
+    expect(formatSessionModel([
+      { model: "gpt-5", reasoning_effort: "high" },
+      { model: "o4-mini", reasoning_effort: null },
+    ])).toMatchObject({
+      text: "gpt-5 (high) +1",
+      title: "gpt-5 (high), o4-mini (—)",
+      accessibleName: "gpt-5 (high), o4-mini (—)",
+    });
+    expect(formatSessionModel([
+      { model: "gpt-5", reasoning_effort: "high" },
+      { model: "gpt-5", reasoning_effort: "medium" },
+    ])).toMatchObject({
+      text: "gpt-5 (high) +1",
+      title: "gpt-5 (high), gpt-5 (medium)",
+      accessibleName: "gpt-5 (high), gpt-5 (medium)",
+    });
+    expect(formatSessionModel([{ model: "o4-mini", reasoning_effort: null }]).text).toBe("o4-mini (—)");
   });
 
   it("formats same-day, same-year, and cross-year timestamps in the API timezone", () => {

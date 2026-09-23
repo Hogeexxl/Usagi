@@ -184,12 +184,19 @@ pub struct SessionUsageDto {
     pub project_path: Option<String>,
     pub last_activity_at_ms: i64,
     pub models_used: Vec<String>,
+    pub model_efforts: Vec<SessionModelEffortDto>,
     pub subagent_count: i64,
     pub inclusive_usage: Option<TokenUsageDto>,
     pub self_usage: Option<TokenUsageDto>,
     pub subagent_usage: Option<TokenUsageDto>,
     pub data_status: String,
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SessionModelEffortDto {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -976,6 +983,14 @@ fn map_session(row: SessionUsageRow) -> Result<SessionUsageDto, ApiError> {
         project_path: row.project_path,
         last_activity_at_ms: row.last_activity_at_ms,
         models_used: row.models_used,
+        model_efforts: row
+            .model_efforts
+            .into_iter()
+            .map(|model| SessionModelEffortDto {
+                model: model.model,
+                reasoning_effort: model.reasoning_effort,
+            })
+            .collect(),
         subagent_count: row.subagent_count,
         inclusive_usage: (row.data_status != SessionDataStatus::Error)
             .then(|| map_totals(row.inclusive_usage))
@@ -1349,7 +1364,9 @@ mod tests {
             ScanState, ScanTrigger,
         },
         range::{RangeKey, resolve_utc_range_at_for_test},
-        usage::aggregate::{CostCompleteness, ModelUsageRow, SessionUsageRow, TokenTotals},
+        usage::aggregate::{
+            CostCompleteness, ModelUsageRow, SessionModelEffort, SessionUsageRow, TokenTotals,
+        },
     };
     use chrono::DateTime;
 
@@ -1528,6 +1545,10 @@ mod tests {
                     subagent_count: 1,
                     last_activity_at_ms: 20,
                     models_used: vec!["unknown".into(), "gpt-5".into()],
+                    model_efforts: vec![SessionModelEffort {
+                        model: "unknown".into(),
+                        reasoning_effort: Some("high".into()),
+                    }],
                     data_status: SessionDataStatus::Incomplete,
                     error_code: None,
                 }],
@@ -1550,6 +1571,13 @@ mod tests {
         .unwrap();
         assert_eq!(response.items[0].source, "codex");
         assert_eq!(response.items[0].native_session_id, "root-a");
+        assert_eq!(
+            response.items[0].model_efforts,
+            vec![SessionModelEffortDto {
+                model: "unknown".into(),
+                reasoning_effort: Some("high".into()),
+            }]
+        );
         assert_eq!(response.sort_index[0].source, "codex");
         assert_eq!(response.sort_index[0].native_session_id, "root-a");
         assert_eq!(
