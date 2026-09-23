@@ -19,6 +19,8 @@ pub enum AnnotationTitleResult {
     NotFound,
     /// Annotation file is malformed, invalid UTF-8, or oversized.
     Malformed,
+    /// Reading an existing annotation file failed.
+    ReadFailure(String),
     /// File escape, symlink, or permission failure (triggers ANTIGRAVITY_CONFIG_INVALID).
     SecurityEscape(String),
 }
@@ -98,17 +100,27 @@ pub fn read_annotation_title(
         Err(err) => return AnnotationTitleResult::SecurityEscape(err.to_string()),
     };
 
-    let mut bounded_reader = file.take(MAX_ANNOTATION_BYTES + 1);
-    let mut buffer = Vec::new();
-    if let Err(_) = bounded_reader.read_to_end(&mut buffer) {
-        return AnnotationTitleResult::Malformed;
-    }
+    read_annotation_title_from_reader(file)
+}
+
+fn read_annotation_title_from_reader(reader: impl Read) -> AnnotationTitleResult {
+    let buffer = match read_bounded_annotation(reader) {
+        Ok(buffer) => buffer,
+        Err(err) => return AnnotationTitleResult::ReadFailure(err.to_string()),
+    };
 
     if buffer.len() > MAX_ANNOTATION_BYTES as usize {
         return AnnotationTitleResult::Malformed;
     }
 
     parse_annotation_title_content(&buffer)
+}
+
+fn read_bounded_annotation(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut bounded_reader = reader.take(MAX_ANNOTATION_BYTES + 1);
+    let mut buffer = Vec::new();
+    bounded_reader.read_to_end(&mut buffer)?;
+    Ok(buffer)
 }
 
 /// Parse the title string out of raw annotation pbtxt bytes.
@@ -358,5 +370,28 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn annotation_read_io_failure_is_not_malformed_content() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected annotation read failure",
+                ))
+            }
+        }
+
+        assert!(matches!(
+            read_annotation_title_from_reader(FailingReader),
+            AnnotationTitleResult::ReadFailure(_)
+        ));
+        assert_eq!(
+            parse_annotation_title_content(b"title: \"unterminated"),
+            AnnotationTitleResult::Malformed
+        );
     }
 }

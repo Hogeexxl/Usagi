@@ -786,7 +786,7 @@ mod tests {
             )
             .unwrap();
         let reopened = Arc::new(Ledger::open(LedgerOptions::new(ledger.database_path())).unwrap());
-        let source = SourceStorage::with_ledger("test", SourceId::CODEX, reopened);
+        let source = SourceStorage::with_ledger("test", SourceId::CODEX, Arc::clone(&reopened));
         let storage = CodexStorage::new(&source).unwrap();
         let outcome = storage.record_source_observations_with_usage_carry_proofs(
             complete_batch(vec![observation(
@@ -809,6 +809,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+        drop(storage);
+        drop(source);
+        drop(reopened);
         drop(changed);
         drop(ledger);
         cleanup(root);

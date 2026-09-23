@@ -23,10 +23,17 @@ pub struct AntigravityConfig {
 impl AntigravityConfig {
     /// Resolve the default Antigravity home (`~/.gemini/antigravity`).
     pub fn resolve_default() -> AntigravityConfigResolution {
-        let home = paths::home_dir()
-            .map(|h| h.join(".gemini").join("antigravity"))
-            .unwrap_or_else(|| PathBuf::from(".gemini").join("antigravity"));
-        Self::from_home(home)
+        Self::resolve_default_from_home(paths::home_dir())
+    }
+
+    fn resolve_default_from_home(home: Option<PathBuf>) -> AntigravityConfigResolution {
+        match home {
+            Some(home) => Self::from_home(home.join(".gemini").join("antigravity")),
+            None => AntigravityConfigResolution::Invalid(AntigravityConfigError::new(
+                "could not resolve the user home directory",
+                None,
+            )),
+        }
     }
 
     /// Resolve an explicit candidate home directory.
@@ -141,15 +148,78 @@ impl AntigravityConfig {
     pub fn contains_canonical_path(&self, canonical_path: &Path) -> bool {
         canonical_path.starts_with(&self.canonical_root)
     }
+
+    /// Revalidate the optional summary DB immediately before a scan opens it.
+    pub(crate) fn summaries_path_for_scan(
+        &self,
+    ) -> Result<Option<PathBuf>, AntigravityConfigError> {
+        validate_child_file_or_absent(&self.summaries_path, &self.canonical_root)
+    }
+
+    /// Revalidate the optional conversations directory immediately before a scan reads it.
+    pub(crate) fn conversations_dir_for_scan(
+        &self,
+    ) -> Result<Option<PathBuf>, AntigravityConfigError> {
+        validate_child_dir_or_absent(&self.conversations_dir, &self.canonical_root)
+    }
+
+    /// Validate a discovered conversation DB and return its canonical path.
+    pub(crate) fn conversation_db_path_for_scan(
+        &self,
+        path: &Path,
+    ) -> Result<PathBuf, AntigravityConfigError> {
+        let metadata = fs::symlink_metadata(path).map_err(|err| {
+            AntigravityConfigError::new(
+                format!(
+                    "failed to read conversation DB metadata {}: {err}",
+                    path.display()
+                ),
+                Some(path.to_path_buf()),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(AntigravityConfigError::new(
+                format!(
+                    "conversation DB path cannot be a symlink: {}",
+                    path.display()
+                ),
+                Some(path.to_path_buf()),
+            ));
+        }
+
+        validate_child_file_or_absent_with(path, &self.canonical_root, false, |canonical| {
+            fs::File::open(canonical).map(drop)
+        })?
+        .ok_or_else(|| {
+            AntigravityConfigError::new(
+                format!(
+                    "conversation DB disappeared during discovery: {}",
+                    path.display()
+                ),
+                Some(path.to_path_buf()),
+            )
+        })
+    }
 }
 
 fn validate_child_file_or_absent(
     path: &Path,
     canonical_root: &Path,
-) -> Result<(), AntigravityConfigError> {
+) -> Result<Option<PathBuf>, AntigravityConfigError> {
+    validate_child_file_or_absent_with(path, canonical_root, true, |canonical| {
+        fs::File::open(canonical).map(drop)
+    })
+}
+
+fn validate_child_file_or_absent_with(
+    path: &Path,
+    canonical_root: &Path,
+    allow_symlink: bool,
+    check_readable: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<Option<PathBuf>, AntigravityConfigError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(AntigravityConfigError::new(
                 format!("failed to read child metadata {}: {err}", path.display()),
@@ -157,6 +227,13 @@ fn validate_child_file_or_absent(
             ));
         }
     };
+
+    if !allow_symlink && meta.file_type().is_symlink() {
+        return Err(AntigravityConfigError::new(
+            format!("path cannot be a symlink: {}", path.display()),
+            Some(path.to_path_buf()),
+        ));
+    }
 
     if !meta.is_file() && !meta.file_type().is_symlink() {
         return Err(AntigravityConfigError::new(
@@ -183,26 +260,45 @@ fn validate_child_file_or_absent(
         ));
     }
 
-    if !fs::metadata(&canonical)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
-    {
+    let canonical_metadata = fs::metadata(&canonical).map_err(|err| {
+        AntigravityConfigError::new(
+            format!(
+                "failed to read canonical child metadata {}: {err}",
+                canonical.display()
+            ),
+            Some(path.to_path_buf()),
+        )
+    })?;
+    if !canonical_metadata.is_file() {
         return Err(AntigravityConfigError::new(
             format!("canonical child is not a file: {}", canonical.display()),
             Some(path.to_path_buf()),
         ));
     }
 
-    Ok(())
+    if !file_has_read_permission(&canonical_metadata) {
+        return Err(AntigravityConfigError::new(
+            format!("child file is not readable: {}", path.display()),
+            Some(path.to_path_buf()),
+        ));
+    }
+    check_readable(&canonical).map_err(|err| {
+        AntigravityConfigError::new(
+            format!("child file is not readable {}: {err}", path.display()),
+            Some(path.to_path_buf()),
+        )
+    })?;
+
+    Ok(Some(canonical))
 }
 
 fn validate_child_dir_or_absent(
     path: &Path,
     canonical_root: &Path,
-) -> Result<(), AntigravityConfigError> {
+) -> Result<Option<PathBuf>, AntigravityConfigError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(AntigravityConfigError::new(
                 format!("failed to read child metadata {}: {err}", path.display()),
@@ -236,21 +332,51 @@ fn validate_child_dir_or_absent(
         ));
     }
 
+    let canonical_metadata = fs::metadata(&canonical).map_err(|err| {
+        AntigravityConfigError::new(
+            format!(
+                "failed to read canonical child metadata {}: {err}",
+                canonical.display()
+            ),
+            Some(path.to_path_buf()),
+        )
+    })?;
+    if !canonical_metadata.is_dir() {
+        return Err(AntigravityConfigError::new(
+            format!(
+                "canonical child is not a directory: {}",
+                canonical.display()
+            ),
+            Some(path.to_path_buf()),
+        ));
+    }
+
     // Check directory readability
-    if !directory_has_read_permission(path) {
+    if !directory_has_read_permission(&canonical) {
         return Err(AntigravityConfigError::new(
             format!("child directory is not readable: {}", path.display()),
             Some(path.to_path_buf()),
         ));
     }
-    if let Err(err) = fs::read_dir(path) {
+    if let Err(err) = fs::read_dir(&canonical) {
         return Err(AntigravityConfigError::new(
             format!("child directory is not readable {}: {err}", path.display()),
             Some(path.to_path_buf()),
         ));
     }
 
-    Ok(())
+    Ok(Some(canonical))
+}
+
+#[cfg(unix)]
+fn file_has_read_permission(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o444 != 0
+}
+
+#[cfg(not(unix))]
+fn file_has_read_permission(_metadata: &fs::Metadata) -> bool {
+    true
 }
 
 #[cfg(unix)]
@@ -363,6 +489,18 @@ mod tests {
         let missing = std::env::temp_dir().join(format!("nonexistent-ag-{}", unique_id()));
         let res = AntigravityConfig::from_home(&missing);
         assert_eq!(res, AntigravityConfigResolution::NotInstalled);
+    }
+
+    #[test]
+    fn default_resolution_without_home_is_invalid() {
+        let res = AntigravityConfig::resolve_default_from_home(None);
+        match res {
+            AntigravityConfigResolution::Invalid(err) => {
+                assert_eq!(err.code(), ANTIGRAVITY_CONFIG_INVALID);
+                assert!(err.message().contains("home directory"));
+            }
+            other => panic!("expected Invalid without a home directory, got {other:?}"),
+        }
     }
 
     #[test]
@@ -484,5 +622,61 @@ mod tests {
             drop(_guard);
             let _ = fs::remove_dir_all(&home);
         }
+    }
+
+    #[test]
+    fn existing_summary_file_read_permission_error_is_invalid() {
+        let home = create_temp_home("summary-permission-injected");
+        let summary = home.join("conversation_summaries.db");
+        fs::write(&summary, b"summary db").unwrap();
+        let canonical_root = home.canonicalize().unwrap();
+
+        let err = validate_child_file_or_absent_with(&summary, &canonical_root, true, |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), ANTIGRAVITY_CONFIG_INVALID);
+        assert!(err.message().contains("not readable"));
+
+        // A missing optional file remains distinguishable from an access error.
+        let missing = home.join("missing.db");
+        let missing_result =
+            validate_child_file_or_absent_with(&missing, &canonical_root, true, |_| {
+                panic!("readability check must not run for a missing file")
+            })
+            .unwrap();
+        assert_eq!(missing_result, None);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_unreadable_summary_file_makes_config_invalid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestoreGuard(PathBuf);
+        impl Drop for RestoreGuard {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+            }
+        }
+
+        let home = create_temp_home("summary-permission");
+        let summary = home.join("conversation_summaries.db");
+        fs::write(&summary, b"summary db").unwrap();
+        let guard = RestoreGuard(summary.clone());
+        fs::set_permissions(&summary, fs::Permissions::from_mode(0o000)).unwrap();
+
+        match AntigravityConfig::from_home(&home) {
+            AntigravityConfigResolution::Invalid(err) => {
+                assert_eq!(err.code(), ANTIGRAVITY_CONFIG_INVALID);
+                assert!(err.message().contains("not readable"));
+            }
+            other => panic!("expected Invalid for unreadable summary DB, got {other:?}"),
+        }
+
+        drop(guard);
+        let _ = fs::remove_dir_all(&home);
     }
 }

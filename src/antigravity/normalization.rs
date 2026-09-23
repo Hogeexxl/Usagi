@@ -640,6 +640,7 @@ fn resolve_patch_title(
                             (Patch::Clear, false)
                         }
                         AnnotationTitleResult::Malformed => (Patch::Clear, true),
+                        AnnotationTitleResult::ReadFailure(_) => (Patch::Clear, true),
                         AnnotationTitleResult::SecurityEscape(_) => (Patch::Clear, true),
                     }
                 }

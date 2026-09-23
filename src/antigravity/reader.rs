@@ -40,6 +40,7 @@ pub const OPERATION_CANCELLED: &str = "OPERATION_CANCELLED";
 pub enum ReaderError {
     Busy(String),
     Invalid(String),
+    ConfigInvalid(String),
     SchemaUnsupported(String),
     SummaryIdConflict(String),
     ConversationIdMissing(String),
@@ -57,6 +58,7 @@ impl ReaderError {
         match self {
             Self::Busy(_) => ANTIGRAVITY_DATABASE_BUSY,
             Self::Invalid(_) => ANTIGRAVITY_DATABASE_INVALID,
+            Self::ConfigInvalid(_) => crate::antigravity::ANTIGRAVITY_CONFIG_INVALID,
             Self::SchemaUnsupported(_) => ANTIGRAVITY_SCHEMA_UNSUPPORTED,
             Self::SummaryIdConflict(_) => ANTIGRAVITY_SUMMARY_ID_CONFLICT,
             Self::ConversationIdMissing(_) => ANTIGRAVITY_CONVERSATION_ID_MISSING,
@@ -76,6 +78,13 @@ impl fmt::Display for ReaderError {
         match self {
             Self::Busy(msg) => write!(formatter, "{ANTIGRAVITY_DATABASE_BUSY}: {msg}"),
             Self::Invalid(msg) => write!(formatter, "{ANTIGRAVITY_DATABASE_INVALID}: {msg}"),
+            Self::ConfigInvalid(msg) => {
+                write!(
+                    formatter,
+                    "{}: {msg}",
+                    crate::antigravity::ANTIGRAVITY_CONFIG_INVALID
+                )
+            }
             Self::SchemaUnsupported(msg) => {
                 write!(formatter, "{ANTIGRAVITY_SCHEMA_UNSUPPORTED}: {msg}")
             }
@@ -161,10 +170,11 @@ pub fn read_summary_snapshot(
         return Err(ReaderError::Cancelled);
     }
 
-    // Probe summary schema [INV-EXT-01]
-    probe_summary_schema(conn)?;
-
     let tx = conn.unchecked_transaction().map_err(map_rusqlite_error)?;
+
+    // Probe summary schema in the same deferred transaction as the snapshot
+    // query [INV-EXT-01], [INV-WAL-02].
+    probe_summary_schema(&tx)?;
 
     let mut stmt = tx
         .prepare(
@@ -281,8 +291,8 @@ pub fn read_summary_snapshot(
     Ok(DiscoveredSummaryMap { rows: rows_map })
 }
 
-fn probe_summary_schema(conn: &Connection) -> Result<(), ReaderError> {
-    let mut stmt = conn
+fn probe_summary_schema(tx: &Transaction<'_>) -> Result<(), ReaderError> {
+    let mut stmt = tx
         .prepare("PRAGMA table_info(conversation_summaries)")
         .map_err(map_rusqlite_error)?;
 
@@ -765,6 +775,43 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ag-reader-{name}-{}-{}.db", t, c));
         let conn = rusqlite::Connection::open(&path).unwrap();
         (conn, path)
+    }
+
+    #[test]
+    fn config_invalid_reader_error_uses_public_config_code() {
+        let error = ReaderError::ConfigInvalid("annotation read failed".into());
+
+        assert_eq!(error.code(), crate::antigravity::ANTIGRAVITY_CONFIG_INVALID);
+        assert!(error.to_string().starts_with("ANTIGRAVITY_CONFIG_INVALID:"));
+    }
+
+    #[test]
+    fn summary_schema_probe_and_snapshot_use_deferred_transaction() {
+        let (conn, path) = temp_test_db("summary-transaction");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (
+                conversation_id TEXT,
+                title TEXT,
+                workspace_uris TEXT,
+                last_modified_time TEXT
+            );
+            INSERT INTO conversation_summaries VALUES (
+                '49e69e84-d3f2-4f56-8c17-4ea8ded58b31',
+                'title', NULL, NULL
+            );",
+        )
+        .unwrap();
+
+        let snapshot = read_summary_snapshot(&conn, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            snapshot.rows["49e69e84-d3f2-4f56-8c17-4ea8ded58b31"]
+                .title
+                .as_deref(),
+            Some("title")
+        );
+
+        drop(conn);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

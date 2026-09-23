@@ -1669,7 +1669,7 @@ mod tests {
         patch.agent_role = Patch::Set(AgentRole::Main);
         patch.title = Patch::Set("Test Session".to_owned());
         patch.project_name = Patch::Set("test-project".to_owned());
-        patch.project_path = Patch::Set("/test/project".to_owned());
+        patch.project_path = Patch::Set(root.join("project").to_string_lossy().into_owned());
         patch.project_kind = Patch::Set(crate::domain::ProjectKind::Project);
         patch.metadata_quality_status = MetadataQualityStatus::Complete;
         txn.upsert_session_metadata_no_revision(&session_id, &patch)

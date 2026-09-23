@@ -180,7 +180,7 @@ describe("FilterControls", () => {
     expect(onChange).toHaveBeenCalledWith({ sources: [], models: [], projects: [] });
   });
 
-  it("does not auto-expand Selected when no active model group exists", async () => {
+  it("waits for the first active model group and then preserves group state", async () => {
     const { rerender } = render(
       <FilterControls
         filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
@@ -220,7 +220,34 @@ describe("FilterControls", () => {
     );
     const updatedDialog = screen.getByRole("dialog");
     expect(within(updatedDialog).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "true");
-    expect(within(updatedDialog).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
+    const openAiToggle = within(updatedDialog).getByRole("button", { name: "OpenAI" });
+    expect(openAiToggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(openAiToggle);
+    rerender(
+      <FilterControls
+        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
+        options={{
+          data_revision: 3,
+          sources: [],
+          models: [
+            { model: "gpt-4o", provider: "openai" },
+            { model: "gemini-2.5", provider: "antigravity" },
+          ],
+          projects: [],
+        }}
+        optionsLoading={false}
+        optionsStale={false}
+        anyFilterActive={true}
+        onChange={vi.fn()}
+        onClear={vi.fn()}
+        onRetryOptions={vi.fn()}
+      />,
+    );
+    const changedDialog = screen.getByRole("dialog");
+    expect(within(changedDialog).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(changedDialog).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(changedDialog).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("selects normal, projectless, and unknown projects using their labels", async () => {

@@ -10,7 +10,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::antigravity::annotation::read_annotation_title;
+use crate::antigravity::annotation::{AnnotationTitleResult, read_annotation_title};
 use crate::antigravity::config::AntigravityConfig;
 use crate::antigravity::discovery::discover_inventory;
 use crate::antigravity::normalization::{
@@ -101,13 +101,8 @@ pub fn take_source_snapshot(
         let max_time = norm.valid_records.iter().map(|r| r.occurred_at_ms).max();
 
         let annotation_res = read_annotation_title(config, &conversation_id);
-        if let crate::antigravity::annotation::AnnotationTitleResult::SecurityEscape(ref err) =
-            annotation_res
-        {
-            return Err(SourceAdapterError::with_code(
-                crate::antigravity::ANTIGRAVITY_CONFIG_INVALID,
-                err.clone(),
-            ));
+        if let Some(error) = annotation_source_failure(&annotation_res) {
+            return Err(error);
         }
 
         let (patch, _quality) = build_metadata_patch(
@@ -150,4 +145,37 @@ pub fn take_source_snapshot(
     }
 
     Ok(AntigravitySourceSnapshot { conversations })
+}
+
+fn annotation_source_failure(result: &AnnotationTitleResult) -> Option<SourceAdapterError> {
+    let message = match result {
+        AnnotationTitleResult::ReadFailure(message)
+        | AnnotationTitleResult::SecurityEscape(message) => message,
+        _ => return None,
+    };
+
+    Some(SourceAdapterError::with_code(
+        crate::antigravity::ANTIGRAVITY_CONFIG_INVALID,
+        message.clone(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotation_io_failure_aborts_source_before_patch_creation() {
+        let error = annotation_source_failure(&AnnotationTitleResult::ReadFailure(
+            "injected annotation read failure".into(),
+        ))
+        .expect("read failure must fail the source snapshot");
+
+        assert_eq!(error.code(), crate::antigravity::ANTIGRAVITY_CONFIG_INVALID);
+    }
+
+    #[test]
+    fn malformed_annotation_remains_available_for_patch_fallback() {
+        assert!(annotation_source_failure(&AnnotationTitleResult::Malformed).is_none());
+    }
 }

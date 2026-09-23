@@ -102,11 +102,11 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
   const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
 
   useEffect(() => {
-    if (modelGroupsInitialized.current || !options || groups.length === 0) return;
-    modelGroupsInitialized.current = true;
+    if (modelGroupsInitialized.current || !options) return;
     const firstActive = groups.find((group) => group.key !== "selected");
     if (!firstActive) return;
-    setExpandedGroups({ [firstActive.key]: true });
+    modelGroupsInitialized.current = true;
+    setExpandedGroups((current) => ({ ...current, [firstActive.key]: true }));
   }, [groups, options]);
 
   const selectedSources = new Set(filters.sources);
