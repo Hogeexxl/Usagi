@@ -2,8 +2,8 @@
 """Generate the bounded OpenAI LiteLLM catalog update.
 
 The checked-in catalog is intentionally a local projection rather than a
-full re-generation of the upstream file.  This script therefore validates
-the pinned input and changes only the four models covered by this update.
+full re-generation of the upstream file. This script validates the pinned
+input and supplements it with officially verified GPT-6.1 Sol prices.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ SOURCE_URL = (
 )
 SOURCE_SHA256 = "83cc2d6257437025ef7f8a56533d596159e915a199647ba1e3a37f3f706bc734"
 VERIFIED_AT = "2026-09-23"
+SOL_6_1_SOURCE_URL = "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+SOL_6_1_VERIFIED_AT = "2026-09-30"
 NANODOLLARS_PER_DOLLAR = Decimal("1000000000")
 THRESHOLD_INPUT_TOKENS = 272_000
 
@@ -32,11 +34,12 @@ TARGET_MODELS = (
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
+    "gpt-6.1-sol",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
-ADDED_MODELS = ("gpt-6-luna", "gpt-6-sol")
+ADDED_MODELS = ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol")
 
 JSON_KEYS = (
     (
@@ -60,6 +63,10 @@ JSON_KEYS = (
 # Values are nanodollars/token, ordered input, cached input, cache write,
 # output for short and long context respectively.
 EXPECTED_RATES: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {
+    "gpt-6.1-sol": (
+        (2_000, 100, 2_500, 10_000),
+        (4_000, 200, 5_000, 15_000),
+    ),
     "gpt-6-astra": (
         (10_000, 1_000, 12_500, 50_000),
         (20_000, 2_000, 25_000, 75_000),
@@ -87,6 +94,7 @@ EXPECTED_RATES: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, 
 }
 
 MODEL_CONSTANTS = {
+    "gpt-6.1-sol": "SNAPSHOT_GPT_6_1_SOL_PRICING",
     "gpt-6-astra": "SNAPSHOT_GPT_6_ASTRA_PRICING",
     "gpt-6-sol": "SNAPSHOT_GPT_6_SOL_PRICING",
     "gpt-6-luna": "SNAPSHOT_GPT_6_LUNA_PRICING",
@@ -118,7 +126,7 @@ class GenerationError(Exception):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the six-model Usagi LiteLLM catalog candidate."
+        description="Generate the Usagi LiteLLM catalog with official GPT-6.1 Sol prices."
     )
     parser.add_argument("--input", required=True, type=Path, help="pinned LiteLLM JSON")
     parser.add_argument("--catalog", required=True, type=Path, help="current Rust catalog")
@@ -174,6 +182,10 @@ def to_nanodollars(value: Any, model: str, key: str) -> int:
 def read_target_rates(data: dict[str, Any]) -> dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]:
     rates: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {}
     for model in TARGET_MODELS:
+        if model == "gpt-6.1-sol":
+            # The pinned LiteLLM snapshot predates this model; use official prices.
+            rates[model] = EXPECTED_RATES[model]
+            continue
         entry = data.get(model)
         if not isinstance(entry, dict):
             raise GenerationError(f"target model {model!r} is missing from input JSON")
@@ -231,6 +243,10 @@ def update_header(source: str) -> str:
         raise GenerationError("catalog source header is missing its terminating blank line")
 
     newline = "\r\n" if "\r\n" in source else "\n"
+    lines[0] = (
+        "// Generated from LiteLLM model_prices_and_context_window.json and "
+        "official OpenAI supplements; do not edit by hand." + newline
+    )
     model_list = ", ".join(TARGET_MODELS)
     metadata = {
         "LITELLM_SNAPSHOT_SOURCE_URL": f"// LITELLM_SNAPSHOT_SOURCE_URL: {SOURCE_URL}",
@@ -243,8 +259,12 @@ def update_header(source: str) -> str:
             f"// LITELLM_SNAPSHOT_VERIFIED_AT: {VERIFIED_AT}"
         ),
         "LITELLM_SNAPSHOT_SCOPE": (
-            "// LITELLM_SNAPSHOT_SCOPE: this round updates only six target models "
+            "// LITELLM_SNAPSHOT_SCOPE: this round updates only seven target models "
             f"({model_list})"
+        ),
+        "LITELLM_SNAPSHOT_OFFICIAL_SUPPLEMENT": (
+            f"// LITELLM_SNAPSHOT_OFFICIAL_SUPPLEMENT: gpt-6.1-sol; {SOL_6_1_SOURCE_URL}; "
+            f"verified {SOL_6_1_VERIFIED_AT}"
         ),
     }
 

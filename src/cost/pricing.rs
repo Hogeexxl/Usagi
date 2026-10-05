@@ -77,6 +77,7 @@ impl ModelPricing {
 
 include!("litellm_catalog.rs");
 include!("google_catalog.rs");
+include!("claude_catalog.rs");
 
 /// The immutable bundled OpenAI Standard catalog.
 pub const BUNDLED_PRICING_CATALOG: &[ModelPricing] = LITELLM_OPENAI_PRICING_CATALOG;
@@ -95,6 +96,9 @@ impl BundledPricingRepository {
         match (resolution.pricing_provider, resolution.pricing_target) {
             (Some(PricingProvider::OpenAI), Some(target)) => {
                 resolve_from_catalog(BUNDLED_PRICING_CATALOG, target, occurred_at_ms)
+            }
+            (Some(PricingProvider::Anthropic), Some(target)) => {
+                resolve_from_catalog(ANTHROPIC_STANDARD_PRICING_CATALOG, target, occurred_at_ms)
             }
             _ => None,
         }
@@ -115,6 +119,9 @@ impl BundledPricingRepository {
             (Some(PricingProvider::Google), Some(target)) => {
                 resolve_from_catalog(GOOGLE_STANDARD_PRICING_CATALOG, target, occurred_at_ms)
             }
+            (Some(PricingProvider::Anthropic), Some(target)) => {
+                resolve_from_catalog(ANTHROPIC_STANDARD_PRICING_CATALOG, target, occurred_at_ms)
+            }
             _ => None,
         }
     }
@@ -133,6 +140,64 @@ fn resolve_from_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_route_models_use_litellm_standard_rates() {
+        let repository = BundledPricingRepository::new();
+        for (model, dotted, rates) in [
+            (
+                "claude-opus-5-5",
+                "claude-opus-5.5",
+                TokenRates::new(4_000, 200, Some(5_000), 20_000),
+            ),
+            (
+                "claude-sonnet-5-5",
+                "claude-sonnet-5.5",
+                TokenRates::new(2_000, 200, Some(2_500), 10_000),
+            ),
+            (
+                "claude-fable-5-1",
+                "claude-fable-5.1",
+                TokenRates::new(10_000, 250, Some(12_500), 50_000),
+            ),
+        ] {
+            for alias in [
+                model.to_owned(),
+                dotted.to_owned(),
+                format!("copilot/{dotted}"),
+                format!("github-copilot/{model}"),
+                format!("anthropic/{model}"),
+                format!("copiLot/{dotted}").to_uppercase(),
+            ] {
+                let resolution = ModelRegistry::new().resolve(&alias);
+                assert_eq!(resolution.provider.as_str(), "route-models");
+                assert_eq!(resolution.canonical_model_id, alias);
+                for time in [0, i64::MAX] {
+                    let pricing = repository
+                        .resolve_for_source(&SourceId::CODEX, &alias, time)
+                        .unwrap();
+                    assert_eq!(pricing.canonical_model_id, model);
+                    assert_eq!(pricing.short_context, rates);
+                    assert_eq!(pricing.long_context, None);
+                    assert_eq!(repository.resolve(&alias, time), Some(pricing));
+                }
+            }
+        }
+        for model in [
+            "claude-opus-4-6",
+            "claude-mythos-5-1",
+            "claude-sonnet-5.6",
+            "custom/claude-sonnet-5.5",
+            "copilot/claude-sonnet-5.5-fast",
+        ] {
+            assert!(repository.resolve(model, 0).is_none(), "{model}");
+        }
+        assert!(
+            repository
+                .resolve_for_source(&SourceId::ANTIGRAVITY, "claude-opus-5-5", 0)
+                .is_none()
+        );
+    }
 
     #[test]
     fn t_mu03_b01_pricing_catalog_contract() {
@@ -272,6 +337,11 @@ mod tests {
                 "gpt-6-astra",
                 TokenRates::new(10_000, 1_000, Some(12_500), 50_000),
                 Some(TokenRates::new(20_000, 2_000, Some(25_000), 75_000)),
+            ),
+            (
+                "gpt-6.1-sol",
+                TokenRates::new(2_000, 100, Some(2_500), 10_000),
+                Some(TokenRates::new(4_000, 200, Some(5_000), 15_000)),
             ),
         ];
 

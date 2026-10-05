@@ -26,6 +26,7 @@ impl ModelProvider {
 pub enum PricingProvider {
     OpenAI,
     Google,
+    Anthropic,
 }
 
 /// The resolved identity used by pricing and filter projections.
@@ -47,6 +48,14 @@ impl ModelRegistry {
     }
 
     pub fn resolve<'model>(&self, raw_model_id: &'model str) -> ModelResolution<'model> {
+        if let Some(target) = claude_pricing_target(raw_model_id) {
+            return ModelResolution {
+                provider: ModelProvider::RouteModels,
+                canonical_model_id: raw_model_id,
+                pricing_provider: Some(PricingProvider::Anthropic),
+                pricing_target: Some(target),
+            };
+        }
         match raw_model_id {
             "gpt-reserve" => ModelResolution {
                 provider: ModelProvider::OpenAI,
@@ -120,6 +129,29 @@ fn is_openai_snapshot_model(model: &str) -> bool {
     LITELLM_SNAPSHOT_MODEL_IDS.contains(&model)
 }
 
+fn claude_pricing_target(model: &str) -> Option<&'static str> {
+    let model = match model.split_once('/') {
+        Some((prefix, model))
+            if ["copilot", "github-copilot", "anthropic"]
+                .iter()
+                .any(|known| prefix.eq_ignore_ascii_case(known)) =>
+        {
+            model
+        }
+        Some(_) => return None,
+        None => model,
+    };
+    [
+        ("claude-opus-5-5", "claude-opus-5.5"),
+        ("claude-sonnet-5-5", "claude-sonnet-5.5"),
+        ("claude-fable-5-1", "claude-fable-5.1"),
+    ]
+    .into_iter()
+    .find_map(|(target, alias)| {
+        (model.eq_ignore_ascii_case(target) || model.eq_ignore_ascii_case(alias)).then_some(target)
+    })
+}
+
 fn is_google_catalog_model(model: &str) -> bool {
     matches!(model, "gemini-3.7-flash" | "gemini-3.8-flash")
 }
@@ -145,6 +177,7 @@ mod tests {
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
+            "gpt-6.1-sol",
         ] {
             assert!(LITELLM_SNAPSHOT_MODEL_IDS.contains(&model));
             let resolution = registry.resolve(model);

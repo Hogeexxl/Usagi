@@ -10,7 +10,7 @@ pub use registry::ModelRegistry;
 pub const COST_ALGORITHM_VERSION: i64 = 1;
 
 /// Bundled pricing catalog version.
-pub const PRICING_CATALOG_VERSION: i64 = 5;
+pub const PRICING_CATALOG_VERSION: i64 = 7;
 
 /// Whether usage represents one model request or a compensation over events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

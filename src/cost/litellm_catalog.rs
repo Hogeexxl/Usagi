@@ -1,11 +1,12 @@
-// Generated from LiteLLM model_prices_and_context_window.json; do not edit by hand.
+// Generated from LiteLLM model_prices_and_context_window.json and official OpenAI supplements; do not edit by hand.
 // LITELLM_SNAPSHOT_SCHEMA_VERSION: litellm-token-pricing-projection-v1
 // LITELLM_SNAPSHOT_SOURCE_URL: https://raw.githubusercontent.com/BerriAI/litellm/721d39f476428a0e8f5991fef94669e53bd20df1/model_prices_and_context_window.json
 // LITELLM_SNAPSHOT_RETRIEVED_AT: 2026-09-23
 // LITELLM_SNAPSHOT_SHA256: 83cc2d6257437025ef7f8a56533d596159e915a199647ba1e3a37f3f706bc734
 // LITELLM_SNAPSHOT_SOURCE_REF: 721d39f476428a0e8f5991fef94669e53bd20df1
 // LITELLM_SNAPSHOT_VERIFIED_AT: 2026-09-23
-// LITELLM_SNAPSHOT_SCOPE: this round updates only six target models (gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna)
+// LITELLM_SNAPSHOT_SCOPE: this round updates only seven target models (gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-6.1-sol, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna)
+// LITELLM_SNAPSHOT_OFFICIAL_SUPPLEMENT: gpt-6.1-sol; https://developers.openai.com/api/docs/models/gpt-6.1-sol; verified 2026-09-30
 
 pub const LITELLM_SNAPSHOT_MODEL_IDS: &[&str] = &[
     "chat-latest",
@@ -94,6 +95,7 @@ pub const LITELLM_SNAPSHOT_MODEL_IDS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6-luna",
     "gpt-6-sol",
+    "gpt-6.1-sol",
     "o1",
     "o1-2024-12-17",
     "o1-pro",
@@ -165,6 +167,16 @@ pub const SNAPSHOT_GPT_6_SOL_PRICING: ModelPricing = ModelPricing {
     short_context: TokenRates::new(2000, 200, Some(2500), 10000),
     long_context: Some(LongContextPolicy::new(
         272_000, TokenRates::new(4000, 400, Some(5000), 15000),
+    )),
+};
+
+pub const SNAPSHOT_GPT_6_1_SOL_PRICING: ModelPricing = ModelPricing {
+    canonical_model_id: "gpt-6.1-sol",
+    effective_from_ms: i64::MIN,
+    effective_to_ms: None,
+    short_context: TokenRates::new(2000, 100, Some(2500), 10000),
+    long_context: Some(LongContextPolicy::new(
+        272_000, TokenRates::new(4000, 200, Some(5000), 15000),
     )),
 };
 
@@ -589,6 +601,7 @@ pub const LITELLM_OPENAI_PRICING_CATALOG: &[ModelPricing] = &[
     SNAPSHOT_GPT_5_6_SOL_PRICING,
     SNAPSHOT_GPT_5_6_TERRA_PRICING,
     SNAPSHOT_GPT_6_ASTRA_PRICING,
+    SNAPSHOT_GPT_6_1_SOL_PRICING,
     SNAPSHOT_GPT_6_LUNA_PRICING,
     SNAPSHOT_GPT_6_SOL_PRICING,
     ModelPricing {
@@ -649,4 +662,4 @@ pub const LITELLM_OPENAI_PRICING_CATALOG: &[ModelPricing] = &[
     },
 ];
 
-// Local projection counts after this round: 98 model IDs, 70 priced entries.
+// Local projection counts after this round: 99 model IDs, 71 priced entries.

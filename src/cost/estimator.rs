@@ -369,6 +369,60 @@ mod tests {
     }
 
     #[test]
+    fn gpt_6_1_sol_cost_uses_standard_and_long_context_rates() {
+        let repository = BundledPricingRepository::new();
+        let pricing = repository.resolve("gpt-6.1-sol", 0).unwrap();
+
+        for (input_tokens, expected_total) in [(272_000, 543_600_000), (272_001, 1_086_704_000)] {
+            let outcome = CostEstimator::estimate(
+                &usage(input_tokens, 1_000, Some(1_000), 100, 0),
+                pricing,
+                UsageCostGranularity::RequestScoped,
+            )
+            .unwrap();
+            let CostEstimateOutcome::Known(cost) = outcome else {
+                panic!("expected known cost");
+            };
+            assert_eq!(cost.total_nanos_usd, expected_total);
+        }
+    }
+
+    #[test]
+    fn claude_cost_separates_cached_input_and_five_minute_writes() {
+        let repository = BundledPricingRepository::new();
+        for (model, expected_total) in [
+            ("copilot/claude-sonnet-5.5", 2_380_000),
+            ("claude-opus-5-5", 4_680_000),
+            ("claude-fable-5-1", 11_600_000),
+        ] {
+            let pricing = repository.resolve(model, 0).unwrap();
+            let outcome = CostEstimator::estimate(
+                &usage(1_000, 400, Some(200), 100, 20),
+                pricing,
+                UsageCostGranularity::RequestScoped,
+            )
+            .unwrap();
+            let CostEstimateOutcome::Known(cost) = outcome else {
+                panic!("expected known Claude cost");
+            };
+            assert_eq!(cost.total_nanos_usd, expected_total);
+            let long = CostEstimator::estimate(
+                &usage(900_000, 0, Some(0), 0, 0),
+                pricing,
+                UsageCostGranularity::RequestScoped,
+            )
+            .unwrap();
+            let CostEstimateOutcome::Known(cost) = long else {
+                panic!("expected standard long-context Claude cost");
+            };
+            assert_eq!(
+                cost.total_nanos_usd,
+                900_000 * pricing.short_context.input_nanos_per_token
+            );
+        }
+    }
+
+    #[test]
     fn t_mu04_a06_long_context_boundary_applies_to_current_gpt5_catalog() {
         let repository = BundledPricingRepository::new();
         let short = usage(272_000, 0, Some(0), 0, 0);

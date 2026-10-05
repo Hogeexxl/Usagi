@@ -73,6 +73,36 @@ function ensureModelGroupExpanded(dialog: HTMLElement, name: string) {
 }
 
 describe("FilterControls", () => {
+  it("sorts each provider by release date while keeping group and raw model identities", async () => {
+    renderControls({ options: {
+      ...modelOptions,
+      models: [
+        { model: "gpt-5.4", provider: "openai" },
+        { model: "gpt-5.4-mini", provider: "openai" },
+        { model: "gpt-6.1-sol", provider: "openai" },
+        { model: "gpt-6-sol", provider: "openai" },
+        { model: "gpt-6-luna", provider: "openai" },
+        { model: "unknown-10", provider: "openai" },
+        { model: "unknown-2", provider: "openai" },
+        { model: "claude-opus-4-6-thinking", provider: "antigravity" },
+        { model: "gemini-3.8-flash", provider: "antigravity" },
+        { model: "copilot/claude-opus-5.5", provider: "route-models" },
+        { model: "copiLot/cLaude-sonnet-5.5", provider: "route-models" },
+        { model: "claude-fable-5-1", provider: "route-models" },
+        { model: "custom/gemini-3.8-flash-high", provider: "route-models" },
+        { model: "github-copilot/gpt-5.6-luna", provider: "route-models" },
+      ],
+    } });
+    const dialog = await openPopover("模型筛选，全部");
+    ensureModelGroupExpanded(dialog, "Antigravity");
+    ensureModelGroupExpanded(dialog, "Route-models");
+    expect(within(dialog).getAllByRole("checkbox").map(node => node.getAttribute("aria-label") ?? node.closest("label")?.textContent)).toEqual([
+      "OpenAI", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-sol", "gpt-5.4-mini", "gpt-5.4", "unknown-2", "unknown-10",
+      "Antigravity", "gemini-3.8-flash", "claude-opus-4-6-thinking",
+      "Route-models", "copiLot/cLaude-sonnet-5.5", "copilot/claude-opus-5.5", "custom/gemini-3.8-flash-high", "claude-fable-5-1", "github-copilot/gpt-5.6-luna",
+    ]);
+  });
+
   it("uses the secondary all-model trigger when no model is selected", () => {
     renderControls();
     const trigger = screen.getByRole("button", { name: "模型筛选，全部" });

@@ -460,7 +460,7 @@ fn t_mu04_a02_open_reprices_pricing_catalog_atomically() {
             Some(229_000),
             Some("codex-auto-review".to_owned()),
             1,
-            4,
+            crate::cost::PRICING_CATALOG_VERSION,
             before_revision + 1,
             parser_version_before,
         )
@@ -469,6 +469,47 @@ fn t_mu04_a02_open_reprices_pricing_catalog_atomically() {
     assert_eq!(
         reopened.current_revision().data_revision,
         before_revision + 1
+    );
+}
+
+#[test]
+fn opening_new_claude_catalog_backfills_history_without_renaming_models() {
+    let root = TempDir::new();
+    let opts = options(&root);
+    let ledger = Ledger::open(opts.clone()).unwrap();
+    let revision = seed_cost_events(&ledger, false);
+    {
+        let connection = ledger.connection().unwrap();
+        connection.execute(
+            "UPDATE usage_events SET model='copilot/claude-sonnet-5.5' WHERE event_id='unknown'",
+            [],
+        ).unwrap();
+        connection
+            .execute(
+                "UPDATE app_meta SET cost_algorithm_version=?1,pricing_catalog_version=6 WHERE id=1",
+                [crate::cost::COST_ALGORITHM_VERSION],
+            )
+            .unwrap();
+    }
+    drop(ledger);
+    let reopened = Ledger::open(opts.clone()).unwrap();
+    {
+        let connection = reopened.connection().unwrap();
+        let (model, cost): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT model,estimated_cost_nanos_usd FROM usage_events WHERE event_id='unknown'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(model, "copilot/claude-sonnet-5.5");
+        assert_eq!(cost, Some(2_190_000));
+    }
+    assert_eq!(reopened.current_revision().data_revision, revision + 1);
+    drop(reopened);
+    assert_eq!(
+        Ledger::open(opts).unwrap().current_revision().data_revision,
+        revision + 1
     );
 }
 

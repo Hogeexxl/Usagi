@@ -45,6 +45,52 @@ const ACTIVE_MODEL_GROUPS: readonly {
   { provider: "route-models", label: "Route-models" },
 ];
 
+// Model release dates, not subsequent price or service updates.
+// https://developers.openai.com/api/docs/changelog
+// https://openai.com/index/introducing-gpt-5-2-codex/
+// https://openai.com/index/introducing-gpt-5-3-codex/
+// https://openai.com/index/introducing-gpt-5-5/
+// https://platform.claude.com/docs/en/release-notes/overview
+// https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-3-7-flash/
+// https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/
+// https://x.ai/news/grok-4-6
+const MODEL_RELEASE_DATES = new Map<string, string>([
+  ["gpt-6.1-sol", "2026-09-29"],
+  ["gpt-6-sol", "2026-09-22"],
+  ["gpt-6-luna", "2026-09-22"],
+  ["gpt-6-astra", "2026-09-03"],
+  ["gpt-5.6", "2026-07-09"],
+  ["gpt-5.6-sol", "2026-07-09"],
+  ["gpt-5.6-terra", "2026-07-09"],
+  ["gpt-5.6-luna", "2026-07-09"],
+  ["codex-auto-review", "2026-07-09"],
+  ["gpt-5.5", "2026-04-23"],
+  ["gpt-5.4-mini", "2026-03-17"],
+  ["gpt-5.4", "2026-03-05"],
+  ["gpt-5.3-codex", "2026-02-05"],
+  ["gpt-5.2-codex", "2025-12-18"],
+  ["gpt-5.1-codex-mini", "2025-11-13"],
+  ["claude-sonnet-5-5", "2026-09-28"],
+  ["claude-sonnet-5.5", "2026-09-28"],
+  ["claude-opus-5-5", "2026-09-22"],
+  ["claude-opus-5.5", "2026-09-22"],
+  ["claude-fable-5-1", "2026-09-01"],
+  ["claude-fable-5.1", "2026-09-01"],
+  ["claude-opus-4-6-thinking", "2026-02-05"],
+  ["gemini-3.8-flash", "2026-09-02"],
+  ["gemini-3.8-flash-high", "2026-09-02"],
+  ["gemini-3.7-flash", "2026-08-13"],
+  ["grok-4.6", "2026-08-12"],
+]);
+
+function compareModelRelease(left: string, right: string): number {
+  const releaseDate = (model: string) => MODEL_RELEASE_DATES.get(
+    model.toLowerCase().replace(/^(copilot|github-copilot|anthropic|custom)\//, ""),
+  ) ?? "";
+  return releaseDate(right).localeCompare(releaseDate(left))
+    || left.localeCompare(right, "en", { numeric: true });
+}
+
 function modelGroups(options: FilterOptionsResponse | null, selected: readonly string[]): ModelGroup[] {
   const optionModels = options?.models ?? [];
   const knownModels = new Set(optionModels.map(({ model }) => model));
@@ -57,7 +103,7 @@ function modelGroups(options: FilterOptionsResponse | null, selected: readonly s
   const result: ModelGroup[] = ACTIVE_MODEL_GROUPS.flatMap(({ provider, label }) => {
     const models = modelsByProvider.get(provider);
     if (!models || models.size === 0) return [];
-    return [{ key: provider, label, models: [...models].sort((left, right) => left.localeCompare(right)) }];
+    return [{ key: provider, label, models: [...models].sort(compareModelRelease) }];
   });
   const selectedOrphans = selected.filter((model) => !knownModels.has(model));
   if (selectedOrphans.length > 0) {
