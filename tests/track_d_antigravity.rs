@@ -218,10 +218,6 @@ fn test_td_p3_import_01_complete_standalone_fixture() {
         assert_eq!(ev.1, "normal", "kind must be Normal [INV-CANON-01]");
         assert_eq!(ev.5, None, "turn_key must be None [INV-CANON-01]");
         assert_eq!(
-            ev.8, None,
-            "estimated_cost_nanos_usd must be None [INV-CANON-01]"
-        );
-        assert_eq!(
             ev.11, None,
             "cache_write_tokens must be None [INV-TOKEN-02]"
         );
@@ -246,6 +242,14 @@ fn test_td_p3_import_01_complete_standalone_fixture() {
     assert_eq!(e1.12, 363); // output_tokens
     assert_eq!(e1.13, 63); // reasoning_tokens
     assert_eq!(e1.14, 1342 + 363); // total_tokens
+    assert_eq!(e1.8, Some(2_351_550)); // 1318*750 + 24*75 + 363*3750
+
+    // The middle event is gemini-3.8-pro, which has no bundled Google rate.
+    assert_eq!(events[1].8, None);
+
+    // The final gemini-3.8-flash event: 2000*750 + 100*75 + 500*3750.
+    assert_eq!(events[2].8, Some(3_382_500));
+
     let mut model_efforts = events
         .iter()
         .map(|event| (event.6.clone(), event.7.clone()))
@@ -503,7 +507,13 @@ fn test_td_p3_v1_migration_parent_child_effort_usage() {
 
     let range = TimeRange::new(0, i64::MAX).unwrap();
     let detail = UsageLedger::new(&ledger, &[])
-        .session_detail_snapshot(range, UsageFilter::default(), None, root_thread.clone())
+        .session_detail_snapshot(
+            range,
+            UsageFilter::default(),
+            None,
+            root_thread.clone(),
+            &[],
+        )
         .unwrap()
         .value;
     assert_eq!(detail.main.subagent_count, 1);

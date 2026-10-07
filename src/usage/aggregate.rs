@@ -1,6 +1,10 @@
 //! Read-only usage aggregation over the active ledger epoch.
 
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+};
 
 use rusqlite::{Connection, Row, params};
 use rusqlite::{params_from_iter, types::Value};
@@ -65,6 +69,24 @@ pub trait SessionErrorSidecar: Send + Sync {
         range: TimeRange,
         filter: &UsageFilter,
     ) -> Result<Vec<SessionErrorProjection>, AggregateError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCompactionProjection {
+    pub thread_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub compaction_tokens: Option<i64>,
+}
+
+pub trait SessionDetailSidecar: Send + Sync {
+    fn compaction_usage(
+        &self,
+        connection: &Connection,
+        range: TimeRange,
+        filter: &UsageFilter,
+        detail: &SessionDetail,
+    ) -> Result<Vec<SessionCompactionProjection>, AggregateError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +524,7 @@ pub struct MainModelUsage {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub usage: TokenTotals,
+    pub compaction_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -522,6 +545,7 @@ pub struct SubagentModelUsage {
     pub reasoning_effort: Option<String>,
     pub last_activity_at_ms: i64,
     pub usage: TokenTotals,
+    pub compaction_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -599,6 +623,7 @@ impl std::error::Error for AggregateError {}
 pub struct AggregateReader<'connection, 'sidecars> {
     connection: &'connection Connection,
     sidecars: &'sidecars [&'sidecars dyn SessionErrorSidecar],
+    detail_sidecars: Option<&'sidecars [&'sidecars dyn SessionDetailSidecar]>,
 }
 
 impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
@@ -609,7 +634,16 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         Self {
             connection,
             sidecars,
+            detail_sidecars: None,
         }
+    }
+
+    pub(crate) const fn with_detail_sidecars(
+        mut self,
+        sidecars: &'sidecars [&'sidecars dyn SessionDetailSidecar],
+    ) -> Self {
+        self.detail_sidecars = Some(sidecars);
+        self
     }
 
     pub fn summary(&self, query: SummaryQuery) -> Result<UsageSummary, AggregateError> {
@@ -1238,6 +1272,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 model: group.model.clone(),
                 reasoning_effort: group.reasoning_effort.clone(),
                 usage: group.totals.clone(),
+                compaction_tokens: None,
             })
             .collect::<Vec<_>>();
         let mut main_usage = TokenTotals::zero();
@@ -1267,6 +1302,7 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                     reasoning_effort: group.reasoning_effort.clone(),
                     last_activity_at_ms: group.last_activity_at_ms,
                     usage: group.totals.clone(),
+                    compaction_tokens: None,
                 })
                 .collect::<Vec<_>>();
             let mut usage = TokenTotals::zero();
@@ -1314,32 +1350,36 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
                 (title.clone(), source.clone(), native_id.clone())
             })
             .unwrap_or((None, String::new(), root_session_id.to_owned()));
-        Ok(SessionDetailWithProject {
-            detail: SessionDetail {
+        let mut detail = SessionDetail {
+            root_session_id: root_session_id.to_owned(),
+            source: root_source.clone(),
+            native_session_id: root_native_session_id.clone(),
+            last_activity_at_ms,
+            main: MainSessionDetail {
+                title,
+                thread_id: root_session_id.to_owned(),
+                source: root_source,
+                native_session_id: root_native_session_id,
                 root_session_id: root_session_id.to_owned(),
-                source: root_source.clone(),
-                native_session_id: root_native_session_id.clone(),
-                last_activity_at_ms,
-                main: MainSessionDetail {
-                    title,
-                    thread_id: root_session_id.to_owned(),
-                    source: root_source,
-                    native_session_id: root_native_session_id,
-                    root_session_id: root_session_id.to_owned(),
-                    models_used: main_models.iter().fold(Vec::new(), |mut models, model| {
-                        if !models.iter().any(|existing| existing == &model.model) {
-                            models.push(model.model.clone());
-                        }
-                        models
-                    }),
-                    model_usage: main_models,
-                    self_usage: main_usage,
-                    subagent_count: i64::try_from(subagents.len())
-                        .map_err(|_| AggregateError::ArithmeticOverflow)?,
-                    inclusive_usage,
-                },
-                subagents,
+                models_used: main_models.iter().fold(Vec::new(), |mut models, model| {
+                    if !models.iter().any(|existing| existing == &model.model) {
+                        models.push(model.model.clone());
+                    }
+                    models
+                }),
+                model_usage: main_models,
+                self_usage: main_usage,
+                subagent_count: i64::try_from(subagents.len())
+                    .map_err(|_| AggregateError::ArithmeticOverflow)?,
+                inclusive_usage,
             },
+            subagents,
+        };
+        if let Some(sidecars) = self.detail_sidecars {
+            apply_detail_sidecars(self.connection, range, filter, &mut detail, sidecars)?;
+        }
+        Ok(SessionDetailWithProject {
+            detail,
             project_name: root_project_name,
             project_path: root_project_path,
         })
@@ -1798,6 +1838,98 @@ impl<'connection, 'sidecars> AggregateReader<'connection, 'sidecars> {
         }
         Ok((models_used, rows))
     }
+}
+
+fn apply_detail_sidecars(
+    connection: &Connection,
+    range: TimeRange,
+    filter: &UsageFilter,
+    detail: &mut SessionDetail,
+    sidecars: &[&dyn SessionDetailSidecar],
+) -> Result<(), AggregateError> {
+    type Key = (String, String, Option<String>);
+
+    let mut blocks = BTreeMap::<Key, i64>::new();
+    for model in &detail.main.model_usage {
+        if blocks
+            .insert(
+                (
+                    detail.main.thread_id.clone(),
+                    model.model.clone(),
+                    model.reasoning_effort.clone(),
+                ),
+                model.usage.total_tokens,
+            )
+            .is_some()
+        {
+            return Err(AggregateError::InvariantViolation);
+        }
+    }
+    for subagent in &detail.subagents {
+        for model in &subagent.model_usage {
+            if blocks
+                .insert(
+                    (
+                        subagent.thread_id.clone(),
+                        model.model.clone(),
+                        model.reasoning_effort.clone(),
+                    ),
+                    model.usage.total_tokens,
+                )
+                .is_some()
+            {
+                return Err(AggregateError::InvariantViolation);
+            }
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut projections = BTreeMap::<Key, Option<i64>>::new();
+    for sidecar in sidecars {
+        for projection in sidecar.compaction_usage(connection, range, filter, detail)? {
+            let key = (
+                projection.thread_id,
+                projection.model,
+                projection.reasoning_effort,
+            );
+            if !seen.insert(key.clone()) {
+                return Err(AggregateError::InvariantViolation);
+            }
+            let Some(block_total) = blocks.get(&key).copied() else {
+                return Err(AggregateError::InvariantViolation);
+            };
+            if block_total < 0
+                || projection.compaction_tokens.is_some_and(|tokens| {
+                    !(0..=(1_i64 << 53) - 1).contains(&tokens) || tokens > block_total
+                })
+            {
+                return Err(AggregateError::InvariantViolation);
+            }
+            projections.insert(key, projection.compaction_tokens);
+        }
+    }
+
+    for model in &mut detail.main.model_usage {
+        if let Some(tokens) = projections.remove(&(
+            detail.main.thread_id.clone(),
+            model.model.clone(),
+            model.reasoning_effort.clone(),
+        )) {
+            model.compaction_tokens = tokens;
+        }
+    }
+    for subagent in &mut detail.subagents {
+        for model in &mut subagent.model_usage {
+            if let Some(tokens) = projections.remove(&(
+                subagent.thread_id.clone(),
+                model.model.clone(),
+                model.reasoning_effort.clone(),
+            )) {
+                model.compaction_tokens = tokens;
+            }
+        }
+    }
+    Ok(())
 }
 
 const SESSION_DETAIL_SQL: &str = "SELECT thread_id, model, MAX(occurred_at_ms),
@@ -4726,5 +4858,115 @@ mod tests {
         assert_eq!(detail.native_session_id, "native-root-a");
         assert_eq!(detail.main.source, "codex");
         assert_eq!(detail.main.native_session_id, "native-root-a");
+    }
+
+    struct FixedCompactionSidecar(Vec<SessionCompactionProjection>);
+
+    impl SessionDetailSidecar for FixedCompactionSidecar {
+        fn compaction_usage(
+            &self,
+            _connection: &Connection,
+            _range: TimeRange,
+            _filter: &UsageFilter,
+            _detail: &SessionDetail,
+        ) -> Result<Vec<SessionCompactionProjection>, AggregateError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn compaction_test_detail(total_tokens: i64) -> SessionDetail {
+        let mut usage = TokenTotals::zero();
+        usage.total_tokens = total_tokens;
+        SessionDetail {
+            root_session_id: "root".into(),
+            source: "codex".into(),
+            native_session_id: "root".into(),
+            last_activity_at_ms: 10,
+            main: MainSessionDetail {
+                title: None,
+                thread_id: "root".into(),
+                source: "codex".into(),
+                native_session_id: "root".into(),
+                root_session_id: "root".into(),
+                models_used: vec!["model".into()],
+                model_usage: vec![MainModelUsage {
+                    model: "model".into(),
+                    reasoning_effort: Some("high".into()),
+                    usage,
+                    compaction_tokens: None,
+                }],
+                self_usage: TokenTotals::zero(),
+                subagent_count: 0,
+                inclusive_usage: TokenTotals::zero(),
+            },
+            subagents: Vec::new(),
+        }
+    }
+
+    fn projection(
+        thread_id: &str,
+        model: &str,
+        reasoning_effort: Option<&str>,
+        compaction_tokens: Option<i64>,
+    ) -> SessionCompactionProjection {
+        SessionCompactionProjection {
+            thread_id: thread_id.into(),
+            model: model.into(),
+            reasoning_effort: reasoning_effort.map(str::to_owned),
+            compaction_tokens,
+        }
+    }
+
+    #[test]
+    fn compaction_detail_scope_rejects_invalid_projections() {
+        let connection = Connection::open_in_memory().unwrap();
+        let cases = [
+            (
+                "duplicate block",
+                10,
+                vec![
+                    projection("root", "model", Some("high"), Some(1)),
+                    projection("root", "model", Some("high"), Some(1)),
+                ],
+            ),
+            (
+                "nonexistent block",
+                10,
+                vec![projection("child", "model", Some("high"), Some(1))],
+            ),
+            (
+                "negative count",
+                10,
+                vec![projection("root", "model", Some("high"), Some(-1))],
+            ),
+            (
+                "unsafe JSON integer",
+                i64::MAX,
+                vec![projection("root", "model", Some("high"), Some(1_i64 << 53))],
+            ),
+            (
+                "count exceeds block total",
+                10,
+                vec![projection("root", "model", Some("high"), Some(11))],
+            ),
+        ];
+
+        for (label, block_total, projections) in cases {
+            let sidecar = FixedCompactionSidecar(projections);
+            let mut detail = compaction_test_detail(block_total);
+            assert!(
+                matches!(
+                    apply_detail_sidecars(
+                        &connection,
+                        TimeRange::new(0, 20).unwrap(),
+                        &UsageFilter::default(),
+                        &mut detail,
+                        &[&sidecar],
+                    ),
+                    Err(AggregateError::InvariantViolation)
+                ),
+                "{label} projection must be rejected"
+            );
+        }
     }
 }

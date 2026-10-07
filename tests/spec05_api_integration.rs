@@ -727,6 +727,124 @@ async fn t_s05_017_018_http_guard_no_store_sse_and_static_fallback_are_exact() {
 }
 
 #[tokio::test]
+async fn compaction_api_contract_endpoint_codex_and_non_codex() {
+    let fixture = Fixture::new("compaction-api-contract");
+    fixture.seed_two_roots();
+    let ledger = fixture.ledger();
+    let scanner = fixture.start(Arc::clone(&ledger));
+    wait_scan(&ledger, None);
+
+    let antigravity_root = "00000000-03e8-7000-8000-000000000003";
+    let occurred_at_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("current millisecond timestamp fits i64");
+    let connection = Connection::open(&fixture.db).expect("open API contract fixture ledger");
+    connection
+        .execute(
+            "INSERT INTO source_usage_epochs(source,active_epoch,build_epoch,
+                active_parser_version,build_parser_version)
+             VALUES ('antigravity',1,NULL,1,NULL)
+             ON CONFLICT(source) DO UPDATE SET active_epoch=1,build_epoch=NULL,
+                 active_parser_version=1,build_parser_version=NULL",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO threads(thread_id,source,native_session_id,parent_thread_id,
+                root_session_id,agent_role,project_kind,archived,metadata_quality_status,
+                metadata_resolved_at_ms)
+             VALUES (?1,'antigravity','native-antigravity',NULL,?1,'main','project',0,
+                     'complete',?2)",
+            params![antigravity_root, occurred_at_ms],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO usage_events(source,source_epoch,event_id,event_kind,occurred_at_ms,
+                thread_id,root_session_id,turn_key,model,reasoning_effort,
+                estimated_cost_nanos_usd,input_tokens,cached_tokens,cache_write_tokens,
+                output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
+             VALUES ('antigravity',1,'antigravity-detail','normal',?1,?2,?2,NULL,
+                     'gemini-test','low',NULL,42,0,0,0,0,42,'complete',?1)",
+            params![occurred_at_ms, antigravity_root],
+        )
+        .unwrap();
+    drop(connection);
+
+    let app = fixture.router(Arc::clone(&ledger), scanner.clone());
+    let codex_response = call(
+        &app,
+        Method::GET,
+        &format!("/api/usage/sessions/{ROOT_A}/detail?range=year"),
+        &[],
+    )
+    .await;
+    assert_eq!(codex_response.status(), StatusCode::OK);
+    let codex_detail = json_body(codex_response).await;
+    let codex_current_revision = ledger
+        .app_state()
+        .expect("read current revision after Codex detail request")
+        .data_revision;
+    assert_eq!(
+        codex_detail["data_revision"].as_i64(),
+        Some(codex_current_revision)
+    );
+    let codex_model = codex_detail["main"]["model_usage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["model"] == "model-a")
+        .expect("Codex detail includes the seeded model block");
+    assert!(
+        codex_model
+            .as_object()
+            .unwrap()
+            .contains_key("compaction_tokens")
+    );
+    assert_eq!(codex_model["compaction_tokens"], 0);
+    assert_eq!(codex_model["usage"]["total_tokens"], 10);
+
+    let antigravity_response = call(
+        &app,
+        Method::GET,
+        &format!("/api/usage/sessions/{antigravity_root}/detail?range=year"),
+        &[],
+    )
+    .await;
+    assert_eq!(antigravity_response.status(), StatusCode::OK);
+    let antigravity_detail = json_body(antigravity_response).await;
+    let antigravity_current_revision = ledger
+        .app_state()
+        .expect("read current revision after non-Codex detail request")
+        .data_revision;
+    assert_eq!(
+        antigravity_detail["data_revision"].as_i64(),
+        Some(antigravity_current_revision)
+    );
+    assert_eq!(antigravity_current_revision, codex_current_revision);
+    assert_eq!(antigravity_detail["source"], "antigravity");
+    let antigravity_model = &antigravity_detail["main"]["model_usage"][0];
+    assert!(
+        antigravity_model
+            .as_object()
+            .unwrap()
+            .contains_key("compaction_tokens")
+    );
+    assert_eq!(antigravity_model["compaction_tokens"], Value::Null);
+    assert_eq!(antigravity_model["usage"]["total_tokens"], 42);
+    assert_eq!(antigravity_detail["main"]["self_usage"]["total_tokens"], 42);
+    assert_eq!(
+        antigravity_detail["main"]["inclusive_usage"]["total_tokens"],
+        42
+    );
+    scanner.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn t_s05_003_004_005_006_007_008_019_020_real_http_queries_and_cursor_snapshot_contract() {
     let fixture = Fixture::new("query-contract");
     fixture.seed_two_roots();
@@ -1759,7 +1877,7 @@ async fn t_mu03_f01_real_structure_cost_effort_closes_db_aggregate_detail_chain(
 
     let range = TimeRange::new(0, i64::MAX).unwrap();
     let aggregate = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar])
-        .session_detail_snapshot(range, UsageFilter::default(), None, root_id.to_owned())
+        .session_detail_snapshot(range, UsageFilter::default(), None, root_id.to_owned(), &[])
         .unwrap()
         .value;
     assert_eq!(aggregate.main.model_usage.len(), 3);
@@ -2075,11 +2193,17 @@ async fn t_s05_021_concurrent_usage_queries_and_real_scan_never_expose_partial_s
         json_body(call(&app, Method::GET, "/api/usage/summary?range=year", &[]).await).await;
     let after_revision = after["data_revision"].as_i64().unwrap();
     assert_eq!(after["usage"]["total_tokens"], 35);
-    assert!(after_revision > before_revision);
+    assert_eq!(
+        after_revision,
+        before_revision + 2,
+        "v6 INV null-to-zero classification activation and token usage each publish one revision"
+    );
 
     for pair in observed {
         assert!(
-            pair == (before_revision, 30) || pair == (after_revision, 35),
+            pair == (before_revision, 30)
+                || pair == (before_revision + 1, 30)
+                || pair == (after_revision, 35),
             "query exposed a partial/mismatched snapshot: {pair:?}; before={before_revision}, after={after_revision}"
         );
     }

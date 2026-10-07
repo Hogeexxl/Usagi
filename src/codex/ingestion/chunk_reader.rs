@@ -227,6 +227,7 @@ fn validate_plan(plan: &ChunkReadPlan) -> Result<(), ChunkReadError> {
     }
     match (plan.start_offset, plan.expected_guard) {
         (0, None) | (1.., Some(_)) => Ok(()),
+        (1.., None) if plan.start_offset == plan.observed_size => Ok(()),
         _ => Err(ChunkReadError::InvalidGuardPlan),
     }
 }
@@ -243,7 +244,7 @@ fn verify_guard(
             error
         }
     })?;
-    if actual != expected {
+    if expected.is_some() && actual != expected {
         return Err(ChunkReadError::CheckpointGuardMismatch);
     }
     Ok(guard_window_len(offset))

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     antigravity::quota::{AntigravityQuotaResponse, AntigravityQuotaService},
-    codex::CodexSessionErrorSidecar,
     codex::quota::{CodexQuotaResponse, CodexQuotaService},
+    codex::{CodexSessionDetailSidecar, CodexSessionErrorSidecar},
     ingestion::{CommitFailureKind, ScanHandle, ScanShutdownError},
     platform::browser::BrowserOpener,
     range::{RangeKey, resolve_day_buckets, resolve_system_custom_range, resolve_system_range},
@@ -397,11 +397,15 @@ async fn session_detail(
     let snapshot = run_blocking_query(move || {
         let sidecars: [&dyn crate::usage::aggregate::SessionErrorSidecar; 1] =
             [codex_sidecar.as_ref()];
+        let codex_detail_sidecar = CodexSessionDetailSidecar;
+        let detail_sidecars: [&dyn crate::usage::aggregate::SessionDetailSidecar; 1] =
+            [&codex_detail_sidecar];
         UsageLedger::new(&ledger, &sidecars).session_detail_with_project_snapshot(
             aggregate_range,
             params.filter,
             params.expected_data_revision,
             root_session_id,
+            &detail_sidecars,
         )
     })
     .await?

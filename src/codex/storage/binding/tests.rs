@@ -140,14 +140,14 @@ fn migration_binding_state_preserves_fingerprint_compatibility() {
     drop(connection);
 
     let ledger = Arc::new(
-        Ledger::open(LedgerOptions::for_database(&db)).expect("migrate v11 fixture to v12"),
+        Ledger::open(LedgerOptions::for_database(&db)).expect("migrate v11 fixture to v14"),
     );
-    assert_eq!(ledger.schema_version().expect("read schema version"), 13);
+    assert_eq!(ledger.schema_version().expect("read schema version"), 14);
     let migrated = Connection::open(&db).expect("reopen migrated database");
     let version: i64 = migrated
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read migrated user version");
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     for (table, count) in &canonical_counts {
         assert_eq!(
             migrated
@@ -213,10 +213,10 @@ fn migration_binding_state_preserves_fingerprint_compatibility() {
     assert_eq!(
         app_meta,
         (
-            19,
+            20,
             37,
-            1,
-            4,
+            crate::cost::COST_ALGORITHM_VERSION,
+            crate::cost::PRICING_CATALOG_VERSION,
             "failed".to_owned(),
             "finished-scan".to_owned(),
             "start_failed".to_owned(),

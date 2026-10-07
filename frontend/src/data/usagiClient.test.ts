@@ -508,7 +508,7 @@ describe("usagiClient DTO seam", () => {
           thread_id: "root-1",
           root_session_id: "root-1",
           models_used: ["gpt-5"],
-          model_usage: [{ model: "gpt-5", reasoning_effort: "high", usage: sessionUsage }],
+          model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 31, usage: sessionUsage }],
           self_usage: sessionUsage,
           subagent_count: 1,
           inclusive_usage: sessionUsage,
@@ -524,6 +524,7 @@ describe("usagiClient DTO seam", () => {
           model_usage: [{
             model: "o4-mini",
             reasoning_effort: null,
+            compaction_tokens: 42,
             last_activity_at_ms: 1_700_000_000_000,
             usage: {
               ...sessionUsage,
@@ -545,7 +546,7 @@ describe("usagiClient DTO seam", () => {
         native_session_id: "root-1",
         project_name: "Usagi",
         project_path: "/workspace/usagi",
-        model_usage: [{ model: "gpt-5", reasoning_effort: "high" }],
+        model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 31 }],
         self_usage: sessionUsage,
         inclusive_usage: sessionUsage,
       },
@@ -556,6 +557,7 @@ describe("usagiClient DTO seam", () => {
         model_usage: [{
           model: "o4-mini",
           reasoning_effort: null,
+          compaction_tokens: 42,
           last_activity_at_ms: 1_700_000_000_000,
           usage: { reasoning_tokens: 9, cache_write_tokens: 0, estimated_cost: 1.25 },
         }],
@@ -659,7 +661,7 @@ describe("usagiClient DTO seam", () => {
             thread_id: "root-1",
             root_session_id: "root-1",
             models_used: ["gpt-5"],
-            model_usage: [{ model: "gpt-5", reasoning_effort: "high", usage: detailUsage }],
+            model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 0, usage: detailUsage }],
             self_usage: detailUsage,
             subagent_count: 1,
             inclusive_usage: detailUsage,
@@ -675,6 +677,7 @@ describe("usagiClient DTO seam", () => {
             model_usage: [{
               model: "o4-mini",
               reasoning_effort: null,
+              compaction_tokens: null,
               last_activity_at_ms: 1_700_000_000_000,
               usage: detailUsage,
             }],
@@ -689,12 +692,70 @@ describe("usagiClient DTO seam", () => {
       main: {
         project_name: null,
         project_path: null,
-        model_usage: [{ usage: detailUsage }],
+        model_usage: [{ compaction_tokens: 0, usage: detailUsage }],
         self_usage: detailUsage,
         inclusive_usage: detailUsage,
       },
-      subagents: [{ model_usage: [{ usage: detailUsage }] }],
+      subagents: [{ model_usage: [{ compaction_tokens: null, usage: detailUsage }] }],
     });
+  });
+
+  it("requires nullable non-negative safe compaction integers on both model DTOs", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const detailPayload = (mainCompaction: unknown, subagentCompaction: unknown) => ({
+      range,
+      data_revision: 1,
+      source: "codex",
+      native_session_id: "root-1",
+      root_session_id: "root-1",
+      last_activity_at_ms: 1_700_000_000_000,
+      main: {
+        source: "codex",
+        native_session_id: "root-1",
+        title: null,
+        project_name: null,
+        project_path: null,
+        thread_id: "root-1",
+        root_session_id: "root-1",
+        models_used: ["gpt-5"],
+        model_usage: [{ model: "gpt-5", reasoning_effort: null, compaction_tokens: mainCompaction, usage: sessionUsage }],
+        self_usage: sessionUsage,
+        subagent_count: 1,
+        inclusive_usage: sessionUsage,
+      },
+      subagents: [{
+        source: "codex",
+        native_session_id: "child-1",
+        thread_id: "child-1",
+        parent_thread_id: "root-1",
+        root_session_id: "root-1",
+        title: null,
+        last_activity_at_ms: 1_700_000_000_000,
+        model_usage: [{
+          model: "o4-mini",
+          reasoning_effort: "high",
+          compaction_tokens: subagentCompaction,
+          last_activity_at_ms: 1_700_000_000_000,
+          usage: sessionUsage,
+        }],
+      }],
+    });
+    const parseDetail = (mainCompaction: unknown, subagentCompaction: unknown) => {
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detailPayload(mainCompaction, subagentCompaction)), { status: 200 }));
+      return usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1" });
+    };
+
+    for (const compactionTokens of [0, 42, Number.MAX_SAFE_INTEGER, null]) {
+      const result = await parseDetail(compactionTokens, compactionTokens);
+      expect(result.main.model_usage[0].compaction_tokens).toBe(compactionTokens);
+      expect(result.subagents[0].model_usage[0].compaction_tokens).toBe(compactionTokens);
+    }
+
+    const invalidValues = [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "42", true, [], {}];
+    for (const invalidValue of invalidValues) {
+      await expect(parseDetail(invalidValue, 1)).rejects.toBeInstanceOf(UsagiClientError);
+      await expect(parseDetail(1, invalidValue)).rejects.toBeInstanceOf(UsagiClientError);
+    }
   });
 
   it("parses main.project_name and main.project_path, rejecting top-level fields", async () => {

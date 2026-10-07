@@ -151,6 +151,11 @@ fn metadata_group(
             validate_thread_relationships(transaction, next_thread).map_err(CodexStorageError::from)
         })?;
     }
+    let stable_changed = group
+        .resolved_patch
+        .as_ref()
+        .zip(next_thread.as_ref())
+        .is_some_and(|(_, next)| current_thread.as_ref() != Some(next));
     if let Some(patch) = group.resolved_patch.as_ref() {
         let identity = crate::domain::SessionIdentity::new(
             &group.thread_id,
@@ -167,6 +172,7 @@ fn metadata_group(
         group,
         current_thread.as_ref(),
         next_thread.as_ref(),
+        stable_changed,
     )?;
     if changed {
         source_tx.bump_data_revision()?;
@@ -179,6 +185,7 @@ fn commit_group(
     group: &MetadataThreadCommit,
     current_thread: Option<&ThreadRow>,
     next_thread: Option<&ThreadRow>,
+    stable_changed: bool,
 ) -> Result<bool, CodexStorageError> {
     // Read and validate every source precondition first.  A later source
     // failure must not leave an earlier source in this group bound or advanced.
@@ -200,6 +207,18 @@ fn commit_group(
             })
             .collect::<Vec<_>>();
 
+        Ok::<_, StorageError>((sources, binding_changed_source_ids))
+    })?;
+
+    let compaction_before = if !stable_changed && !binding_changed_source_ids.is_empty() {
+        Some(source_tx.with_private_state(|transaction| {
+            compaction_visibility_signature(transaction).map_err(CodexStorageError::from)
+        })?)
+    } else {
+        None
+    };
+
+    source_tx.with_private_state(|transaction| {
         for (source_commit, source) in group.sources.iter().zip(sources.iter()) {
             bind_source(transaction, group, source_commit, source)?;
             write_fact(transaction, &source_commit.safe_fact)?;
@@ -209,7 +228,7 @@ fn commit_group(
                 &source_commit.metadata_checkpoint_advance,
             )?;
         }
-        Ok::<_, StorageError>((sources, binding_changed_source_ids))
+        Ok::<_, StorageError>(())
     })?;
 
     if let (Some(patch), Some(next_thread)) = (&group.resolved_patch, next_thread) {
@@ -242,13 +261,7 @@ fn commit_group(
     }
 
     // The revision is global, but each Thread group may increase it at most
-    // once.  Source binding/fact/checkpoint-only changes never increment it.
-    let stable_changed = group
-        .resolved_patch
-        .as_ref()
-        .zip(next_thread)
-        .is_some_and(|(_, next)| current_thread != Some(next));
-
+    // once. Facts and checkpoints alone are not visible changes.
     // A write-after-read check protects the key cross-table equalities from
     // schema changes and direct SQL interference.  It is still inside the
     // transaction, so any mismatch rolls the entire group back.
@@ -258,8 +271,32 @@ fn commit_group(
         }
         Ok::<_, StorageError>(())
     })?;
+    let compaction_changed = if let Some(compaction_before) = compaction_before {
+        let compaction_after = source_tx.with_private_state(|transaction| {
+            compaction_visibility_signature(transaction).map_err(CodexStorageError::from)
+        })?;
+        compaction_before != compaction_after
+    } else {
+        false
+    };
 
-    Ok(stable_changed)
+    Ok(stable_changed || compaction_changed)
+}
+
+fn compaction_visibility_signature(
+    transaction: &Connection,
+) -> StorageResult<crate::codex::analytics::CompactionVisibilitySignature> {
+    let (active_epoch, active_parser): (i64, i64) = transaction.query_row(
+        "SELECT active_epoch,active_parser_version FROM source_usage_epochs WHERE source='codex'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    crate::codex::analytics::compaction_visibility_signature(
+        transaction,
+        active_epoch,
+        active_parser,
+    )
+    .map_err(StorageError::from)
 }
 
 fn read_data_revision(transaction: &Connection) -> StorageResult<i64> {

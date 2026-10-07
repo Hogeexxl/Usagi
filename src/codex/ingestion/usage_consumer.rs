@@ -6,6 +6,7 @@
 //! usage batch before continuing from the durable checkpoint.
 
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
@@ -32,8 +33,9 @@ use super::usage_commit;
 use super::usage_pipeline::{
     ClassifiedOversizedUsageLine, ClassifiedUsageItem, ClassifiedUsageLine, FixedViewTail,
     PipelineDisposition, PlanAction, SourceContinuationState, TailStatus, UsagePipeline,
-    UsageSourceCommitDto,
+    UsageSourceCommitDto, reconciliation_request,
 };
+use super::usage_processor::{Anomaly, AnomalyCode, ReconciliationCarry};
 use crate::codex::storage::CodexStorage;
 
 use super::{
@@ -51,9 +53,10 @@ const REPLAY_WINDOW_BYTES: u64 = super::usage_pipeline::MAX_BATCH_BYTES;
 const REPLAY_WINDOW_LINES: u64 = super::usage_pipeline::MAX_BATCH_LINES;
 const MAX_BATCH_BYTES: u64 = super::usage_pipeline::MAX_BATCH_BYTES;
 const MAX_BATCH_LINES: u64 = super::usage_pipeline::MAX_BATCH_LINES;
-const MAX_BATCH_CANDIDATES: u64 = super::usage_pipeline::MAX_BATCH_CANDIDATES;
+const MAX_BATCH_WRITE_UNITS: u64 = super::usage_pipeline::MAX_BATCH_WRITE_UNITS;
 const MAX_LEGAL_LINE_BYTES: u64 = super::usage_pipeline::MAX_LEGAL_LINE_BYTES;
 const CLEANUP_ROWS_PER_ROUND: usize = 2048;
+const PATCH_TOO_LARGE_ERROR_CODE: &str = "USAGE_RECONCILIATION_PATCH_TOO_LARGE";
 
 #[derive(Debug)]
 enum UsageReadStep {
@@ -63,6 +66,13 @@ enum UsageReadStep {
     },
     AwaitingOwnership,
     InvalidSessionData,
+    PatchTooLarge {
+        anomaly: Anomaly,
+    },
+    FatalAnomaly {
+        anomaly: Anomaly,
+    },
+    Replan,
     NeedsRebuild,
     NeedsRebuildStop,
 }
@@ -70,8 +80,13 @@ enum UsageReadStep {
 #[derive(Debug)]
 enum UsageThreadOutcome {
     Completed,
-    GlobalPlanChanged { retry_thread: bool },
-    SessionDataError(&'static str),
+    GlobalPlanChanged {
+        retry_thread: bool,
+    },
+    SessionDataError {
+        code: &'static str,
+        quarantine_diagnostic: Option<crate::codex::storage::usage::UsageQuarantineDiagnostic>,
+    },
     OrdinaryError(&'static str),
     FatalReloadError(&'static str),
 }
@@ -83,6 +98,66 @@ fn shadow_session_data_error(
     invalid_session_data: bool,
 ) -> Option<&'static str> {
     (action == PlanAction::BuildFrom && invalid_session_data).then_some(SESSION_DATA_INVALID)
+}
+
+fn patch_too_large_build_failure(
+    anomaly: Anomaly,
+    source_file_id: i64,
+    file_generation: i64,
+    owning_thread_id: &str,
+    detected_at_ms: i64,
+) -> UsageThreadOutcome {
+    typed_anomaly_build_failure(
+        anomaly,
+        PATCH_TOO_LARGE_ERROR_CODE,
+        source_file_id,
+        file_generation,
+        owning_thread_id,
+        detected_at_ms,
+    )
+}
+
+fn typed_anomaly_build_failure(
+    anomaly: Anomaly,
+    code: &'static str,
+    source_file_id: i64,
+    file_generation: i64,
+    owning_thread_id: &str,
+    detected_at_ms: i64,
+) -> UsageThreadOutcome {
+    let anomaly = match usage_commit::anomaly_write_for(
+        &anomaly,
+        source_file_id,
+        file_generation,
+        owning_thread_id,
+        detected_at_ms,
+    ) {
+        Ok(anomaly) => anomaly,
+        Err(_) => {
+            return UsageThreadOutcome::OrdinaryError("USAGE_RECONCILIATION_DIAGNOSTIC_INVALID");
+        }
+    };
+    UsageThreadOutcome::SessionDataError {
+        code,
+        quarantine_diagnostic: Some(crate::codex::storage::usage::UsageQuarantineDiagnostic {
+            source_file_id,
+            file_generation,
+            owning_thread_id: owning_thread_id.to_owned(),
+            anomaly,
+        }),
+    }
+}
+
+fn fatal_anomaly_error_code(code: AnomalyCode) -> Option<&'static str> {
+    match code {
+        AnomalyCode::ArithmeticOverflow => Some("USAGE_TOKEN_ARITHMETIC_OVERFLOW"),
+        AnomalyCode::ReconciliationPatchTooLarge => Some(PATCH_TOO_LARGE_ERROR_CODE),
+        AnomalyCode::ResponseUsageConflict => Some("USAGE_RESPONSE_USAGE_CONFLICT"),
+        AnomalyCode::ResponseOwnershipMismatch => Some("USAGE_RESPONSE_OWNERSHIP_MISMATCH"),
+        AnomalyCode::CompactionIdentityMismatch => Some("USAGE_COMPACTION_IDENTITY_MISMATCH"),
+        AnomalyCode::LegacyCoverageAmbiguous => Some("USAGE_LEGACY_COVERAGE_AMBIGUOUS"),
+        _ => None,
+    }
 }
 
 fn to_pipeline_action(action: UsagePlanAction) -> PlanAction {
@@ -300,15 +375,26 @@ pub(super) fn run_usage_round(
                     }
                     continue 'global_plan;
                 }
-                UsageThreadOutcome::SessionDataError(error_code) => {
+                UsageThreadOutcome::SessionDataError {
+                    code: error_code,
+                    quarantine_diagnostic,
+                } => {
                     report.failed_source();
                     report.error(error_code);
                     if worklist.epoch.build_epoch.is_none() {
                         return Err(error_code);
                     }
-                    usage
-                        .quarantine_thread(&work_thread.thread_id, error_code, now_ms())
-                        .map_err(|_| "USAGE_SESSION_QUARANTINE_FAILED")?;
+                    if usage
+                        .quarantine_thread(
+                            &work_thread.thread_id,
+                            error_code,
+                            quarantine_diagnostic,
+                            now_ms(),
+                        )
+                        .is_err()
+                    {
+                        return Err("USAGE_SESSION_QUARANTINE_FAILED");
+                    }
                     report.observe_usage_global_replan();
                     worklist = load_work_list(&usage, &present_ids, report, true)?;
                     skip_thread_ids.clear();
@@ -393,6 +479,7 @@ fn process_thread_group(
         Err(error_code) => return UsageThreadOutcome::OrdinaryError(error_code),
     };
 
+    let mut stale_context_replan_used = false;
     'group_loop: loop {
         if cancelled(cancellation) {
             return UsageThreadOutcome::Completed;
@@ -411,7 +498,10 @@ fn process_thread_group(
                 .iter()
                 .any(|plan| plan.action == UsagePlanAction::BlockedRelationship)
             {
-                UsageThreadOutcome::SessionDataError("USAGE_SESSION_RELATIONSHIP_INVALID")
+                UsageThreadOutcome::SessionDataError {
+                    code: "USAGE_SESSION_RELATIONSHIP_INVALID",
+                    quarantine_diagnostic: None,
+                }
             } else {
                 UsageThreadOutcome::Completed
             };
@@ -624,7 +714,10 @@ fn process_thread_group(
                     if let Some(error_code) =
                         shadow_session_data_error(to_pipeline_action(plan.action), true)
                     {
-                        return UsageThreadOutcome::SessionDataError(error_code);
+                        return UsageThreadOutcome::SessionDataError {
+                            code: error_code,
+                            quarantine_diagnostic: None,
+                        };
                     }
                     if let Err(error_code) =
                         replace_or_begin(usage, &scan, present_ids, [plan.source_file_id])
@@ -632,6 +725,74 @@ fn process_thread_group(
                         return UsageThreadOutcome::OrdinaryError(error_code);
                     }
                     return UsageThreadOutcome::GlobalPlanChanged { retry_thread: true };
+                }
+                UsageReadStep::PatchTooLarge { anomaly } => {
+                    report.error(PATCH_TOO_LARGE_ERROR_CODE);
+                    if !discovery_complete {
+                        return UsageThreadOutcome::Completed;
+                    }
+                    if plan.action == UsagePlanAction::BuildFrom {
+                        return patch_too_large_build_failure(
+                            anomaly,
+                            plan.source_file_id,
+                            generation,
+                            &work_thread.thread_id,
+                            now_ms(),
+                        );
+                    }
+                    if let Err(error_code) =
+                        replace_or_begin(usage, &scan, present_ids, [plan.source_file_id])
+                    {
+                        return UsageThreadOutcome::OrdinaryError(error_code);
+                    }
+                    return UsageThreadOutcome::GlobalPlanChanged { retry_thread: true };
+                }
+                UsageReadStep::FatalAnomaly { anomaly } => {
+                    let Some(error_code) = fatal_anomaly_error_code(anomaly.code) else {
+                        return UsageThreadOutcome::OrdinaryError(
+                            "USAGE_FATAL_ANOMALY_CODE_INVALID",
+                        );
+                    };
+                    report.error(error_code);
+                    if !discovery_complete {
+                        return UsageThreadOutcome::Completed;
+                    }
+                    if plan.action == UsagePlanAction::BuildFrom {
+                        return typed_anomaly_build_failure(
+                            anomaly,
+                            error_code,
+                            plan.source_file_id,
+                            generation,
+                            &work_thread.thread_id,
+                            now_ms(),
+                        );
+                    }
+                    if let Err(error_code) =
+                        replace_or_begin(usage, &scan, present_ids, [plan.source_file_id])
+                    {
+                        return UsageThreadOutcome::OrdinaryError(error_code);
+                    }
+                    return UsageThreadOutcome::GlobalPlanChanged { retry_thread: true };
+                }
+                UsageReadStep::Replan => {
+                    if stale_context_replan_used {
+                        return UsageThreadOutcome::OrdinaryError(
+                            "USAGE_RECONCILIATION_CONTEXT_REPEATEDLY_STALE",
+                        );
+                    }
+                    stale_context_replan_used = true;
+                    scan = match load_exact_state(
+                        usage,
+                        &work_thread.source_file_ids,
+                        expected_epoch.clone(),
+                        report,
+                    ) {
+                        Ok(scan) => scan,
+                        Err(error_code) => {
+                            return UsageThreadOutcome::FatalReloadError(error_code);
+                        }
+                    };
+                    continue 'group_loop;
                 }
                 UsageReadStep::NeedsRebuild => {
                     if !discovery_complete {
@@ -680,6 +841,7 @@ fn process_thread_group(
         match usage_commit::commit_group(usage, prepared) {
             Ok(outcome) => {
                 report.observe_usage_commit(&metrics, &outcome, write_started.elapsed());
+                stale_context_replan_used = false;
                 if cancelled(cancellation) {
                     return UsageThreadOutcome::Completed;
                 }
@@ -768,19 +930,18 @@ fn replace_or_begin(
     }
 }
 
-fn dto_adapter_counts(dto: &UsageSourceCommitDto) -> (u64, u64, u64) {
-    (
+fn dto_adapter_counts(dto: &UsageSourceCommitDto) -> Option<(u64, u64, u64)> {
+    Some((
         dto.source_bytes_consumed
-            .saturating_sub(dto.replayed_prefix_bytes),
+            .checked_sub(dto.replayed_prefix_bytes)?,
         dto.complete_line_count
-            .saturating_sub(dto.replayed_prefix_lines),
-        dto.candidate_count,
-    )
+            .checked_sub(dto.replayed_prefix_lines)?,
+        dto.write_unit_count,
+    ))
 }
 
 fn dto_requires_exclusive_batch(dto: &UsageSourceCommitDto) -> bool {
-    let (bytes, lines, _) = dto_adapter_counts(dto);
-    lines == 1 && bytes > MAX_BATCH_BYTES
+    dto_adapter_counts(dto).is_some_and(|(bytes, lines, _)| lines == 1 && bytes > MAX_BATCH_BYTES)
 }
 
 fn group_budget_allows(existing: &[UsageSourceCommitDto], next: &UsageSourceCommitDto) -> bool {
@@ -790,25 +951,47 @@ fn group_budget_allows(existing: &[UsageSourceCommitDto], next: &UsageSourceComm
     if existing.iter().any(dto_requires_exclusive_batch) {
         return false;
     }
-    let (mut bytes, mut lines, mut candidates) = (0u64, 0u64, 0u64);
+    let (mut bytes, mut lines, mut write_units) = (0u64, 0u64, 0u64);
     for dto in existing.iter().chain(std::iter::once(next)) {
-        let counts = dto_adapter_counts(dto);
-        bytes = bytes.saturating_add(counts.0);
-        lines = lines.saturating_add(counts.1);
-        candidates = candidates.saturating_add(counts.2);
+        let Some(counts) = dto_adapter_counts(dto) else {
+            return false;
+        };
+        let Some(next_bytes) = bytes.checked_add(counts.0) else {
+            return false;
+        };
+        let Some(next_lines) = lines.checked_add(counts.1) else {
+            return false;
+        };
+        let Some(next_write_units) = write_units.checked_add(counts.2) else {
+            return false;
+        };
+        bytes = next_bytes;
+        lines = next_lines;
+        write_units = next_write_units;
     }
-    bytes <= MAX_BATCH_BYTES && lines <= MAX_BATCH_LINES && candidates <= MAX_BATCH_CANDIDATES
+    bytes <= MAX_BATCH_BYTES && lines <= MAX_BATCH_LINES && write_units <= MAX_BATCH_WRITE_UNITS
 }
 
 fn group_budget_full(dtos: &[UsageSourceCommitDto]) -> bool {
-    let (mut bytes, mut lines, mut candidates) = (0u64, 0u64, 0u64);
+    let (mut bytes, mut lines, mut write_units) = (0u64, 0u64, 0u64);
     for dto in dtos {
-        let counts = dto_adapter_counts(dto);
-        bytes = bytes.saturating_add(counts.0);
-        lines = lines.saturating_add(counts.1);
-        candidates = candidates.saturating_add(counts.2);
+        let Some(counts) = dto_adapter_counts(dto) else {
+            return true;
+        };
+        let Some(next_bytes) = bytes.checked_add(counts.0) else {
+            return true;
+        };
+        let Some(next_lines) = lines.checked_add(counts.1) else {
+            return true;
+        };
+        let Some(next_write_units) = write_units.checked_add(counts.2) else {
+            return true;
+        };
+        bytes = next_bytes;
+        lines = next_lines;
+        write_units = next_write_units;
     }
-    bytes >= MAX_BATCH_BYTES || lines >= MAX_BATCH_LINES || candidates >= MAX_BATCH_CANDIDATES
+    bytes >= MAX_BATCH_BYTES || lines >= MAX_BATCH_LINES || write_units >= MAX_BATCH_WRITE_UNITS
 }
 
 #[expect(
@@ -908,11 +1091,11 @@ fn process_source_batch(
         let mut retained = Vec::<ClassifiedUsageItem>::new();
         let mut adapter_bytes = 0u64;
         let mut adapter_lines = 0u64;
-        let mut potential_candidates = 0u64;
         let mut replay_window_bytes = 0u64;
         let mut replay_window_lines = 0u64;
         let mut unknown_ownership = false;
         let mut invalid_session_data = false;
+        let mut response_ownership_mismatch_offset = None;
         let mut token_records_seen = 0u64;
         let mut saw_owning_boundary = ownership_established;
         let parsing_started = Instant::now();
@@ -936,6 +1119,9 @@ fn process_source_batch(
                 let end = item_end(&item);
                 let bytes = end.saturating_sub(start);
                 let classification = item_classification(&item);
+                if classification.response_ownership_mismatch {
+                    response_ownership_mismatch_offset.get_or_insert(start);
+                }
                 if classification.envelope == EnvelopeKind::TokenCount {
                     token_records_seen = token_records_seen.saturating_add(1);
                 }
@@ -1021,34 +1207,27 @@ fn process_source_batch(
                     }
                 }
 
-                let candidate = matches!(
-                    classification.envelope,
-                    EnvelopeKind::TokenCount | EnvelopeKind::Lifecycle
-                );
                 let oversized = matches!(item, ClassifiedUsageItem::Oversized(_));
-                let would_candidates = potential_candidates.saturating_add(u64::from(candidate));
                 let fits = if adapter_lines == 0 {
-                    (oversized || bytes <= MAX_LEGAL_LINE_BYTES)
-                        && would_candidates <= MAX_BATCH_CANDIDATES
+                    oversized || bytes <= MAX_LEGAL_LINE_BYTES
                 } else {
                     !oversized
-                        && adapter_bytes.saturating_add(bytes) <= MAX_BATCH_BYTES
+                        && adapter_bytes
+                            .checked_add(bytes)
+                            .is_some_and(|total| total <= MAX_BATCH_BYTES)
                         && adapter_lines < MAX_BATCH_LINES
-                        && would_candidates <= MAX_BATCH_CANDIDATES
                 };
                 if !fits {
                     return ReadControl::StopBefore;
                 }
-                adapter_bytes = adapter_bytes.saturating_add(bytes);
+                adapter_bytes += bytes;
                 adapter_lines += 1;
-                potential_candidates = would_candidates;
                 retained.push(item);
 
                 if oversized
                     || bytes > MAX_BATCH_BYTES
                     || adapter_bytes >= MAX_BATCH_BYTES
                     || adapter_lines >= MAX_BATCH_LINES
-                    || potential_candidates >= MAX_BATCH_CANDIDATES
                     || (establishing && ownership_established && !allow_replay_tail)
                 {
                     ReadControl::StopAfter
@@ -1060,15 +1239,26 @@ fn process_source_batch(
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(
-                ChunkReadError::CheckpointGuardMismatch
+                error @ (ChunkReadError::CheckpointGuardMismatch
                 | ChunkReadError::SourceChangedBeforeRead
-                | ChunkReadError::SourceChangedDuringRead,
-            ) => return Ok(UsageReadStep::NeedsRebuildStop),
+                | ChunkReadError::SourceChangedDuringRead),
+            ) => {
+                return Ok(UsageReadStep::NeedsRebuildStop);
+            }
             Err(error) => return Err(read_error_code(error)),
         };
         report.observe_usage_read(&chunk, token_records_seen, parsing_started.elapsed());
 
         if unknown_ownership {
+            if let Some(offset) = response_ownership_mismatch_offset {
+                return Ok(UsageReadStep::FatalAnomaly {
+                    anomaly: Anomaly {
+                        code: AnomalyCode::ResponseOwnershipMismatch,
+                        source_start_offset: Some(offset),
+                        turn_key: None,
+                    },
+                });
+            }
             return Ok(if invalid_session_data {
                 UsageReadStep::InvalidSessionData
             } else if establishing {
@@ -1094,7 +1284,7 @@ fn process_source_batch(
         } else {
             initial_start
         };
-        let mut pipeline_plan = pipeline_plan(
+        let mut pipeline_plan = match pipeline_plan(
             scan,
             source,
             file_generation,
@@ -1104,9 +1294,123 @@ fn process_source_batch(
             pipeline_read_start,
             replayed_prefix_bytes,
             replayed_prefix_lines,
-        )
-        .map_err(|_| "USAGE_PIPELINE_PLAN_FAILED")?;
+        ) {
+            Ok(plan) => plan,
+            Err("USAGE_RECONCILIATION_CARRY_INVALID") => {
+                return Ok(UsageReadStep::NeedsRebuild);
+            }
+            Err(_) => return Err("USAGE_PIPELINE_PLAN_FAILED"),
+        };
         pipeline_plan.allow_replay_tail = allow_replay_tail;
+        let (Some(owning_thread_id), Some(root_session_id)) = (
+            pipeline_plan.owning_thread_id.as_deref(),
+            pipeline_plan.root_session_id.as_deref(),
+        ) else {
+            return Ok(UsageReadStep::AwaitingOwnership);
+        };
+        let current_turn_key = pipeline_plan
+            .state
+            .as_ref()
+            .and_then(|state| state.processor_state.open_turn.as_ref())
+            .map(|turn| turn.turn_key.as_str());
+        let empty_carry = ReconciliationCarry::default();
+        let carry = pipeline_plan
+            .state
+            .as_ref()
+            .map(|state| &state.processor_state.reconciliation_carry)
+            .unwrap_or(&empty_carry);
+        let request =
+            match reconciliation_request(&retained, owning_thread_id, current_turn_key, carry) {
+                Ok(request) => request,
+                Err(anomaly) => return Ok(UsageReadStep::FatalAnomaly { anomaly }),
+            };
+        let reconciliation_context = match usage.load_usage_reconciliation_context(
+            scan.epoch.working_epoch(),
+            crate::codex::ingestion::usage_processor::UsageContext {
+                source_file_id: pipeline_plan.source_file_id,
+                file_generation: pipeline_plan.file_generation,
+                owning_thread_id: owning_thread_id.to_owned(),
+                root_session_id: root_session_id.to_owned(),
+            },
+            request.clone(),
+            crate::codex::storage::usage::UsageReconciliationBasicProof {
+                device_id: file.device_id,
+                inode: file.inode,
+                observed_raw_size: file.size,
+                expected_checkpoint: source.checkpoint.clone(),
+                expected_state: source.state.clone(),
+            },
+        ) {
+            Ok(context) if context.context.request == request => context,
+            Ok(_) => return Err("USAGE_RECONCILIATION_CONTEXT_INVALID"),
+            Err(error) if error.reconciliation_plan_stale() => {
+                return Ok(UsageReadStep::Replan);
+            }
+            Err(error) if error.requires_rebuild() => {
+                return Ok(UsageReadStep::NeedsRebuildStop);
+            }
+            Err(_) => return Err("USAGE_RECONCILIATION_CONTEXT_LOAD_FAILED"),
+        };
+        if let Some(open_turn) = pipeline_plan
+            .state
+            .as_ref()
+            .and_then(|state| state.processor_state.open_turn.as_ref())
+        {
+            let key = crate::codex::ingestion::usage_processor::PersistedTurnKey {
+                source_file_id: pipeline_plan.source_file_id,
+                file_generation: pipeline_plan.file_generation,
+                turn_key: open_turn.turn_key.clone(),
+            };
+            let Some(affected) = reconciliation_context.context.affected_turns.get(&key) else {
+                return Ok(UsageReadStep::NeedsRebuildStop);
+            };
+            if affected.snapshot.status
+                != crate::codex::ingestion::usage_processor::PersistedTurnStatus::Open
+                || affected.snapshot.state != *open_turn
+            {
+                return Ok(UsageReadStep::NeedsRebuildStop);
+            }
+        }
+        let mut context = reconciliation_context.context;
+        context.window_metadata = reconciliation_context
+            .window_metadata
+            .into_iter()
+            .map(|(key, metadata)| {
+                (
+                    key,
+                    crate::codex::ingestion::usage_processor::ReconciliationWindowMetadata {
+                        source_file_id: metadata.source_file_id,
+                        file_generation: metadata.file_generation,
+                        source_start_offset: metadata.source_start_offset,
+                        source_end_offset: metadata.source_end_offset,
+                        owning_thread_id: metadata.owning_thread_id,
+                        turn_key: metadata.turn_key,
+                    },
+                )
+            })
+            .collect();
+        context.window_proposals = reconciliation_context
+            .window_proposals
+            .into_iter()
+            .map(|(key, bindings)| {
+                (
+                    key,
+                    bindings
+                        .into_iter()
+                        .map(|binding| {
+                            crate::codex::ingestion::usage_processor::WindowProposalBinding {
+                                proposal: binding.proposal,
+                                fact: binding.fact,
+                                occurrences: binding.occurrences,
+                            }
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        context.response_occurrences = reconciliation_context.response_occurrences;
+        context.closure_response_keys = reconciliation_context.closure_response_keys;
+        pipeline_plan.reconciliation_context = context;
         let tail = tail_from_read(&chunk);
         let guard = chunk.guard.map(|hash| hash.as_bytes().to_vec());
         let disposition =
@@ -1114,6 +1418,35 @@ fn process_source_batch(
                 .map_err(|_| "USAGE_PIPELINE_FAILED")?;
         match disposition {
             PipelineDisposition::Commit(dto) => {
+                let mut dto = dto;
+                if let Some(anomaly) = dto
+                    .patch
+                    .anomalies
+                    .iter()
+                    .find(|anomaly| anomaly.code == AnomalyCode::ReconciliationPatchTooLarge)
+                {
+                    return Ok(UsageReadStep::PatchTooLarge {
+                        anomaly: anomaly.clone(),
+                    });
+                }
+                if dto.last_complete_offset < chunk.last_complete_offset {
+                    let accepted_guard = match accepted_checkpoint_guard(
+                        &file.path,
+                        identity,
+                        dto.last_complete_offset,
+                    ) {
+                        Ok(guard) => guard,
+                        Err(
+                            ChunkReadError::CheckpointGuardMismatch
+                            | ChunkReadError::SourceChangedBeforeRead
+                            | ChunkReadError::SourceChangedDuringRead,
+                        ) => return Ok(UsageReadStep::NeedsRebuildStop),
+                        Err(error) => {
+                            return Err(read_error_code(error));
+                        }
+                    };
+                    dto.next_guard_hash = accepted_guard.map(|guard| guard.as_bytes().to_vec());
+                }
                 let metrics = UsageCommitMetrics::from_dto(&dto);
                 return Ok(UsageReadStep::Prepared {
                     dto: Box::new(dto),
@@ -1129,12 +1462,33 @@ fn process_source_batch(
                 }
                 return Ok(UsageReadStep::NeedsRebuild);
             }
+            PipelineDisposition::FatalAnomaly(anomaly) => {
+                return Ok(UsageReadStep::FatalAnomaly { anomaly });
+            }
             PipelineDisposition::NeedsRebuild => return Ok(UsageReadStep::NeedsRebuild),
             PipelineDisposition::Skip | PipelineDisposition::BlockedRelationship => {
                 return Ok(UsageReadStep::AwaitingOwnership);
             }
         }
     }
+}
+
+fn accepted_checkpoint_guard(
+    path: &std::path::Path,
+    identity: PhysicalIdentity,
+    offset: u64,
+) -> Result<Option<GuardHash>, ChunkReadError> {
+    read_chunk_bounded(
+        &ChunkReadPlan {
+            path: path.to_path_buf(),
+            identity,
+            start_offset: offset,
+            observed_size: offset,
+            expected_guard: None,
+        },
+        |_| ReadControl::Continue,
+    )
+    .map(|chunk| chunk.guard)
 }
 
 #[expect(
@@ -1186,6 +1540,8 @@ fn pipeline_plan(
         allow_replay_tail: false,
         replayed_prefix_bytes_before_chunk,
         replayed_prefix_lines_before_chunk,
+        reconciliation_context:
+            crate::codex::ingestion::usage_processor::ReconciliationContext::default(),
     })
 }
 
@@ -1254,6 +1610,11 @@ fn pipeline_state(
         active_model: state.active_model.clone(),
         active_reasoning_effort: state.active_reasoning_effort.clone(),
         open_turn: open_turn.cloned(),
+        reconciliation_carry:
+            crate::codex::ingestion::usage_processor::ReconciliationCarry::from_json(
+                &state.reconciliation_state_json,
+            )
+            .map_err(|_| "USAGE_RECONCILIATION_CARRY_INVALID")?,
     };
     if state.active_turn_key.is_some() && processor_state.open_turn.is_none() {
         return Err("USAGE_OPEN_TURN_STATE_MISSING");
@@ -1311,6 +1672,7 @@ fn classify_framed(
                 ClassifiedUsageLine {
                     line: usage,
                     classification,
+                    decoded: OnceCell::new(),
                 }
                 .into(),
             )
@@ -1334,7 +1696,7 @@ fn checkpoint_guard(source: &UsageSourceScanPlan) -> Result<Option<GuardHash>, &
     let Some(checkpoint) = source.checkpoint.as_ref() else {
         return Ok(None);
     };
-    match (
+    let checkpoint_guard = match (
         u64::try_from(checkpoint.committed_offset)
             .map_err(|_| "USAGE_CHECKPOINT_OFFSET_INVALID")?,
         checkpoint.guard_hash.as_deref(),
@@ -1342,6 +1704,11 @@ fn checkpoint_guard(source: &UsageSourceScanPlan) -> Result<Option<GuardHash>, &
         (0, None) => Ok(None),
         (1.., Some(bytes)) => guard_from_slice(bytes).map(Some),
         _ => Err("USAGE_CHECKPOINT_GUARD_INVALID"),
+    }?;
+    if source.start_offset == 0 {
+        Ok(None)
+    } else {
+        Ok(checkpoint_guard)
     }
 }
 
@@ -1466,9 +1833,9 @@ impl UsageCommitMetrics {
             normal_events: 0,
             recovered_events: 0,
             compensation_events: 0,
-            anomalies: dto.anomalies.len() as u64,
+            anomalies: dto.patch.anomalies.len() as u64,
         };
-        for event in &dto.events {
+        for event in &dto.patch.events {
             match event.kind {
                 EventKind::Normal => value.normal_events += 1,
                 EventKind::Recovered => value.recovered_events += 1,
@@ -1490,6 +1857,264 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
+
+    #[test]
+    fn compaction_pipeline_context_budgeted_resume_uses_accepted_offset_guard() {
+        use std::{fs, sync::atomic::AtomicU64};
+
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "usagi-usage-consumer-accepted-guard-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let bytes = b"accepted\nreader-tail\n";
+        fs::write(&path, bytes).unwrap();
+        let identity = crate::platform::file_identity::identity_from_path(&path).unwrap();
+        let accepted_offset = b"accepted\n".len() as u64;
+        let accepted_guard = accepted_checkpoint_guard(&path, identity, accepted_offset)
+            .unwrap()
+            .unwrap();
+
+        let resumed = read_chunk_bounded(
+            &ChunkReadPlan {
+                path: path.clone(),
+                identity,
+                start_offset: accepted_offset,
+                observed_size: bytes.len() as u64,
+                expected_guard: Some(accepted_guard),
+            },
+            |_| ReadControl::Continue,
+        )
+        .unwrap();
+        assert_eq!(resumed.last_complete_offset, bytes.len() as u64);
+
+        let replay_checkpoint = UsageCheckpointExpectation {
+            parser_version: USAGE_PARSER_VERSION,
+            committed_offset: bytes.len() as i64,
+            guard_hash: Some(
+                accepted_checkpoint_guard(&path, identity, bytes.len() as u64)
+                    .unwrap()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            processing_status: crate::codex::domain::CheckpointProcessingStatus::RebuildRequired,
+        };
+        let local_replay = UsageSourceScanPlan {
+            source_file_id: 1,
+            action: UsagePlanAction::LocalReplay,
+            start_offset: 0,
+            observed_size: bytes.len() as i64,
+            owning_thread_id: Some("owner".to_owned()),
+            root_session_id: Some("root".to_owned()),
+            checkpoint: Some(replay_checkpoint.clone()),
+            state: None,
+            open_turn: None,
+            build: None,
+        };
+        let replay_guard = checkpoint_guard(&local_replay).unwrap();
+        assert_eq!(replay_guard, None);
+        assert_eq!(local_replay.checkpoint, Some(replay_checkpoint));
+
+        let reader_chunk = read_chunk_bounded(
+            &ChunkReadPlan {
+                path: path.clone(),
+                identity,
+                start_offset: 0,
+                observed_size: bytes.len() as u64,
+                expected_guard: replay_guard,
+            },
+            |_| ReadControl::Continue,
+        )
+        .unwrap();
+        assert_ne!(reader_chunk.guard, Some(accepted_guard));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compaction_storage_oversized_patch_is_quarantined_with_structured_offset() {
+        use std::{
+            fs,
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+            },
+        };
+
+        use crate::{
+            codex::storage::CodexStorage,
+            source::{SourceId, SourceStorage},
+            storage::{Ledger, LedgerOptions},
+        };
+        use rusqlite::params;
+
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "usagi-usage-consumer-quarantine-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ledger = Arc::new(Ledger::open(LedgerOptions::new(root.join("mu.sqlite3"))).unwrap());
+        {
+            let connection = ledger.connection().unwrap();
+            connection
+                .execute(
+                    "UPDATE codex_adapter_state
+                     SET home_fingerprint='test-fixture',binding_status='ready' WHERE id=1",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO threads(
+                        thread_id,source,native_session_id,parent_thread_id,root_session_id,
+                        agent_role,project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                     ) VALUES ('root','codex','root',NULL,'root','main','unknown',0,'complete',1)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO threads(
+                        thread_id,source,native_session_id,parent_thread_id,root_session_id,
+                        agent_role,project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                     ) VALUES ('child','codex','child','root','root','subagent','unknown',0,'complete',1)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO codex_source_files(
+                        source_file_id,thread_id,current_path,source_area,device_id,inode,
+                        file_generation,observed_size,observed_mtime_ns,file_status,last_seen_at_ms
+                     ) VALUES (1,'child',?1,'sessions',1,1,1,100,1,'present',1)",
+                    [root.join("session.jsonl").to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO codex_source_checkpoints(
+                        source_file_id,consumer_kind,parser_version,committed_offset,guard_hash,
+                        processing_status,last_successful_scan_at_ms,last_error_code
+                     ) VALUES (1,'metadata',1,80,?1,'ready',1,NULL),
+                              (1,'usage',?2,0,NULL,'pending',NULL,NULL)",
+                    params![
+                        vec![8_u8; 32],
+                        crate::codex::normalization::USAGE_PARSER_VERSION
+                    ],
+                )
+                .unwrap();
+        }
+
+        let source = SourceStorage::with_ledger("test", SourceId::CODEX, Arc::clone(&ledger));
+        let storage = CodexStorage::new(&source).unwrap();
+        storage
+            .begin_rebuild(crate::codex::normalization::USAGE_PARSER_VERSION, &[1], 1)
+            .unwrap();
+        let checkpoint_before: i64 = ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT committed_offset FROM codex_source_checkpoints
+                 WHERE source_file_id=1 AND consumer_kind='usage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let outcome = patch_too_large_build_failure(
+            Anomaly {
+                code: AnomalyCode::ReconciliationPatchTooLarge,
+                source_start_offset: Some(56),
+                turn_key: Some("turn".to_owned()),
+            },
+            1,
+            1,
+            "child",
+            2,
+        );
+        let UsageThreadOutcome::SessionDataError {
+            code,
+            quarantine_diagnostic: Some(diagnostic),
+        } = outcome
+        else {
+            panic!("oversized patch must carry a typed quarantine diagnostic");
+        };
+        assert_eq!(code, PATCH_TOO_LARGE_ERROR_CODE);
+        storage
+            .quarantine_thread("child", code, Some(diagnostic), 3)
+            .unwrap();
+
+        let connection = ledger.connection().unwrap();
+        let quarantine_code: String = connection
+            .query_row(
+                "SELECT primary_error_code FROM codex_usage_session_quarantine
+                 WHERE root_session_id='root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(quarantine_code, PATCH_TOO_LARGE_ERROR_CODE);
+        let diagnostic: (String, i64, i64, i64, String, String) = connection
+            .query_row(
+                "SELECT thread_id,source_file_id,file_generation,source_start_offset,
+                        anomaly_type,details_json
+                 FROM codex_ingest_anomalies
+                 WHERE anomaly_type='RECONCILIATION_PATCH_TOO_LARGE'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            diagnostic,
+            (
+                "child".to_owned(),
+                1,
+                1,
+                56,
+                "RECONCILIATION_PATCH_TOO_LARGE".to_owned(),
+                r#"{"turn_key":"turn"}"#.to_owned()
+            )
+        );
+        let completion_status: String = connection
+            .query_row(
+                "SELECT completion_status FROM codex_usage_build_sources
+                 WHERE source_file_id=1
+                   AND build_epoch=(SELECT build_epoch FROM source_usage_epochs WHERE source='codex')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completion_status, "quarantined");
+        let checkpoint_after: i64 = connection
+            .query_row(
+                "SELECT committed_offset FROM codex_source_checkpoints
+                 WHERE source_file_id=1 AND consumer_kind='usage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checkpoint_after, checkpoint_before);
+        drop(connection);
+        drop(storage);
+        drop(source);
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn repeated_shadow_rebuild_data_failure_is_session_scoped_only() {

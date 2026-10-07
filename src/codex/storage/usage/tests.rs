@@ -22,6 +22,7 @@ mod tests {
     use crate::usage::normalized::NormalizedTokenUsage;
     use rusqlite::params;
 
+    mod compaction_phase3;
     mod spec04_p2;
     mod usage_incremental_scan;
 
@@ -142,6 +143,335 @@ mod tests {
         let source = SourceStorage::with_ledger("test", SourceId::CODEX, reopened);
         let storage = CodexStorage::new(&source).expect("create Codex test storage");
         operation(&storage)
+    }
+
+    pub(super) fn test_commit_group(
+        storage: &CodexStorage<'_>,
+        mut batch: UsageCommitBatch,
+    ) -> Result<UsageCommitOutcome, CodexStorageError> {
+        let ledger_epoch = batch.ledger_epoch;
+        let thread_id = batch.thread_id.clone();
+        let root_session_id = batch.root_session_id.clone();
+        for source in &mut batch.sources {
+            if source.reconciliation_expected_fingerprint.len() == 32
+                && source
+                    .reconciliation_expected_fingerprint
+                    .iter()
+                    .all(|byte| *byte == 0)
+            {
+                let basic_proof = UsageReconciliationBasicProof {
+                    device_id: source.updated_state.device_id,
+                    inode: source.updated_state.inode,
+                    observed_raw_size: source.fixed_observed_raw_size,
+                    expected_checkpoint: (!source.expected_checkpoint_missing)
+                        .then(|| source.expected_checkpoint.clone()),
+                    expected_state: source.expected_state.clone(),
+                };
+                let context = storage.load_usage_reconciliation_context(
+                    ledger_epoch,
+                    crate::codex::ingestion::usage_processor::UsageContext {
+                        source_file_id: source.source_file_id,
+                        file_generation: source.expected_file_generation,
+                        owning_thread_id: thread_id.clone(),
+                        root_session_id: root_session_id.clone(),
+                    },
+                    source.reconciliation_request.clone(),
+                    basic_proof,
+                )?;
+                source.reconciliation_expected_fingerprint = context.context.expected_fingerprint;
+            }
+        }
+        storage.commit_group(batch)
+    }
+
+    fn refresh_patch_counts(source: &mut UsageSourceCommit) {
+        let counts = patch_counts(&source.patch).unwrap();
+        source.canonical_event_count = counts.0;
+        source.occurrence_count = counts.1;
+        source.evidence_write_count = counts.2;
+        source.write_unit_count = counts.3;
+    }
+
+    #[test]
+    fn storage_anomaly_codes_round_trip() {
+        for (kind, code) in [
+            (
+                UsageAnomalyKind::ReconciliationPatchTooLarge,
+                "RECONCILIATION_PATCH_TOO_LARGE",
+            ),
+            (
+                UsageAnomalyKind::ResponseUsageConflict,
+                "RESPONSE_USAGE_CONFLICT",
+            ),
+            (
+                UsageAnomalyKind::ResponseOwnershipMismatch,
+                "RESPONSE_OWNERSHIP_MISMATCH",
+            ),
+            (
+                UsageAnomalyKind::CompactionIdentityMismatch,
+                "COMPACTION_IDENTITY_MISMATCH",
+            ),
+            (
+                UsageAnomalyKind::LegacyCoverageAmbiguous,
+                "LEGACY_COVERAGE_AMBIGUOUS",
+            ),
+            (
+                UsageAnomalyKind::ThreadUsageMismatch,
+                "THREAD_USAGE_MISMATCH",
+            ),
+        ] {
+            assert_eq!(kind.as_str(), code);
+            assert_eq!(UsageAnomalyKind::parse(code).unwrap(), kind);
+        }
+        assert!(UsageAnomalyKind::parse("UNKNOWN_ANOMALY").is_err());
+    }
+
+    #[test]
+    fn compaction_storage_reconciliation_proof_and_reader_validation() {
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 0);
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 0, "child", "root", 'a', false),
+                ),
+            )
+        })
+        .unwrap();
+        fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE codex_source_files SET observed_size=140 WHERE source_file_id=1",
+                [],
+            )
+            .unwrap();
+
+        let basic_proof = {
+            let connection = fixture.ledger.connection().unwrap();
+            UsageReconciliationBasicProof {
+                device_id: 0,
+                inode: 0,
+                observed_raw_size: 140,
+                expected_checkpoint: read_usage_checkpoint(&connection, 1).unwrap(),
+                expected_state: read_usage_source_state(&connection, 1, 1).unwrap(),
+            }
+        };
+        let context = with_codex(&fixture.ledger, |storage| {
+            storage.load_usage_reconciliation_context(
+                1,
+                crate::codex::ingestion::usage_processor::UsageContext {
+                    source_file_id: 1,
+                    file_generation: 1,
+                    owning_thread_id: "child".to_owned(),
+                    root_session_id: "root".to_owned(),
+                },
+                crate::codex::ingestion::usage_processor::ReconciliationRequest::default(),
+                basic_proof,
+            )
+        })
+        .unwrap();
+        assert_eq!(context.context.expected_fingerprint.len(), 32);
+
+        use crate::codex::{
+            ingestion::usage_processor::{
+                CarryError, ChainState, LegacyReconciliationWindow, PendingEvidenceRecord,
+                PendingUsageEvidence, ReconciliationCarry,
+            },
+            usage::{CompactionEvidence, ResponseUsageEvidence, UsageValue},
+        };
+
+        let vector = |input, cached, cache_write, output, reasoning, total| {
+            serde_json::json!({
+                "input_tokens": input,
+                "cached_tokens": cached,
+                "cache_write_tokens": cache_write,
+                "output_tokens": output,
+                "reasoning_tokens": reasoning,
+                "total_tokens": total,
+            })
+        };
+        let valid_usage = NormalizedTokenUsage::new(10, 2, Some(1), 4, 1, 14).unwrap();
+        let response_evidence = |response_id: &str| ResponseUsageEvidence {
+            response_id: response_id.to_owned(),
+            thread_id: Some("child".to_owned()),
+            session_id: Some("root".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            usage: UsageValue::Valid(valid_usage.clone()),
+            thread_token_usage: UsageValue::Valid(valid_usage.clone()),
+        };
+        let carry = ReconciliationCarry {
+            open_window_start_offset: Some(0),
+            pending_response_ids: vec!["pending-response".to_owned()],
+            modern_counter_domain: Some(("child".to_owned(), Some("root".to_owned()))),
+            modern_counter_total: Some(valid_usage.clone()),
+            pending_evidence: vec![
+                PendingUsageEvidence {
+                    record: PendingEvidenceRecord::ResponseUsage {
+                        timestamp_ms: Some(1),
+                        start_offset: 1,
+                        end_offset: 2,
+                        evidence: response_evidence("response-a"),
+                    },
+                    model: Some("model".to_owned()),
+                    reasoning_effort: Some("high".to_owned()),
+                },
+                PendingUsageEvidence {
+                    record: PendingEvidenceRecord::Compacted {
+                        timestamp_ms: Some(2),
+                        start_offset: 2,
+                        end_offset: 3,
+                        evidence: CompactionEvidence {
+                            compaction_response_id: Some("response-b".to_owned()),
+                            latest_token_usage_record: Some(response_evidence("response-b")),
+                        },
+                    },
+                    model: Some("model".to_owned()),
+                    reasoning_effort: None,
+                },
+            ],
+            ..ReconciliationCarry::default()
+        };
+        let carry_json = carry.to_json().unwrap();
+        let ordered_carry = ReconciliationCarry::from_json(&carry_json).unwrap();
+        assert!(matches!(
+            &ordered_carry.pending_evidence[0].record,
+            PendingEvidenceRecord::ResponseUsage {
+                start_offset: 1,
+                end_offset: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &ordered_carry.pending_evidence[1].record,
+            PendingEvidenceRecord::Compacted {
+                start_offset: 2,
+                end_offset: 3,
+                ..
+            }
+        ));
+        for invalid in [
+            vector(-1, 0, 0, 0, 0, -1),
+            vector(10, 0, 0, 4, 0, 13),
+            vector(10, 2, 9, 4, 0, 14),
+            vector(10, 0, 0, 4, 5, 14),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+            value["modern_counter_total"] = invalid;
+            assert!(matches!(
+                ReconciliationCarry::from_json(&value.to_string()),
+                Err(CarryError::Invalid)
+            ));
+        }
+        for path in [
+            "/pending_evidence/0/record/evidence/usage/usage",
+            "/pending_evidence/0/record/evidence/thread_token_usage/usage",
+            "/pending_evidence/1/record/evidence/latest_token_usage_record/usage/usage",
+            "/pending_evidence/1/record/evidence/latest_token_usage_record/thread_token_usage/usage",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+            *value.pointer_mut(path).unwrap() = vector(10, 0, 0, 4, 5, 14);
+            assert!(matches!(
+                ReconciliationCarry::from_json(&value.to_string()),
+                Err(CarryError::Invalid)
+            ));
+        }
+        for mutate in [
+            "/pending_evidence/0/record/end_offset",
+            "/pending_evidence/1/record/end_offset",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+            let start = value
+                .pointer(mutate.replace("end_offset", "start_offset").as_str())
+                .unwrap()
+                .clone();
+            *value.pointer_mut(mutate).unwrap() = start;
+            assert!(matches!(
+                ReconciliationCarry::from_json(&value.to_string()),
+                Err(CarryError::Invalid)
+            ));
+        }
+        let mut invalid_identity: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+        invalid_identity["pending_evidence"][0]["record"]["evidence"]["response_id"] =
+            serde_json::json!(" ");
+        assert!(matches!(
+            ReconciliationCarry::from_json(&invalid_identity.to_string()),
+            Err(CarryError::Invalid)
+        ));
+        let mut invalid_variant: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+        invalid_variant["pending_evidence"][0]["record"]["kind"] =
+            serde_json::json!("future_record");
+        assert!(matches!(
+            ReconciliationCarry::from_json(&invalid_variant.to_string()),
+            Err(CarryError::Invalid)
+        ));
+        let mut unsupported_carry: serde_json::Value = serde_json::from_str(&carry_json).unwrap();
+        unsupported_carry["version"] = serde_json::json!(2);
+        assert!(matches!(
+            ReconciliationCarry::from_json(&unsupported_carry.to_string()),
+            Err(CarryError::UnsupportedVersion)
+        ));
+
+        let window = LegacyReconciliationWindow {
+            version: LegacyReconciliationWindow::VERSION,
+            previous_total: UsageValue::Valid(valid_usage.clone()),
+            current_total: UsageValue::Valid(valid_usage.clone()),
+            last_usage: UsageValue::Valid(valid_usage.clone()),
+            explicit_response_ids: Vec::new(),
+            legacy_covered_response_ids: Vec::new(),
+            proposal_event_ids: Vec::new(),
+            turn_accounted_before: valid_usage,
+            chain_state: ChainState::Continuous,
+            closed: false,
+        };
+        let window_json = window.to_json().unwrap();
+        for path in [
+            "/previous_total/usage",
+            "/current_total/usage",
+            "/last_usage/usage",
+            "/turn_accounted_before",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(&window_json).unwrap();
+            *value.pointer_mut(path).unwrap() = vector(10, 0, 0, 4, 5, 14);
+            assert!(matches!(
+                LegacyReconciliationWindow::from_json(&value.to_string()),
+                Err(CarryError::Invalid)
+            ));
+        }
+        let mut unsupported_window: serde_json::Value = serde_json::from_str(&window_json).unwrap();
+        unsupported_window["version"] = serde_json::json!(2);
+        assert!(matches!(
+            LegacyReconciliationWindow::from_json(&unsupported_window.to_string()),
+            Err(CarryError::UnsupportedVersion)
+        ));
+
+        fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE codex_usage_source_states
+                 SET reconciliation_state_json=?1
+                 WHERE ledger_epoch=1 AND source_file_id=1",
+                [unsupported_carry.to_string()],
+            )
+            .unwrap();
+        let connection = fixture.ledger.connection().unwrap();
+        assert!(
+            read_usage_source_state(&connection, 1, 1)
+                .unwrap_err()
+                .requires_usage_rebuild()
+        );
+        drop(connection);
+        let scan = with_codex(&fixture.ledger, |storage| {
+            storage.load_usage_scan_state(&[1], crate::codex::normalization::USAGE_PARSER_VERSION)
+        })
+        .unwrap();
+        assert_eq!(scan.plans[0].action, UsagePlanAction::RebuildRequired);
     }
 
     fn insert_gc_thread(connection: &rusqlite::Connection, source: &str, thread_id: &str) {
@@ -310,6 +640,7 @@ mod tests {
             active_model_offset: Some(0),
             active_reasoning_effort: None,
             active_reasoning_effort_offset: None,
+            reconciliation_state_json: r#"{"version":1,"open_window_start_offset":null,"pending_response_ids":[],"modern_counter_domain":null,"modern_counter_total":null,"pending_evidence":[]}"#.to_owned(),
             updated_at_ms: 10,
         }
     }
@@ -328,30 +659,7 @@ mod tests {
             fingerprint: usage_fingerprint(&value).to_vec(),
             vector: value.clone(),
         };
-        UsageSourceCommit {
-            source_file_id: source_id,
-            expected_file_generation: 1,
-            expected_previous_thread_id: Some(thread_id.to_owned()),
-            expected_checkpoint: UsageCheckpointExpectation {
-                parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
-                committed_offset: 0,
-                guard_hash: None,
-                processing_status: CheckpointProcessingStatus::Pending,
-            },
-            expected_checkpoint_missing: false,
-            expected_state: None,
-            local_replay: false,
-            batch_start_offset: 0,
-            fixed_observed_raw_size: 100,
-            last_complete_offset: 20,
-            source_bytes_consumed: 20,
-            complete_line_count: 1,
-            candidate_count: 1,
-            replayed_prefix_bytes: 0,
-            replayed_prefix_lines: 0,
-            fixed_view_exhausted: false,
-            tail_status: UsageTailStatus::Unverified,
-            tail_start_offset: None,
+        let patch = ReconciliationPatchWrite {
             events: vec![UsageEventWrite {
                 event_id: event_id.clone(),
                 kind: EventKind::Normal,
@@ -372,9 +680,11 @@ mod tests {
                 source_end_offset: 20,
                 event_id,
             }],
-            skill_events: Vec::new(),
-            turns: with_auxiliary_rows
+            turn_upserts: with_auxiliary_rows
                 .then(|| UsageTurnWrite {
+                    source_file_id: source_id,
+                    file_generation: 1,
+                    thread_id: thread_id.to_owned(),
                     turn_key: "turn".to_owned(),
                     raw_turn_id: None,
                     started_at_ms: Some(1),
@@ -408,9 +718,45 @@ mod tests {
                     kind: UsageAnomalyKind::TurnReplaced,
                     severity_error: false,
                     source_start_offset: Some(0),
+                    turn_key: None,
                 })
                 .into_iter()
                 .collect(),
+            ..ReconciliationPatchWrite::default()
+        };
+        let counts = patch_counts(&patch).unwrap();
+        UsageSourceCommit {
+            source_file_id: source_id,
+            expected_file_generation: 1,
+            expected_previous_thread_id: Some(thread_id.to_owned()),
+            expected_checkpoint: UsageCheckpointExpectation {
+                parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
+                committed_offset: 0,
+                guard_hash: None,
+                processing_status: CheckpointProcessingStatus::Pending,
+            },
+            expected_checkpoint_missing: false,
+            expected_state: None,
+            local_replay: false,
+            batch_start_offset: 0,
+            fixed_observed_raw_size: 100,
+            last_complete_offset: 20,
+            source_bytes_consumed: 20,
+            complete_line_count: 1,
+            canonical_event_count: counts.0,
+            occurrence_count: counts.1,
+            evidence_write_count: counts.2,
+            write_unit_count: counts.3,
+            replayed_prefix_bytes: 0,
+            replayed_prefix_lines: 0,
+            fixed_view_exhausted: false,
+            tail_status: UsageTailStatus::Unverified,
+            tail_start_offset: None,
+            skill_events: Vec::new(),
+            patch,
+            reconciliation_request:
+                crate::codex::ingestion::usage_processor::ReconciliationRequest::default(),
+            reconciliation_expected_fingerprint: vec![0; 32],
             updated_state: state(thread_id, root_id, device, 20, with_auxiliary_rows),
             next_guard_hash: Some(vec![9; 32]),
             committed_at_ms: 10,
@@ -456,21 +802,21 @@ mod tests {
         source.next_guard_hash = Some(next_guard_hash);
         source.committed_at_ms = next_offset;
 
-        source.events[0].occurred_at_ms = next_offset;
-        source.events[0].turn_key = Some("turn".to_owned());
-        source.events[0].reasoning_effort = match &reasoning_effort_state {
+        source.patch.events[0].occurred_at_ms = next_offset;
+        source.patch.events[0].turn_key = Some("turn".to_owned());
+        source.patch.events[0].reasoning_effort = match &reasoning_effort_state {
             UsageTurnReasoningEffortState::Single(value) => Some(value.clone()),
             UsageTurnReasoningEffortState::None | UsageTurnReasoningEffortState::Mixed => None,
         };
-        source.events[0].usage = usage.clone();
-        source.occurrences[0].source_start_offset = expected_offset;
-        source.occurrences[0].source_end_offset = next_offset;
+        source.patch.events[0].usage = usage.clone();
+        source.patch.occurrences[0].source_start_offset = expected_offset;
+        source.patch.occurrences[0].source_end_offset = next_offset;
 
         let snapshot = UsageSnapshot {
             fingerprint: usage_fingerprint(&usage).to_vec(),
             vector: usage,
         };
-        let turn = &mut source.turns[0];
+        let turn = &mut source.patch.turn_upserts[0];
         turn.last_total = Some(snapshot.clone());
         turn.accounted = snapshot;
         turn.accounted_candidate_count = accounted_candidate_count;
@@ -533,7 +879,7 @@ mod tests {
             source_commit(1, 11, "child", "root", 'a', true),
         );
         let outcome = with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(first.clone())
+            test_commit_group(storage, first.clone())
         })
         .unwrap();
         assert_eq!(
@@ -578,7 +924,7 @@ mod tests {
             source_commit(2, 12, "child", "root", 'a', false),
         );
         let outcome = with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(duplicate.clone())
+            test_commit_group(storage, duplicate.clone())
         })
         .unwrap();
         assert_eq!(
@@ -598,10 +944,12 @@ mod tests {
 
         fixture.add_source(3, Some("child"), 13);
         let mut conflict = source_commit(3, 13, "child", "root", 'a', true);
-        conflict.events[0].model = "conflicting-model".to_owned();
+        conflict.patch.events[0].model = "conflicting-model".to_owned();
         assert!(
-            with_codex(&fixture.ledger, |storage| storage
-                .commit_group(batch("child", "root", conflict)))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch("child", "root", conflict)
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -633,11 +981,14 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            with_codex(&fixture.ledger, |storage| storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(4, 14, "child", "root", 'a', false),
-            )))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(4, 14, "child", "root", 'a', false),
+                )
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -669,8 +1020,10 @@ mod tests {
             sources: vec![first_in_group, stale_second],
         };
         assert!(
-            with_codex(&fixture.ledger, |storage| storage
-                .commit_group(atomic_group.clone()))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                atomic_group.clone()
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -705,11 +1058,14 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            with_codex(&fixture.ledger, |storage| storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(7, 17, "child", "root", 'g', false),
-            )))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(7, 17, "child", "root", 'g', false),
+                )
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -732,18 +1088,96 @@ mod tests {
     }
 
     #[test]
+    fn compaction_storage_occurrence_retarget_requires_explicit_delete() {
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 11);
+        fixture.add_source(2, Some("child"), 12);
+        let original = source_commit(1, 11, "child", "root", 'a', false);
+        let original_id = original.patch.events[0].event_id.clone();
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", original))
+        })
+        .unwrap();
+        let replacement = source_commit(2, 12, "child", "root", 'b', false);
+        let replacement_id = replacement.patch.events[0].event_id.clone();
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", replacement))
+        })
+        .unwrap();
+
+        let source = source_commit(1, 11, "child", "root", 'a', false);
+        let occurrence = UsageOccurrenceWrite {
+            source_file_id: 1,
+            file_generation: 1,
+            source_start_offset: 0,
+            source_end_offset: 20,
+            event_id: replacement_id.clone(),
+        };
+        let connection = fixture.ledger.connection().unwrap();
+        assert!(
+            write_or_compare_occurrence(
+                &connection,
+                1,
+                &source,
+                &occurrence,
+                &std::collections::BTreeSet::new(),
+            )
+            .is_err()
+        );
+        let unchanged: (String, i64) = connection
+            .query_row(
+                "SELECT event_id,source_end_offset FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=1 AND source_file_id=1
+                   AND file_generation=1 AND source_start_offset=0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, (original_id.clone(), 20));
+
+        write_or_compare_occurrence(
+            &connection,
+            1,
+            &source,
+            &occurrence,
+            &std::collections::BTreeSet::from([original_id.clone()]),
+        )
+        .unwrap();
+        let retargeted: (String, i64) = connection
+            .query_row(
+                "SELECT event_id,source_end_offset FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=1 AND source_file_id=1
+                   AND file_generation=1 AND source_start_offset=0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retargeted, (replacement_id, 20));
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM usage_events
+                     WHERE source='codex' AND source_epoch=1 AND event_id=?1",
+                    [&original_id],
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn t_mu03_c02_durable_effort_round_trip_restart_and_fingerprint() {
         let fixture = Fixture::new();
         fixture.add_source(1, Some("child"), 11);
         let mut committed = source_commit(1, 11, "child", "root", 'e', true);
-        committed.events[0].reasoning_effort = Some("high".to_owned());
+        committed.patch.events[0].reasoning_effort = Some("high".to_owned());
         committed.updated_state.active_reasoning_effort = Some("high".to_owned());
         committed.updated_state.active_reasoning_effort_offset = Some(10);
-        let turn = committed.turns.first_mut().unwrap();
+        let turn = committed.patch.turn_upserts.first_mut().unwrap();
         turn.reasoning_effort_state = UsageTurnReasoningEffortState::Single("high".to_owned());
         turn.unresolved_reasoning_effort_seen = false;
         if let Err(error) = with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", committed))
+            test_commit_group(storage, batch("child", "root", committed))
         }) {
             panic!(
                 "durable effort commit failed: {} ({:?})",
@@ -919,7 +1353,8 @@ mod tests {
                 'a',
                 true,
             )
-            .turns
+            .patch
+            .turn_upserts
             .into_iter()
             .next()
             .unwrap();
@@ -962,7 +1397,7 @@ mod tests {
         let first = source_commit(1, 11, "child", "root", 'a', true);
         let first_state = first.updated_state.clone();
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", first))
+            test_commit_group(storage, batch("child", "root", first))
         })
         .unwrap();
         let first_snapshot = {
@@ -991,7 +1426,7 @@ mod tests {
             false,
         );
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", second))
+            test_commit_group(storage, batch("child", "root", second))
         })
         .unwrap();
 
@@ -1027,7 +1462,7 @@ mod tests {
         let first = source_commit(1, 11, "child", "root", 'a', true);
         let first_state = first.updated_state.clone();
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", first))
+            test_commit_group(storage, batch("child", "root", first))
         })
         .unwrap();
 
@@ -1046,7 +1481,7 @@ mod tests {
         );
         let second_state = second.updated_state.clone();
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", second))
+            test_commit_group(storage, batch("child", "root", second))
         })
         .unwrap();
         let second_scan = with_codex(&fixture.ledger, |storage| {
@@ -1074,9 +1509,9 @@ mod tests {
             UsageTurnReasoningEffortState::Mixed,
             true,
         );
-        third.events[0].reasoning_effort = Some("medium".to_owned());
+        third.patch.events[0].reasoning_effort = Some("medium".to_owned());
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", third))
+            test_commit_group(storage, batch("child", "root", third))
         })
         .unwrap();
 
@@ -1124,28 +1559,28 @@ mod tests {
         fixture.add_source(1, Some("child"), 11);
         fixture.add_source(2, Some("child"), 12);
         let mut first_source = source_commit(1, 11, "child", "root", 'a', true);
-        first_source.events[0].reasoning_effort = Some("high".to_owned());
-        first_source.events[0].estimated_cost_nanos_usd = Some(5_725_000);
+        first_source.patch.events[0].reasoning_effort = Some("high".to_owned());
+        first_source.patch.events[0].estimated_cost_nanos_usd = Some(5_725_000);
         first_source.updated_state.active_reasoning_effort = Some("high".to_owned());
         first_source.updated_state.active_reasoning_effort_offset = Some(10);
-        first_source.turns[0].reasoning_effort_state =
+        first_source.patch.turn_upserts[0].reasoning_effort_state =
             UsageTurnReasoningEffortState::Single("high".to_owned());
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", first_source))
+            test_commit_group(storage, batch("child", "root", first_source))
         })
         .unwrap();
         let mut duplicate_source = source_commit(2, 12, "child", "root", 'a', true);
-        duplicate_source.events[0].reasoning_effort = Some("high".to_owned());
-        duplicate_source.events[0].estimated_cost_nanos_usd = None;
+        duplicate_source.patch.events[0].reasoning_effort = Some("high".to_owned());
+        duplicate_source.patch.events[0].estimated_cost_nanos_usd = None;
         duplicate_source.updated_state.active_reasoning_effort = Some("high".to_owned());
         duplicate_source
             .updated_state
             .active_reasoning_effort_offset = Some(10);
-        duplicate_source.turns[0].reasoning_effort_state =
+        duplicate_source.patch.turn_upserts[0].reasoning_effort_state =
             UsageTurnReasoningEffortState::Single("high".to_owned());
-        duplicate_source.anomalies[0].anomaly_id = "c".repeat(64);
+        duplicate_source.patch.anomalies[0].anomaly_id = "c".repeat(64);
         let duplicate = match with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", duplicate_source))
+            test_commit_group(storage, batch("child", "root", duplicate_source))
         }) {
             Ok(value) => value,
             Err(error) => panic!(
@@ -1194,8 +1629,18 @@ mod tests {
                 .unwrap();
         }
         with_codex(&fixture.ledger, |storage| storage.begin_carry(2, 31)).unwrap();
-        with_codex(&fixture.ledger, |storage| storage.resume_carry(2, 32)).unwrap();
-        with_codex(&fixture.ledger, |storage| storage.resume_carry(2, 33)).unwrap();
+        let mut carry_outcome = CarryStepOutcome::Progress;
+        for now_ms in 32..=38 {
+            carry_outcome =
+                with_codex(&fixture.ledger, |storage| storage.resume_carry(2, now_ms)).unwrap();
+            if matches!(
+                carry_outcome,
+                CarryStepOutcome::FinalizedMissing | CarryStepOutcome::FinalizedPresent
+            ) {
+                break;
+            }
+        }
+        assert_eq!(carry_outcome, CarryStepOutcome::FinalizedMissing);
         let connection = fixture.ledger.connection().unwrap();
         let proof: (i64, i64, String, String, Option<String>, i64) = connection
             .query_row(
@@ -1225,14 +1670,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             proof,
-            (
-                1,
-                1,
-                "anomalies".into(),
-                "single".into(),
-                Some("high".into()),
-                0
-            )
+            (1, 1, "none".into(), "single".into(), Some("high".into()), 0)
         );
         let copied_effort: Option<String> = connection
             .query_row(
@@ -1263,8 +1701,10 @@ mod tests {
         exhausted_unverified.fixed_view_exhausted = true;
         let invalid = batch("child", "root", exhausted_unverified);
         assert!(
-            with_codex(&fixture.ledger, |storage| storage
-                .commit_group(invalid.clone()))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                invalid.clone()
+            ))
             .is_err()
         );
 
@@ -1273,8 +1713,10 @@ mod tests {
         early_none.tail_status = UsageTailStatus::None;
         early_none.updated_state.raw_tail_status = UsageTailStatus::None;
         assert!(
-            with_codex(&fixture.ledger, |storage| storage
-                .commit_group(batch("child", "root", early_none)))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch("child", "root", early_none)
+            ))
             .is_err()
         );
 
@@ -1314,7 +1756,7 @@ mod tests {
             source_commit(1, 11, "child", "root", 'a', false),
         );
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(first.clone())
+            test_commit_group(storage, first.clone())
         })
         .unwrap();
         let resumed = with_codex(&fixture.ledger, |storage| {
@@ -1356,12 +1798,12 @@ mod tests {
         recovery.batch_start_offset = 20;
         recovery.last_complete_offset = 40;
         recovery.source_bytes_consumed = 20;
-        recovery.occurrences[0].source_start_offset = 20;
-        recovery.occurrences[0].source_end_offset = 40;
+        recovery.patch.occurrences[0].source_start_offset = 20;
+        recovery.patch.occurrences[0].source_end_offset = 40;
         recovery.updated_state.resolved_through_offset = 40;
         recovery.updated_state.previous_total_offset = Some(40);
         let outcome = with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", recovery))
+            test_commit_group(storage, batch("child", "root", recovery))
         })
         .unwrap();
         assert_eq!(outcome.data_revision, 2);
@@ -1403,11 +1845,14 @@ mod tests {
             UsagePlanAction::ReadFrom
         );
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "unresolved",
-                "root",
-                source_commit(2, 12, "unresolved", "root", 'd', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "unresolved",
+                    "root",
+                    source_commit(2, 12, "unresolved", "root", 'd', false),
+                ),
+            )
         })
         .unwrap();
         assert_eq!(
@@ -1447,21 +1892,23 @@ mod tests {
         fixture.add_source(1, Some("child"), 11);
         fixture.add_source(2, Some("other-root"), 12);
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(1, 11, "child", "root", 'a', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', false),
+                ),
+            )
         })
         .unwrap();
         let mut stale = source_commit(2, 12, "other-root", "other-root", 'c', false);
         stale.expected_file_generation = 2;
         assert!(
-            with_codex(&fixture.ledger, |storage| storage.commit_group(batch(
-                "other-root",
-                "other-root",
-                stale
-            )))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch("other-root", "other-root", stale)
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -1522,11 +1969,14 @@ mod tests {
             )
             .unwrap();
         assert!(
-            with_codex(&fixture.ledger, |storage| storage.commit_group(batch(
-                "child",
-                "other-root",
-                source_commit(3, 13, "child", "other-root", 'e', false),
-            )))
+            with_codex(&fixture.ledger, |storage| test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "other-root",
+                    source_commit(3, 13, "child", "other-root", 'e', false),
+                )
+            ))
             .is_err()
         );
         let connection = fixture.ledger.connection().unwrap();
@@ -1548,11 +1998,14 @@ mod tests {
         let fixture = Fixture::new();
         fixture.add_source(1, Some("child"), 11);
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(1, 11, "child", "root", 'a', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', false),
+                ),
+            )
         })
         .unwrap();
 
@@ -1603,19 +2056,25 @@ mod tests {
         fixture.add_source(1, Some("child"), 11);
         fixture.add_source(2, Some("other-root"), 12);
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(1, 11, "child", "root", 'a', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', false),
+                ),
+            )
         })
         .unwrap();
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "other-root",
-                "other-root",
-                source_commit(2, 12, "other-root", "other-root", 'c', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "other-root",
+                    "other-root",
+                    source_commit(2, 12, "other-root", "other-root", 'c', false),
+                ),
+            )
         })
         .unwrap();
 
@@ -1752,11 +2211,14 @@ mod tests {
         let fixture = Fixture::new();
         fixture.add_source(1, Some("child"), 11);
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(1, 11, "child", "root", 'a', false),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', false),
+                ),
+            )
         })
         .unwrap();
 
@@ -1779,7 +2241,7 @@ mod tests {
         for (column, bad, good) in [
             ("device_id", "12", "11"),
             ("inode", "12", "11"),
-            ("canonical_algorithm_version", "1", "5"),
+            ("canonical_algorithm_version", "5", "6"),
             ("resolved_through_offset", "21", "20"),
         ] {
             let connection = fixture.ledger.connection().unwrap();
@@ -1915,7 +2377,7 @@ mod tests {
             sources: vec![build_commit],
         };
         with_codex(&build_fixture.ledger, |storage| {
-            storage.commit_group(build_batch.clone())
+            test_commit_group(storage, build_batch.clone())
         })
         .unwrap();
         let continued = with_codex(&build_fixture.ledger, |storage| {
@@ -1934,11 +2396,14 @@ mod tests {
             let fixture = Fixture::new();
             fixture.add_source(1, Some("child"), 11);
             with_codex(&fixture.ledger, |storage| {
-                storage.commit_group(batch(
-                    "child",
-                    "root",
-                    source_commit(1, 11, "child", "root", 'a', true),
-                ))
+                test_commit_group(
+                    storage,
+                    batch(
+                        "child",
+                        "root",
+                        source_commit(1, 11, "child", "root", 'a', true),
+                    ),
+                )
             })
             .unwrap();
             {
@@ -1975,7 +2440,7 @@ mod tests {
                 sources: vec![seed],
             };
             with_codex(&fixture.ledger, |storage| {
-                storage.commit_group(seed_batch.clone())
+                test_commit_group(storage, seed_batch.clone())
             })
             .unwrap();
             {
@@ -2057,9 +2522,9 @@ mod tests {
                     0,
                     0,
                     "occurrences".into(),
-                    1,
-                    1,
-                    1
+                    0,
+                    0,
+                    0
                 )
             );
         }
@@ -2093,16 +2558,43 @@ mod tests {
         // incompatible seed payload without advancing the durable cursor.
         let conflict = prepare();
         with_codex(&conflict.ledger, |storage| storage.begin_carry(1, 60)).unwrap();
-        {
+        let (build_epoch, event_id) = {
             let connection = conflict.ledger.connection().unwrap();
-            connection
-                .execute(
-                    "UPDATE usage_events SET model='seed-conflict'
-                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
-                    ["a".repeat(64)],
+            let (active_epoch, build_epoch): (i64, Option<i64>) = connection
+                .query_row(
+                    "SELECT active_epoch,build_epoch FROM source_usage_epochs WHERE source='codex'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .unwrap();
-        }
+            let build_epoch = build_epoch.expect("the carry fixture has an active build");
+            let event_id: String = connection
+                .query_row(
+                    "SELECT event_id FROM usage_events
+                     WHERE source='codex' AND source_epoch=?1 ORDER BY event_id LIMIT 1",
+                    [active_epoch],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let changed = connection
+                .execute(
+                    "INSERT INTO usage_events(
+                        source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
+                        input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
+                        total_tokens,quality_status,created_at_ms)
+                     SELECT source,?1,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                        turn_key,'seed-conflict',reasoning_effort,estimated_cost_nanos_usd,
+                        input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,
+                        total_tokens,quality_status,created_at_ms
+                     FROM usage_events
+                     WHERE source='codex' AND source_epoch=?2 AND event_id=?3",
+                    params![build_epoch, active_epoch, event_id],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the fixture must inject its partial seed row");
+            (build_epoch, event_id)
+        };
         assert!(with_codex(&conflict.ledger, |storage| storage.resume_carry(1, 61)).is_err());
         let connection = conflict.ledger.connection().unwrap();
         let unchanged: (String, Option<i64>, String, i64) = connection
@@ -2118,6 +2610,15 @@ mod tests {
             unchanged,
             ("occurrences".into(), None, "rebuild_required".into(), 0)
         );
+        let preserved_seed_model: String = connection
+            .query_row(
+                "SELECT model FROM usage_events
+                 WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
+                params![build_epoch, event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_seed_model, "seed-conflict");
 
         // A partial seed may not smuggle a cross-source-provenance orphan
         // canonical event into the build epoch. BeginCarry rejects it before
@@ -2126,22 +2627,23 @@ mod tests {
         orphan.add_source(2, Some("child"), 22);
         {
             let connection = orphan.ledger.connection().unwrap();
-            connection
+            let inserted = connection
                 .execute(
                     "INSERT INTO usage_events(
                         source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
-                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                     SELECT source,2,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
                      FROM usage_events
-                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
+                     WHERE source='codex' AND source_epoch=1 AND event_id=?1",
                     params!["a".repeat(64), "orphan"],
                 )
                 .unwrap();
+            assert_eq!(inserted, 1, "the fixture must insert its orphan event");
         }
         assert!(with_codex(&orphan.ledger, |storage| storage.begin_carry(1, 62)).is_err());
         let connection = orphan.ledger.connection().unwrap();
@@ -2171,24 +2673,25 @@ mod tests {
         finalize_orphan.add_source(2, Some("child"), 22);
         {
             let connection = finalize_orphan.ledger.connection().unwrap();
-            connection
+            let inserted = connection
                 .execute(
                     "INSERT INTO usage_events(
                         source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
-                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                     SELECT source,2,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
                      FROM usage_events
-                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
+                     WHERE source='codex' AND source_epoch=1 AND event_id=?1",
                     params!["a".repeat(64), "late-orphan"],
                 )
                 .unwrap();
+            assert_eq!(inserted, 1, "the fixture must insert its late orphan");
         }
-        for step in 0..3_i64 {
+        for step in 0..6_i64 {
             assert!(matches!(
                 with_codex(&finalize_orphan.ledger, |storage| storage
                     .resume_carry(1, 66 + step)),
@@ -2197,7 +2700,7 @@ mod tests {
         }
         assert!(
             with_codex(&finalize_orphan.ledger, |storage| storage
-                .resume_carry(1, 69))
+                .resume_carry(1, 72))
             .is_err()
         );
         let connection = finalize_orphan.ledger.connection().unwrap();
@@ -2255,26 +2758,29 @@ mod tests {
         .unwrap();
         {
             let connection = occurrence_conflict.ledger.connection().unwrap();
-            connection
+            let inserted = connection
                 .execute(
                     "INSERT INTO usage_events(
                         source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms)
-                     SELECT source,source_epoch,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
+                     SELECT source,2,?2,event_kind,occurred_at_ms,thread_id,root_session_id,
                         turn_key,model,reasoning_effort,estimated_cost_nanos_usd,
                         input_tokens,cached_tokens,cache_write_tokens,
                         output_tokens,reasoning_tokens,total_tokens,quality_status,created_at_ms
                      FROM usage_events
-                     WHERE source='codex' AND source_epoch=2 AND event_id=?1",
+                     WHERE source='codex' AND source_epoch=1 AND event_id=?1",
                     params!["a".repeat(64), "wrong-event"],
                 )
                 .unwrap();
+            assert_eq!(inserted, 1, "the fixture must insert its conflicting event");
             connection
                 .execute(
-                    "UPDATE codex_usage_event_occurrences SET event_id='wrong-event'
-                     WHERE source='codex' AND ledger_epoch=2 AND source_file_id=1 AND source_start_offset=0",
+                    "INSERT INTO codex_usage_event_occurrences(
+                        source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                        source_end_offset,event_id,created_at_ms)
+                     VALUES ('codex',2,1,1,0,20,'wrong-event',64)",
                     [],
                 )
                 .unwrap();
@@ -2324,11 +2830,14 @@ mod tests {
         let fixture = Fixture::new();
         fixture.add_source(1, Some("child"), 11);
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch(
-                "child",
-                "root",
-                source_commit(1, 11, "child", "root", 'a', true),
-            ))
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', true),
+                ),
+            )
         })
         .unwrap();
         {
@@ -2390,5 +2899,1023 @@ mod tests {
         .unwrap();
         assert_eq!(plan.plans[0].action, UsagePlanAction::BlockedRelationship);
         assert!(with_codex(&fixture.ledger, |storage| storage.begin_carry(1, 40)).is_err());
+    }
+
+    #[test]
+    fn compaction_storage_atomic_patch() {
+        fn canonical_payload(
+            connection: &rusqlite::Connection,
+            event_id: &str,
+        ) -> Vec<rusqlite::types::Value> {
+            let mut statement = connection
+                .prepare(
+                    "SELECT * FROM usage_events
+                     WHERE source='codex' AND source_epoch=1 AND event_id=?1",
+                )
+                .unwrap();
+            let column_count = statement.column_count();
+            statement
+                .query_row([event_id], |row| {
+                    (0..column_count)
+                        .map(|index| row.get(index))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+        }
+
+        fn metric_totals(
+            connection: &rusqlite::Connection,
+        ) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+            connection
+                .query_row(
+                    "SELECT count(*),coalesce(sum(input_tokens),0),
+                            coalesce(sum(cached_tokens),0),coalesce(sum(cache_write_tokens),0),
+                            coalesce(sum(output_tokens),0),coalesce(sum(reasoning_tokens),0),
+                            coalesce(sum(total_tokens),0),
+                            coalesce(sum(estimated_cost_nanos_usd),0)
+                     FROM usage_events WHERE source='codex' AND source_epoch=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        }
+
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 11);
+        let mut replacement = source_commit(1, 11, "child", "root", 'a', false);
+        let event_id = replacement.patch.events[0].event_id.clone();
+        replacement.patch.delete_event_ids.push(event_id.clone());
+        replacement.patch.facts.push(UsageEventFactWrite {
+            event_id: event_id.clone(),
+            owning_thread_id: "child".to_owned(),
+            response_id: Some("response-stable-1".to_owned()),
+            evidence_kind: EvidenceKind::Explicit,
+            operation: CodexOperation::Response,
+        });
+        refresh_patch_counts(&mut replacement);
+        let outcome = with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", replacement))
+        })
+        .unwrap();
+        assert_eq!(outcome.events_inserted, 1);
+        let connection = fixture.ledger.connection().unwrap();
+        let stored: (i64, String, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events WHERE event_id=?1),
+                    (SELECT event_id FROM usage_events WHERE event_id=?1),
+                    (SELECT count(*) FROM codex_usage_event_occurrences WHERE event_id=?1)",
+                [&event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (1, event_id.clone(), 1));
+        drop(connection);
+
+        let (expected_checkpoint, expected_state) = {
+            let connection = fixture.ledger.connection().unwrap();
+            (
+                read_usage_checkpoint(&connection, 1).unwrap().unwrap(),
+                read_usage_source_state(&connection, 1, 1).unwrap().unwrap(),
+            )
+        };
+        let mut classification = source_commit(1, 11, "child", "root", 'b', false);
+        classification.expected_checkpoint = expected_checkpoint;
+        classification.expected_state = Some(expected_state.clone());
+        classification.batch_start_offset = expected_state.resolved_through_offset;
+        classification.last_complete_offset = expected_state.resolved_through_offset;
+        classification.source_bytes_consumed = 0;
+        classification.complete_line_count = 0;
+        classification.updated_state = expected_state;
+        classification.patch.events.clear();
+        classification.patch.occurrences.clear();
+        classification.patch.facts.push(UsageEventFactWrite {
+            event_id: event_id.clone(),
+            owning_thread_id: "child".to_owned(),
+            response_id: Some("response-stable-1".to_owned()),
+            evidence_kind: EvidenceKind::Explicit,
+            operation: CodexOperation::Compaction,
+        });
+        refresh_patch_counts(&mut classification);
+        let (canonical_before, metrics_before) = {
+            let connection = fixture.ledger.connection().unwrap();
+            (
+                canonical_payload(&connection, &event_id),
+                metric_totals(&connection),
+            )
+        };
+        let classified = with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", classification))
+        })
+        .unwrap();
+        assert_eq!(classified.data_revision, outcome.data_revision + 1);
+        assert_eq!(
+            (classified.events_inserted, classified.events_deduplicated),
+            (0, 0)
+        );
+        let connection = fixture.ledger.connection().unwrap();
+        assert_eq!(canonical_payload(&connection, &event_id), canonical_before);
+        assert_eq!(metric_totals(&connection), metrics_before);
+        let fact: (String, Option<String>, String, String) = connection
+            .query_row(
+                "SELECT operation,response_id,evidence_kind,owning_thread_id
+                 FROM codex_usage_event_facts WHERE ledger_epoch=1 AND event_id=?1",
+                [&event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            fact,
+            (
+                "compaction".to_owned(),
+                Some("response-stable-1".to_owned()),
+                "explicit".to_owned(),
+                "child".to_owned()
+            )
+        );
+        let stored_revision: i64 = connection
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_revision, classified.data_revision);
+    }
+
+    #[test]
+    fn compaction_storage_marker_binding() {
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 11);
+        let make_patch = |response_id: &str| {
+            let mut source = source_commit(1, 11, "child", "root", 'a', true);
+            let event_id = source.patch.events[0].event_id.clone();
+            source.patch.facts.push(UsageEventFactWrite {
+                event_id: event_id.clone(),
+                owning_thread_id: "child".to_owned(),
+                response_id: Some("response-a".to_owned()),
+                evidence_kind: EvidenceKind::Explicit,
+                operation: CodexOperation::Compaction,
+            });
+            source
+                .patch
+                .marker_upserts
+                .push(UsageCompactionMarkerWrite {
+                    source_file_id: 1,
+                    file_generation: 1,
+                    source_start_offset: 0,
+                    source_end_offset: 20,
+                    owning_thread_id: "child".to_owned(),
+                    root_session_id: "root".to_owned(),
+                    occurred_at_ms: Some(5),
+                    model: Some("model".to_owned()),
+                    reasoning_effort: None,
+                    response_id: Some(response_id.to_owned()),
+                    resolved_event_id: Some(event_id),
+                    unknown_reason: None,
+                });
+            refresh_patch_counts(&mut source);
+            source
+        };
+
+        let invalid = make_patch("response-b");
+        assert!(
+            with_codex(&fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", invalid))
+            })
+            .is_err()
+        );
+        let rolled_back: (i64, i64, i64, i64) = fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=1),
+                    (SELECT count(*) FROM codex_usage_event_occurrences WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_usage_event_facts WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_compaction_markers WHERE ledger_epoch=1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rolled_back, (0, 0, 0, 0));
+
+        let mut invalid_owner = make_patch("response-a");
+        invalid_owner.patch.marker_upserts[0].owning_thread_id = "other".to_owned();
+        assert!(
+            with_codex(&fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", invalid_owner))
+            })
+            .is_err()
+        );
+
+        let mut invalid_operation = make_patch("response-a");
+        invalid_operation.patch.facts[0].operation = CodexOperation::Response;
+        assert!(
+            with_codex(&fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", invalid_operation))
+            })
+            .is_err()
+        );
+
+        fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_usage_commit_checkpoint
+                 BEFORE UPDATE OF committed_offset ON codex_source_checkpoints
+                 WHEN OLD.source_file_id=1 AND OLD.consumer_kind='usage'
+                 BEGIN SELECT RAISE(ABORT,'forced checkpoint failure'); END;",
+            )
+            .unwrap();
+        let checkpoint_failure = make_patch("response-a");
+        assert!(
+            with_codex(&fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", checkpoint_failure))
+            })
+            .is_err()
+        );
+        let rollback_state: (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<Vec<u8>>,
+            String,
+            i64,
+            i64,
+        ) = fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=1),
+                    (SELECT count(*) FROM codex_usage_event_occurrences WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_usage_event_facts WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_compaction_markers WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_turns WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_ingest_anomalies WHERE ledger_epoch=1),
+                    (SELECT count(*) FROM codex_usage_source_states WHERE ledger_epoch=1),
+                    (SELECT committed_offset FROM codex_source_checkpoints
+                     WHERE source_file_id=1 AND consumer_kind='usage'),
+                    (SELECT guard_hash FROM codex_source_checkpoints
+                     WHERE source_file_id=1 AND consumer_kind='usage'),
+                    (SELECT processing_status FROM codex_source_checkpoints
+                     WHERE source_file_id=1 AND consumer_kind='usage'),
+                    (SELECT parser_version FROM codex_source_checkpoints
+                     WHERE source_file_id=1 AND consumer_kind='usage'),
+                    (SELECT data_revision FROM app_meta WHERE id=1)",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rollback_state,
+            (
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                "pending".to_owned(),
+                crate::codex::normalization::USAGE_PARSER_VERSION,
+                0,
+            )
+        );
+        fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_usage_commit_checkpoint;")
+            .unwrap();
+
+        let valid = make_patch("response-a");
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", valid))
+        })
+        .unwrap();
+        let bound: i64 = fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM codex_compaction_markers m
+                 JOIN codex_usage_event_facts f
+                   ON f.ledger_epoch=m.ledger_epoch AND f.event_id=m.resolved_event_id
+                 WHERE m.response_id=f.response_id AND m.owning_thread_id=f.owning_thread_id
+                   AND f.operation='compaction'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, 1);
+
+        let connection = fixture.ledger.connection().unwrap();
+        for statement in [
+            "UPDATE codex_compaction_markers SET owning_thread_id='other'
+             WHERE source_file_id=1 AND source_start_offset=0",
+            "UPDATE codex_compaction_markers SET response_id='response-b'
+             WHERE source_file_id=1 AND source_start_offset=0",
+            "UPDATE codex_compaction_markers SET root_session_id='other-root'
+             WHERE source_file_id=1 AND source_start_offset=0",
+            "UPDATE codex_usage_event_facts SET owning_thread_id='other'
+             WHERE event_id LIKE 'aaaaaaaa%'",
+            "UPDATE codex_usage_event_facts SET response_id='response-b'
+             WHERE event_id LIKE 'aaaaaaaa%'",
+            "UPDATE codex_usage_event_facts SET operation='response'
+             WHERE event_id LIKE 'aaaaaaaa%'",
+            "DELETE FROM codex_usage_event_facts WHERE event_id LIKE 'aaaaaaaa%'",
+            "DELETE FROM usage_events WHERE event_id LIKE 'aaaaaaaa%'",
+        ] {
+            assert!(connection.execute_batch(statement).is_err(), "{statement}");
+        }
+    }
+
+    #[test]
+    fn compaction_storage_turn_rewrite() {
+        fn rewrite_commit(
+            fixture: &Fixture,
+            expected_turn: UsageTurnWrite,
+            replacement_turn: UsageTurnWrite,
+        ) -> UsageSourceCommit {
+            let (expected_checkpoint, expected_state) = {
+                let connection = fixture.ledger.connection().unwrap();
+                (
+                    read_usage_checkpoint(&connection, 1).unwrap().unwrap(),
+                    read_usage_source_state(&connection, 1, 1).unwrap().unwrap(),
+                )
+            };
+            let mut source = source_commit(1, 11, "child", "root", 'a', false);
+            source.expected_checkpoint = expected_checkpoint;
+            source.expected_state = Some(expected_state.clone());
+            source.batch_start_offset = expected_state.resolved_through_offset;
+            source.last_complete_offset = expected_state.resolved_through_offset;
+            source.source_bytes_consumed = 0;
+            source.complete_line_count = 0;
+            source.updated_state = expected_state;
+            source.patch.events.clear();
+            source.patch.occurrences.clear();
+            source.patch.turn_upserts.clear();
+            source.patch.turn_rewrites.push(UsageTurnRewriteWrite {
+                expected: expected_turn,
+                replacement: replacement_turn,
+            });
+            refresh_patch_counts(&mut source);
+            source
+        }
+
+        let fixture = Fixture::new();
+        fixture.add_source(1, Some("child"), 11);
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(
+                storage,
+                batch(
+                    "child",
+                    "root",
+                    source_commit(1, 11, "child", "root", 'a', true),
+                ),
+            )
+        })
+        .unwrap();
+
+        let initial_turn = {
+            let connection = fixture.ledger.connection().unwrap();
+            read_usage_turn_write(&connection, 1, 1, 1, "turn")
+                .unwrap()
+                .unwrap()
+        };
+        let visible_before = {
+            let connection = fixture.ledger.connection().unwrap();
+            let canonical_metrics: (i64, i64, i64, i64, i64, i64, i64, i64) = connection
+                .query_row(
+                    "SELECT count(*),coalesce(sum(input_tokens),0),
+                            coalesce(sum(cached_tokens),0),coalesce(sum(cache_write_tokens),0),
+                            coalesce(sum(output_tokens),0),coalesce(sum(reasoning_tokens),0),
+                            coalesce(sum(total_tokens),0),
+                            coalesce(sum(estimated_cost_nanos_usd),0)
+                     FROM usage_events WHERE source='codex' AND source_epoch=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let revision = connection
+                .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            let compaction = crate::codex::analytics::compaction_visibility_signature_for_owner(
+                &connection,
+                1,
+                crate::codex::normalization::USAGE_PARSER_VERSION,
+                "child",
+            )
+            .unwrap();
+            (revision, canonical_metrics, compaction)
+        };
+        assert_eq!(visible_before.0, 1);
+        let mut reduced_turn = initial_turn.clone();
+        reduced_turn.accounted.vector =
+            NormalizedTokenUsage::new(10, 2, Some(3), 3, 1, 13).unwrap();
+        reduced_turn.accounted.fingerprint =
+            usage_fingerprint(&reduced_turn.accounted.vector).to_vec();
+        reduced_turn.accounted_candidate_count = 2;
+        reduced_turn.quality_status = "conflict";
+        reduced_turn.updated_at_ms = 20;
+        let accepted = rewrite_commit(&fixture, initial_turn, reduced_turn.clone());
+        let accepted_outcome = with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", accepted))
+        })
+        .unwrap();
+        assert_eq!(accepted_outcome.data_revision, visible_before.0);
+        let accepted_turn = {
+            let connection = fixture.ledger.connection().unwrap();
+            read_usage_turn_write(&connection, 1, 1, 1, "turn")
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(accepted_turn, reduced_turn);
+        let visible_after = {
+            let connection = fixture.ledger.connection().unwrap();
+            let canonical_metrics = connection
+                .query_row(
+                    "SELECT count(*),coalesce(sum(input_tokens),0),
+                            coalesce(sum(cached_tokens),0),coalesce(sum(cache_write_tokens),0),
+                            coalesce(sum(output_tokens),0),coalesce(sum(reasoning_tokens),0),
+                            coalesce(sum(total_tokens),0),
+                            coalesce(sum(estimated_cost_nanos_usd),0)
+                     FROM usage_events WHERE source='codex' AND source_epoch=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let revision = connection
+                .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            let compaction = crate::codex::analytics::compaction_visibility_signature_for_owner(
+                &connection,
+                1,
+                crate::codex::normalization::USAGE_PARSER_VERSION,
+                "child",
+            )
+            .unwrap();
+            (revision, canonical_metrics, compaction)
+        };
+        assert_eq!(visible_after, visible_before);
+
+        let revision_before_rejection = accepted_outcome.data_revision;
+        let (checkpoint_before_rejection, state_before_rejection) = {
+            let connection = fixture.ledger.connection().unwrap();
+            (
+                read_usage_checkpoint(&connection, 1).unwrap().unwrap(),
+                read_usage_source_state(&connection, 1, 1).unwrap().unwrap(),
+            )
+        };
+        let mut changed_history = accepted_turn.clone();
+        changed_history.started_at_ms = Some(2);
+        let rejected = rewrite_commit(&fixture, accepted_turn.clone(), changed_history);
+        assert!(
+            with_codex(&fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", rejected))
+            })
+            .is_err()
+        );
+
+        let connection = fixture.ledger.connection().unwrap();
+        assert_eq!(
+            read_usage_turn_write(&connection, 1, 1, 1, "turn")
+                .unwrap()
+                .unwrap(),
+            accepted_turn
+        );
+        assert_eq!(
+            read_usage_checkpoint(&connection, 1).unwrap().unwrap(),
+            checkpoint_before_rejection
+        );
+        assert_eq!(
+            read_usage_source_state(&connection, 1, 1).unwrap().unwrap(),
+            state_before_rejection
+        );
+        let revision_after_rejection: i64 = connection
+            .query_row("SELECT data_revision FROM app_meta WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(revision_after_rejection, revision_before_rejection);
+    }
+
+    #[test]
+    fn compaction_storage_batch_write_budget() {
+        fn source_with_marker_count(fixture: &Fixture, count: usize) -> UsageSourceCommit {
+            fixture.add_source(1, Some("child"), 11);
+            fixture
+                .ledger
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE codex_source_files SET observed_size=10000 WHERE source_file_id=1",
+                    [],
+                )
+                .unwrap();
+            let mut source = source_commit(1, 11, "child", "root", 'a', false);
+            source.fixed_observed_raw_size = 10_000;
+            source.last_complete_offset = 10_000;
+            source.source_bytes_consumed = 10_000;
+            source.updated_state.resolved_through_offset = 10_000;
+            source.updated_state.observed_raw_size = 10_000;
+            source.updated_state.previous_total_offset = Some(10_000);
+            source.patch.marker_upserts = (0..count)
+                .map(|index| {
+                    let source_start_offset = 20 + i64::try_from(index).unwrap() * 2;
+                    UsageCompactionMarkerWrite {
+                        source_file_id: 1,
+                        file_generation: 1,
+                        source_start_offset,
+                        source_end_offset: source_start_offset + 1,
+                        owning_thread_id: "child".to_owned(),
+                        root_session_id: "root".to_owned(),
+                        occurred_at_ms: Some(source_start_offset),
+                        model: None,
+                        reasoning_effort: None,
+                        response_id: None,
+                        resolved_event_id: None,
+                        unknown_reason: Some("identity_missing"),
+                    }
+                })
+                .collect();
+            refresh_patch_counts(&mut source);
+            source
+        }
+
+        let accepted_fixture = Fixture::new();
+        let accepted = source_with_marker_count(&accepted_fixture, 2046);
+        assert_eq!(
+            accepted.write_unit_count,
+            MAX_USAGE_BATCH_WRITE_UNITS as i64
+        );
+        with_codex(&accepted_fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", accepted))
+        })
+        .unwrap();
+        let accepted_count: i64 = accepted_fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM codex_compaction_markers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(accepted_count, 2046);
+
+        accepted_fixture.add_source(2, Some("child"), 12);
+        let mut marker_only = source_commit(2, 12, "child", "root", 'a', false);
+        marker_only.patch.events.clear();
+        marker_only.patch.occurrences.clear();
+        marker_only
+            .patch
+            .marker_upserts
+            .push(UsageCompactionMarkerWrite {
+                source_file_id: 2,
+                file_generation: 1,
+                source_start_offset: 20,
+                source_end_offset: 21,
+                owning_thread_id: "child".to_owned(),
+                root_session_id: "root".to_owned(),
+                occurred_at_ms: Some(20),
+                model: None,
+                reasoning_effort: None,
+                response_id: None,
+                resolved_event_id: None,
+                unknown_reason: Some("identity_missing"),
+            });
+        refresh_patch_counts(&mut marker_only);
+        assert_eq!(
+            (
+                marker_only.canonical_event_count,
+                marker_only.occurrence_count,
+                marker_only.evidence_write_count,
+                marker_only.write_unit_count
+            ),
+            (0, 0, 1, 1)
+        );
+        with_codex(&accepted_fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", marker_only))
+        })
+        .unwrap();
+
+        accepted_fixture.add_source(3, Some("child"), 13);
+        let mut window_only = source_commit(3, 13, "child", "root", 'a', false);
+        window_only.patch.events.clear();
+        window_only.patch.occurrences.clear();
+        let window_state = crate::codex::ingestion::usage_processor::LegacyReconciliationWindow {
+            version: crate::codex::ingestion::usage_processor::LegacyReconciliationWindow::VERSION,
+            previous_total: crate::codex::usage::UsageValue::Missing,
+            current_total: crate::codex::usage::UsageValue::Missing,
+            last_usage: crate::codex::usage::UsageValue::Missing,
+            explicit_response_ids: Vec::new(),
+            legacy_covered_response_ids: Vec::new(),
+            proposal_event_ids: Vec::new(),
+            turn_accounted_before: NormalizedTokenUsage::zero(),
+            chain_state: crate::codex::ingestion::usage_processor::ChainState::Continuous,
+            closed: false,
+        };
+        window_only
+            .patch
+            .window_upserts
+            .push(UsageReconciliationWindowWrite {
+                source_file_id: 3,
+                file_generation: 1,
+                source_start_offset: 20,
+                source_end_offset: 21,
+                owning_thread_id: "child".to_owned(),
+                turn_key: None,
+                state_json: window_state.to_json().unwrap(),
+            });
+        refresh_patch_counts(&mut window_only);
+        assert_eq!(
+            (
+                window_only.canonical_event_count,
+                window_only.occurrence_count,
+                window_only.evidence_write_count,
+                window_only.write_unit_count
+            ),
+            (0, 0, 1, 1)
+        );
+        with_codex(&accepted_fixture.ledger, |storage| {
+            test_commit_group(storage, batch("child", "root", window_only))
+        })
+        .unwrap();
+        assert!(
+            with_codex(&accepted_fixture.ledger, |storage| {
+                test_commit_group(
+                    storage,
+                    UsageCommitBatch {
+                        ledger_epoch: 1,
+                        usage_parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
+                        thread_id: "child".to_owned(),
+                        root_session_id: "root".to_owned(),
+                        sources: Vec::new(),
+                    },
+                )
+            })
+            .is_err()
+        );
+
+        let rejected_fixture = Fixture::new();
+        let rejected = source_with_marker_count(&rejected_fixture, 2047);
+        assert_eq!(
+            rejected.write_unit_count,
+            MAX_USAGE_BATCH_WRITE_UNITS as i64 + 1
+        );
+        assert!(
+            with_codex(&rejected_fixture.ledger, |storage| {
+                test_commit_group(storage, batch("child", "root", rejected))
+            })
+            .is_err()
+        );
+        let rejected_state: (i64, i64, i64, i64) = rejected_fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM usage_events),
+                    (SELECT count(*) FROM codex_usage_event_occurrences),
+                    (SELECT count(*) FROM codex_compaction_markers),
+                    (SELECT committed_offset FROM codex_source_checkpoints
+                     WHERE source_file_id=1 AND consumer_kind='usage')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rejected_state, (0, 0, 0, 0));
+
+        use crate::codex::{
+            ingestion::usage_processor::{
+                Ownership, ReconciliationContext, RecordApplyOutcome, UsageContext, UsageProcessor,
+                UsageRecord, UsageSourceState,
+            },
+            usage::UsageValue,
+        };
+        let mut processor_state = UsageSourceState::default();
+        processor_state.active_model = Some("model".to_owned());
+        let mut processor = UsageProcessor::new(
+            UsageContext {
+                source_file_id: 10,
+                file_generation: 1,
+                owning_thread_id: "child".to_owned(),
+                root_session_id: "root".to_owned(),
+            },
+            processor_state,
+            ReconciliationContext::default(),
+        );
+        let ownership = Ownership::Owning {
+            thread_id: "child".to_owned(),
+        };
+        assert_eq!(
+            processor.try_process_record(
+                UsageRecord::TurnStarted {
+                    ownership: ownership.clone(),
+                    turn_id: Some("turn".to_owned()),
+                    timestamp_ms: Some(1),
+                    start_offset: 0,
+                },
+                MAX_USAGE_BATCH_WRITE_UNITS,
+            ),
+            RecordApplyOutcome::Applied
+        );
+        processor.observe_consumed_offset(5);
+        let baseline = NormalizedTokenUsage::new(10, 1, Some(1), 4, 1, 14).unwrap();
+        assert_eq!(
+            processor.try_process_record(
+                UsageRecord::TokenCount {
+                    ownership: ownership.clone(),
+                    timestamp_ms: Some(2),
+                    start_offset: 5,
+                    end_offset: 10,
+                    total: UsageValue::Valid(baseline),
+                    last: UsageValue::Missing,
+                },
+                MAX_USAGE_BATCH_WRITE_UNITS,
+            ),
+            RecordApplyOutcome::Applied
+        );
+        processor.observe_consumed_offset(10);
+        let state_before_oversized_record = processor.state().clone();
+        assert_eq!(
+            processor.try_process_record(
+                UsageRecord::TokenCount {
+                    ownership,
+                    timestamp_ms: Some(3),
+                    start_offset: 10,
+                    end_offset: 20,
+                    total: UsageValue::Valid(
+                        NormalizedTokenUsage::new(15, 2, Some(2), 6, 2, 21).unwrap(),
+                    ),
+                    last: UsageValue::Valid(
+                        NormalizedTokenUsage::new(5, 1, Some(1), 2, 1, 7).unwrap(),
+                    ),
+                },
+                0,
+            ),
+            RecordApplyOutcome::BudgetExceeded
+        );
+        assert_eq!(processor.state(), &state_before_oversized_record);
+        let unchanged = processor.finish();
+        assert!(unchanged.patch.events.is_empty());
+        assert!(unchanged.patch.occurrences.is_empty());
+        assert_eq!(unchanged.patch.turn_upserts[0].state_through_offset, 10);
+    }
+
+    #[test]
+    fn oversized_gap_turn_commit_completes_build_and_rejects_mixed_batches() {
+        let fixture = Fixture::new();
+        let oversized_bytes = i64::try_from(MAX_LEGAL_LINE_BYTES + 100).unwrap();
+        let last_complete_offset = 20 + oversized_bytes;
+        fixture.add_source(1, Some("child"), 11);
+        fixture.add_source(2, Some("child"), 12);
+        fixture
+            .ledger
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE codex_source_files SET observed_size=?1 WHERE source_file_id=1",
+                [last_complete_offset],
+            )
+            .unwrap();
+        let build_epoch = {
+            let mut connection = fixture.ledger.connection().unwrap();
+            crate::codex::storage::rebuild::tests::RebuildLedger::new(&mut connection)
+                .begin_or_resume(
+                    crate::codex::normalization::USAGE_PARSER_VERSION,
+                    &[1, 2],
+                    10,
+                )
+                .unwrap()
+                .build_epoch
+        };
+
+        let mut initial = source_commit(1, 11, "child", "root", 'a', true);
+        initial.expected_checkpoint.processing_status = CheckpointProcessingStatus::RebuildRequired;
+        initial.fixed_observed_raw_size = last_complete_offset;
+        initial.updated_state.observed_raw_size = last_complete_offset;
+        let mut initial_batch = batch("child", "root", initial);
+        initial_batch.ledger_epoch = build_epoch;
+        with_codex(&fixture.ledger, |storage| test_commit_group(storage, initial_batch))
+            .unwrap();
+
+        let (checkpoint, expected_state, mut open_turn) = {
+            let connection = fixture.ledger.connection().unwrap();
+            (
+                read_usage_checkpoint(&connection, 1).unwrap().unwrap(),
+                read_usage_source_state(&connection, build_epoch, 1)
+                    .unwrap()
+                    .unwrap(),
+                read_usage_turn_write(&connection, build_epoch, 1, 1, "turn")
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(checkpoint.committed_offset, 20);
+        assert_eq!(open_turn.status, UsageTurnStatus::Open);
+        open_turn.blocks.parser_gap = true;
+        open_turn.quality_status = "partial";
+        open_turn.state_through_offset = last_complete_offset;
+        open_turn.updated_at_ms = last_complete_offset;
+
+        let mut oversized = source_commit(1, 11, "child", "root", 'a', false);
+        oversized.expected_checkpoint = checkpoint;
+        oversized.expected_state = Some(expected_state.clone());
+        oversized.batch_start_offset = expected_state.resolved_through_offset;
+        oversized.fixed_observed_raw_size = last_complete_offset;
+        oversized.last_complete_offset = last_complete_offset;
+        oversized.source_bytes_consumed = oversized_bytes;
+        oversized.complete_line_count = 1;
+        oversized.fixed_view_exhausted = true;
+        oversized.tail_status = UsageTailStatus::None;
+        oversized.tail_start_offset = None;
+        oversized.patch = ReconciliationPatchWrite {
+            turn_upserts: vec![open_turn],
+            ..ReconciliationPatchWrite::default()
+        };
+        oversized.updated_state = expected_state;
+        oversized.updated_state.resolved_through_offset = last_complete_offset;
+        oversized.updated_state.observed_raw_size = last_complete_offset;
+        oversized.updated_state.raw_tail_status = UsageTailStatus::None;
+        oversized.updated_state.raw_tail_start_offset = None;
+        oversized.updated_state.chain_state =
+            UsageChainState::Interrupted(UsageGapReason::Oversized);
+        oversized.updated_state.updated_at_ms = last_complete_offset;
+        oversized.reconciliation_request =
+            crate::codex::ingestion::usage_processor::ReconciliationRequest::new(
+                Vec::new(),
+                vec![("child".to_owned(), Some("turn".to_owned()))],
+            );
+        oversized.next_guard_hash = Some(vec![9; 32]);
+        oversized.committed_at_ms = last_complete_offset;
+        refresh_patch_counts(&mut oversized);
+        assert_eq!(
+            (
+                oversized.canonical_event_count,
+                oversized.occurrence_count,
+                oversized.evidence_write_count,
+                oversized.write_unit_count,
+            ),
+            (0, 0, 1, 1)
+        );
+
+        let accepted_source = oversized.clone();
+        let mut oversized_batch = batch("child", "root", oversized);
+        oversized_batch.ledger_epoch = build_epoch;
+        with_codex(&fixture.ledger, |storage| {
+            test_commit_group(storage, oversized_batch)
+        })
+        .unwrap();
+
+        let connection = fixture.ledger.connection().unwrap();
+        let persisted_state = read_usage_source_state(&connection, build_epoch, 1)
+            .unwrap()
+            .unwrap();
+        let persisted_turn = read_usage_turn_write(&connection, build_epoch, 1, 1, "turn")
+            .unwrap()
+            .unwrap();
+        let build_completion: (String, Option<i64>) = connection
+            .query_row(
+                "SELECT completion_status,completed_through_offset
+                 FROM codex_usage_build_sources WHERE build_epoch=?1 AND source_file_id=1",
+                [build_epoch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted_state.chain_state,
+            UsageChainState::Interrupted(UsageGapReason::Oversized)
+        );
+        assert_eq!(persisted_state.resolved_through_offset, last_complete_offset);
+        assert!(persisted_turn.blocks.parser_gap);
+        assert_eq!(persisted_turn.quality_status, "partial");
+        assert_eq!(persisted_turn.state_through_offset, last_complete_offset);
+        assert_eq!(
+            read_usage_checkpoint(&connection, 1)
+                .unwrap()
+                .unwrap()
+                .committed_offset,
+            last_complete_offset
+        );
+        assert_eq!(build_completion, ("rebuilt".to_owned(), Some(last_complete_offset)));
+
+        let make_batch = |sources| UsageCommitBatch {
+            ledger_epoch: build_epoch,
+            usage_parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
+            thread_id: "child".to_owned(),
+            root_session_id: "root".to_owned(),
+            sources,
+        };
+        let mut ancestor_progress = accepted_source.clone();
+        ancestor_progress.patch = ReconciliationPatchWrite::default();
+        ancestor_progress.updated_state.chain_state = UsageChainState::Continuous;
+        ancestor_progress.updated_state.continuation_state =
+            UsageContinuationState::ReplayedAncestor;
+        ancestor_progress
+            .patch
+            .anomalies
+            .push(source_commit(2, 12, "child", "root", 'c', true).patch.anomalies[0].clone());
+        refresh_patch_counts(&mut ancestor_progress);
+        assert_eq!(ancestor_progress.write_unit_count, 0);
+        assert!(validate_batch(&make_batch(vec![ancestor_progress])).is_ok());
+
+        let mut metering_mixed = accepted_source.clone();
+        let mut metric = source_commit(2, 12, "child", "root", 'c', false);
+        metering_mixed.patch.events = std::mem::take(&mut metric.patch.events);
+        let mut occurrence = metric.patch.occurrences.remove(0);
+        occurrence.source_file_id = 1;
+        occurrence.file_generation = 1;
+        occurrence.source_start_offset = metering_mixed.batch_start_offset;
+        occurrence.source_end_offset = last_complete_offset;
+        metering_mixed.patch.occurrences.push(occurrence);
+        refresh_patch_counts(&mut metering_mixed);
+        assert!(validate_batch(&make_batch(vec![metering_mixed])).is_err());
+
+        let mut private_mixed = accepted_source.clone();
+        private_mixed
+            .patch
+            .marker_upserts
+            .push(UsageCompactionMarkerWrite {
+                source_file_id: 1,
+                file_generation: 1,
+                source_start_offset: private_mixed.batch_start_offset,
+                source_end_offset: last_complete_offset,
+                owning_thread_id: "child".to_owned(),
+                root_session_id: "root".to_owned(),
+                occurred_at_ms: Some(1),
+                model: None,
+                reasoning_effort: None,
+                response_id: None,
+                resolved_event_id: None,
+                unknown_reason: Some("identity_missing"),
+            });
+        refresh_patch_counts(&mut private_mixed);
+        assert!(validate_batch(&make_batch(vec![private_mixed])).is_err());
+
+        let second_source = source_commit(2, 12, "child", "root", 'c', false);
+        assert!(validate_batch(&make_batch(vec![accepted_source, second_source])).is_err());
     }
 }

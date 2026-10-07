@@ -4,21 +4,22 @@ use crate::domain::DomainError;
 use crate::usage::normalized::NormalizedTokenUsage;
 
 /// Parser version used by the current Codex rollout consumer.
-pub const USAGE_PARSER_VERSION: i64 = 11;
+pub const USAGE_PARSER_VERSION: i64 = 12;
 
-pub(crate) const USAGE_CANONICAL_ALGORITHM_VERSION: i64 = 5;
+pub(crate) const USAGE_CANONICAL_ALGORITHM_VERSION: i64 = 6;
 
 /// Return the canonical algorithm associated with a Codex parser version.
 pub(crate) const fn canonical_algorithm_for(parser_version: i64) -> Option<i64> {
     match parser_version {
         4 | 5 => Some(4),
-        6 | 7 | 8 | 9 | 10 | USAGE_PARSER_VERSION => Some(USAGE_CANONICAL_ALGORITHM_VERSION),
+        6 | 7 | 8 | 9 | 10 | 11 => Some(5),
+        USAGE_PARSER_VERSION => Some(USAGE_CANONICAL_ALGORITHM_VERSION),
         _ => None,
     }
 }
 
 /// Stable fingerprint used by Codex source-state proofs.  Keep the byte
-/// order and algorithm-version prefix identical to the established v5 form.
+/// order and algorithm-version prefix identical to the established v6 form.
 pub(crate) fn usage_fingerprint(value: &NormalizedTokenUsage) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(8 * 7 + 1);
     bytes.extend_from_slice(&USAGE_CANONICAL_ALGORITHM_VERSION.to_be_bytes());
@@ -123,9 +124,9 @@ mod tests {
     }
 
     #[test]
-    fn t_dc_010_fingerprint_is_v5_and_distinguishes_states() {
-        assert_eq!(USAGE_PARSER_VERSION, 11);
-        assert_eq!(USAGE_CANONICAL_ALGORITHM_VERSION, 5);
+    fn t_dc_010_fingerprint_is_v6_and_distinguishes_states() {
+        assert_eq!(USAGE_PARSER_VERSION, 12);
+        assert_eq!(USAGE_CANONICAL_ALGORITHM_VERSION, 6);
         assert_eq!(canonical_algorithm_for(1), None);
         assert_eq!(canonical_algorithm_for(2), None);
         assert_eq!(canonical_algorithm_for(3), None);
@@ -136,6 +137,7 @@ mod tests {
         assert_eq!(canonical_algorithm_for(9), Some(5));
         assert_eq!(canonical_algorithm_for(10), Some(5));
         assert_eq!(canonical_algorithm_for(11), Some(5));
+        assert_eq!(canonical_algorithm_for(12), Some(6));
         assert_eq!(
             usage_fingerprint(&CodexRolloutAdapter::normalize(raw(Some(2_000))).unwrap()),
             usage_fingerprint(&CodexRolloutAdapter::normalize(raw(Some(2_000))).unwrap())

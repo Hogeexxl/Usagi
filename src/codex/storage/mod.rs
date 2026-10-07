@@ -24,6 +24,7 @@ pub(crate) use binding::{CodexBindingOutcome, CodexBindingStatus};
 
 #[derive(Debug)]
 pub(crate) enum CodexStorageError {
+    ReconciliationPlanStale,
     SourceMismatch,
     BindingUnbound,
     BindingSourceChanged,
@@ -66,18 +67,24 @@ impl std::error::Error for CodexStorageError {
             Self::SourceMismatch
             | Self::BindingUnbound
             | Self::BindingSourceChanged
+            | Self::ReconciliationPlanStale
             | Self::InvalidBindingState => None,
         }
     }
 }
 
 impl CodexStorageError {
+    pub(crate) fn reconciliation_plan_stale(&self) -> bool {
+        matches!(self, Self::ReconciliationPlanStale)
+    }
+
     pub(crate) fn requires_rebuild(&self) -> bool {
         matches!(self, Self::Storage(error) if error.requires_usage_rebuild())
     }
 
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::ReconciliationPlanStale => "USAGE_RECONCILIATION_PLAN_STALE",
             Self::BindingUnbound => "SOURCE_UNBOUND",
             Self::BindingSourceChanged => "SOURCE_CHANGED",
             Self::SourceMismatch | Self::InvalidBindingState => "CODEX_SOURCE_BINDING_FAILED",
@@ -225,6 +232,17 @@ impl<'a> CodexStorage<'a> {
         usage::load_usage_scan_state_exact(self, source_file_ids, parser_version, expected_epoch)
     }
 
+    pub(crate) fn load_usage_reconciliation_context(
+        &self,
+        ledger_epoch: i64,
+        context: crate::codex::ingestion::usage_processor::UsageContext,
+        request: crate::codex::ingestion::usage_processor::ReconciliationRequest,
+        basic_proof: usage::UsageReconciliationBasicProof,
+    ) -> Result<usage::UsageReconciliationContext, CodexStorageError> {
+        self.require_ready()?;
+        usage::load_usage_reconciliation_context(self, ledger_epoch, context, request, basic_proof)
+    }
+
     pub(crate) fn commit_group(
         &self,
         batch: usage::UsageCommitBatch,
@@ -291,10 +309,11 @@ impl<'a> CodexStorage<'a> {
         &self,
         thread_id: &str,
         error_code: &str,
+        diagnostic: Option<usage::UsageQuarantineDiagnostic>,
         now_ms: i64,
     ) -> Result<usize, CodexStorageError> {
         self.require_ready()?;
-        rebuild::quarantine_thread(self, thread_id, error_code, now_ms)
+        rebuild::quarantine_thread(self, thread_id, error_code, diagnostic, now_ms)
     }
 
     pub(crate) fn active_quarantine_state(

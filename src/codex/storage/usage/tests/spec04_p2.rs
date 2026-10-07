@@ -70,7 +70,8 @@ fn add_bulk_active_carry_facts(
     }
 
     let template_turn = source_commit(source_id, 11, "child", "root", 'a', true)
-        .turns
+        .patch
+        .turn_upserts
         .into_iter()
         .next()
         .unwrap();
@@ -98,6 +99,7 @@ fn add_bulk_active_carry_facts(
             kind: UsageAnomalyKind::TurnReplaced,
             severity_error: false,
             source_start_offset: Some(index * 10 + 2),
+            turn_key: None,
         };
         write_anomaly(&transaction, 1, "child", source_id, 1, &anomaly).unwrap();
     }
@@ -113,19 +115,25 @@ fn prepare_carry_fixture(
     fixture.add_source(1, Some("child"), 11);
     fixture.add_source(2, Some("child"), 22);
     with_codex(&fixture.ledger, |storage| {
-        storage.commit_group(batch(
-            "child",
-            "root",
-            source_commit(1, 11, "child", "root", 'a', true),
-        ))
+        test_commit_group(
+            storage,
+            batch(
+                "child",
+                "root",
+                source_commit(1, 11, "child", "root", 'a', true),
+            ),
+        )
     })
     .unwrap();
     with_codex(&fixture.ledger, |storage| {
-        storage.commit_group(batch(
-            "child",
-            "root",
-            source_commit(2, 22, "child", "root", 'c', false),
-        ))
+        test_commit_group(
+            storage,
+            batch(
+                "child",
+                "root",
+                source_commit(2, 22, "child", "root", 'c', false),
+            ),
+        )
     })
     .unwrap();
 
@@ -170,13 +178,16 @@ fn prepare_carry_fixture(
     source2.updated_state.previous_total_offset = Some(active_offset);
     source2.next_guard_hash = Some(vec![7; 32]);
     with_codex(&fixture.ledger, |storage| {
-        storage.commit_group(UsageCommitBatch {
-            ledger_epoch: 2,
-            usage_parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
-            thread_id: "child".to_owned(),
-            root_session_id: "root".to_owned(),
-            sources: vec![source2],
-        })
+        test_commit_group(
+            storage,
+            UsageCommitBatch {
+                ledger_epoch: 2,
+                usage_parser_version: crate::codex::normalization::USAGE_PARSER_VERSION,
+                thread_id: "child".to_owned(),
+                root_session_id: "root".to_owned(),
+                sources: vec![source2],
+            },
+        )
     })
     .unwrap();
 
@@ -360,11 +371,14 @@ fn t_s04_048_planner_conflict_priority_matrix() {
     let offset_gt_raw = Fixture::new();
     offset_gt_raw.add_source(20, Some("child"), 41);
     with_codex(&offset_gt_raw.ledger, |storage| {
-        storage.commit_group(batch(
-            "child",
-            "root",
-            source_commit(20, 41, "child", "root", 'e', false),
-        ))
+        test_commit_group(
+            storage,
+            batch(
+                "child",
+                "root",
+                source_commit(20, 41, "child", "root", 'e', false),
+            ),
+        )
     })
     .unwrap();
     {
@@ -392,11 +406,14 @@ fn t_s04_048_planner_conflict_priority_matrix() {
     let verify_tail = Fixture::new();
     verify_tail.add_source(30, Some("child"), 51);
     with_codex(&verify_tail.ledger, |storage| {
-        storage.commit_group(batch(
-            "child",
-            "root",
-            source_commit(30, 51, "child", "root", 'f', false),
-        ))
+        test_commit_group(
+            storage,
+            batch(
+                "child",
+                "root",
+                source_commit(30, 51, "child", "root", 'f', false),
+            ),
+        )
     })
     .unwrap();
     {
@@ -431,11 +448,14 @@ fn t_s04_048_planner_conflict_priority_matrix() {
     let incremental = Fixture::new();
     incremental.add_source(40, Some("child"), 61);
     with_codex(&incremental.ledger, |storage| {
-        storage.commit_group(batch(
-            "child",
-            "root",
-            source_commit(40, 61, "child", "root", '1', false),
-        ))
+        test_commit_group(
+            storage,
+            batch(
+                "child",
+                "root",
+                source_commit(40, 61, "child", "root", '1', false),
+            ),
+        )
     })
     .unwrap();
     assert_eq!(

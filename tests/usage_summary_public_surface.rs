@@ -107,6 +107,7 @@ fn t_td_p4_detail_rust_01_session_detail_public_surface() {
             model: "gpt-4o".into(),
             reasoning_effort: None,
             usage: valid_totals.clone(),
+            compaction_tokens: None,
         }],
         self_usage: valid_totals.clone(),
         subagent_count: 1,
@@ -141,6 +142,7 @@ fn t_td_p4_detail_rust_01_session_detail_public_surface() {
         UsageFilter::default(),
         None,
         "thread-root".into(),
+        &[],
     );
     assert!(snapshot_res.is_err());
 }

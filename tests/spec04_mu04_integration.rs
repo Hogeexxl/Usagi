@@ -35,7 +35,7 @@ const CHILD_REPLAY_TURN: &str = "00000000-05dc-7000-8000-000000000104";
 const CHILD_SOL_TURN: &str = "00000000-0bb8-7000-8000-000000000105";
 const CHILD_REVIEW_TURN: &str = "00000000-0fa0-7000-8000-000000000106";
 const RESERVE_TURN: &str = "00000000-1388-7000-8000-000000000107";
-const TARGET_PRICING_CATALOG_VERSION: i64 = 4;
+const TARGET_PRICING_CATALOG_VERSION: i64 = 7;
 
 struct TempRoot(PathBuf);
 
@@ -514,7 +514,7 @@ async fn t_mu04_f01_single_fixture_closes_scanner_db_aggregate_api_contract() {
         Some(330_000_000)
     );
     let detail = usage
-        .session_detail_snapshot(range, UsageFilter::default(), None, ROOT.to_owned())
+        .session_detail_snapshot(range, UsageFilter::default(), None, ROOT.to_owned(), &[])
         .expect("aggregate detail")
         .value;
     assert_eq!(detail.main.inclusive_usage.total_tokens, 135_000);

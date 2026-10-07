@@ -108,15 +108,45 @@ pub(super) fn record_source_observations(
         CodexStorageError::Storage(StorageError::invalid_state(error.to_string()))
     })?;
     let mut tx = storage.begin_write_txn()?;
+    let compaction_before = tx.with_private_state(compaction_visibility_signature)?;
     let outcome = tx.with_private_state(|connection| {
         source_observations_private(connection, &batch, usage_carry_proofs)
             .map_err(CodexStorageError::from)
     })?;
-    if let Some(build_epoch) = tx.usage_epoch_state()?.build_epoch {
+    let epoch = tx.usage_epoch_state()?;
+    crate::codex::storage::rebuild::delete_orphan_events(
+        &mut tx,
+        epoch.active_epoch,
+        crate::source::UsageWriteTarget::Active,
+    )?;
+    if let Some(build_epoch) = epoch.build_epoch {
         crate::codex::storage::rebuild::delete_orphan_build_events(&mut tx, build_epoch)?;
+    }
+    let compaction_after = tx.with_private_state(compaction_visibility_signature)?;
+    if compaction_before != compaction_after {
+        tx.bump_data_revision()?;
     }
     tx.commit()?;
     Ok(outcome)
+}
+
+fn compaction_visibility_signature(
+    connection: &Connection,
+) -> Result<crate::codex::analytics::CompactionVisibilitySignature, CodexStorageError> {
+    let (active_epoch, active_parser): (i64, i64) = connection
+        .query_row(
+            "SELECT active_epoch,active_parser_version FROM source_usage_epochs
+             WHERE source='codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(CodexStorageError::from)?;
+    crate::codex::analytics::compaction_visibility_signature(
+        connection,
+        active_epoch,
+        active_parser,
+    )
+    .map_err(CodexStorageError::from)
 }
 
 pub(super) fn load_metadata_scan_state(
@@ -269,6 +299,27 @@ fn source_observations_private(
             || old_area != Some(observation.source_area);
         let replaced = plan.replaced;
 
+        if replaced {
+            let old_generation = existing
+                .iter()
+                .find(|source| source.source_file_id == plan.source_file_id)
+                .ok_or_else(|| invalid_state("observation plan references an unknown source"))?
+                .file_generation;
+            let active_epoch: i64 = transaction.query_row(
+                "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| row.get(0),
+            )?;
+            if active_epoch > 0 {
+                super::usage::cleanup_private_source_generation(
+                    transaction,
+                    active_epoch,
+                    plan.source_file_id,
+                    old_generation,
+                )?;
+            }
+        }
+
         transaction.execute(
             "UPDATE codex_source_files SET
                 thread_id = ?2,
@@ -372,6 +423,19 @@ fn source_observations_private(
                  WHERE source_file_id = ?1 AND file_status = 'present'",
                 [source.source_file_id],
             )?;
+            let active_epoch: i64 = transaction.query_row(
+                "SELECT active_epoch FROM source_usage_epochs WHERE source='codex'",
+                [],
+                |row| row.get(0),
+            )?;
+            if active_epoch > 0 {
+                transaction.execute(
+                    "DELETE FROM codex_usage_event_holds
+                     WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                       AND file_generation=?3 AND hold_reason='replay'",
+                    params![active_epoch, source.source_file_id, source.file_generation],
+                )?;
+            }
         }
     }
 

@@ -227,6 +227,7 @@ export type SessionRowsResponse = {
 export type MainModelUsageDto = {
   model: string;
   reasoning_effort: string | null;
+  compaction_tokens: number | null;
   usage: UsageDto;
 };
 
@@ -256,6 +257,7 @@ export type SubagentDetailDto = {
   model_usage: Array<{
     model: string;
     reasoning_effort: string | null;
+    compaction_tokens: number | null;
     last_activity_at_ms: number;
     usage: UsageDto;
   }>;

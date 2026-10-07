@@ -20,22 +20,13 @@ use super::{
         UsageSourceCommitDto,
     },
     usage_processor::{
-        Anomaly, AnomalyCode, ClosedTurn, CompensationBlocks, GapKind, TurnEndStatus,
-        TurnModelState, TurnReasoningEffortState, TurnState,
+        Anomaly, AnomalyCode, CompensationBlocks, GapKind, LegacyWindowWrite, MarkerUnknownReason,
+        PersistedTurnSnapshot, PersistedTurnStatus, TurnModelState, TurnReasoningEffortState,
+        TurnRewrite, UsageEventHoldReason,
     },
 };
 
 type BuildResult<T> = Result<T, &'static str>;
-type TurnCommon = (
-    Option<storage_usage::UsageSnapshot>,
-    Option<storage_usage::UsageSnapshot>,
-    storage_usage::UsageSnapshot,
-    storage_usage::UsageTurnModelState,
-    storage_usage::UsageTurnReasoningEffortState,
-    bool,
-    storage_usage::UsageCompensationBlocks,
-    &'static str,
-);
 
 pub(crate) fn commit_group(
     storage: &crate::codex::storage::CodexStorage<'_>,
@@ -72,29 +63,36 @@ pub(crate) fn build_batch(
 }
 
 fn source_commit(
-    dto: UsageSourceCommitDto,
+    mut dto: UsageSourceCommitDto,
 ) -> BuildResult<(i64, i64, String, String, storage_usage::UsageSourceCommit)> {
     if dto.parser_version != USAGE_PARSER_VERSION {
         return Err("unexpected usage parser version");
     }
+    dto.patch.fold();
     let expected_state = dto.expected_state.as_ref().map(source_state).transpose()?;
     let updated_state = source_state(&dto.updated_state)?;
-    let mut turns = dto
-        .closed_turns
-        .iter()
-        .map(|turn| closed_turn(turn, dto.last_complete_offset, dto.committed_at_ms))
-        .collect::<BuildResult<Vec<_>>>()?;
-    if let Some(turn) = dto.open_turn.as_ref() {
-        turns.push(open_turn(
-            turn,
-            dto.last_complete_offset,
-            dto.committed_at_ms,
-        )?);
+    let counts = dto
+        .patch
+        .counts()
+        .ok_or("usage reconciliation patch count overflow")?;
+    if (
+        dto.canonical_event_count,
+        dto.occurrence_count,
+        dto.evidence_write_count,
+        dto.write_unit_count,
+    ) != (
+        counts.canonical_event_count,
+        counts.occurrence_count,
+        counts.evidence_write_count,
+        counts.write_unit_count,
+    ) {
+        return Err("usage reconciliation patch counts do not match DTO");
     }
 
     let pricing = BundledPricingRepository::new();
     let estimator = CostEstimator::new();
     let events = dto
+        .patch
         .events
         .iter()
         .map(|event| {
@@ -122,6 +120,7 @@ fn source_commit(
         })
         .collect::<BuildResult<Vec<_>>>()?;
     let occurrences = dto
+        .patch
         .occurrences
         .iter()
         .map(|occurrence| {
@@ -136,6 +135,94 @@ fn source_commit(
             })
         })
         .collect::<BuildResult<Vec<_>>>()?;
+    let facts = dto
+        .patch
+        .facts
+        .iter()
+        .map(|fact| storage_usage::UsageEventFactWrite {
+            event_id: fact.event_id.clone(),
+            owning_thread_id: fact.owning_thread_id.clone(),
+            response_id: fact.response_id.clone(),
+            evidence_kind: fact.evidence_kind,
+            operation: fact.operation,
+        })
+        .collect::<Vec<_>>();
+    let marker_upserts = dto
+        .patch
+        .marker_updates
+        .iter()
+        .map(marker_write)
+        .collect::<BuildResult<Vec<_>>>()?;
+    let window_upserts = dto
+        .patch
+        .window_updates
+        .iter()
+        .map(window_write)
+        .collect::<BuildResult<Vec<_>>>()?;
+    let turn_upserts = dto
+        .patch
+        .turn_upserts
+        .iter()
+        .map(|turn| persisted_turn(turn, dto.committed_at_ms))
+        .collect::<BuildResult<Vec<_>>>()?;
+    let turn_rewrites = dto
+        .patch
+        .turn_rewrites
+        .iter()
+        .map(|rewrite| turn_rewrite(rewrite, dto.committed_at_ms))
+        .collect::<BuildResult<Vec<_>>>()?;
+    let delete_markers = dto
+        .patch
+        .delete_markers
+        .iter()
+        .map(|key| {
+            Ok(storage_usage::UsagePrivateRowKey {
+                source_file_id: key.source_file_id,
+                file_generation: key.file_generation,
+                source_start_offset: i64::try_from(key.source_start_offset)
+                    .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+            })
+        })
+        .collect::<BuildResult<Vec<_>>>()?;
+    let delete_windows = dto
+        .patch
+        .delete_windows
+        .iter()
+        .map(|key| {
+            Ok(storage_usage::UsagePrivateRowKey {
+                source_file_id: key.source_file_id,
+                file_generation: key.file_generation,
+                source_start_offset: i64::try_from(key.source_start_offset)
+                    .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+            })
+        })
+        .collect::<BuildResult<Vec<_>>>()?;
+    let delete_holds = dto
+        .patch
+        .delete_holds
+        .iter()
+        .map(|key| {
+            (
+                key.source_file_id,
+                key.file_generation,
+                key.event_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let hold_upserts = dto
+        .patch
+        .hold_updates
+        .iter()
+        .map(|hold| storage_usage::UsageEventHoldWrite {
+            source_file_id: hold.source_file_id,
+            file_generation: hold.file_generation,
+            event_id: hold.event_id.clone(),
+            hold_reason: match hold.hold_reason {
+                UsageEventHoldReason::Replay => storage_usage::UsageEventHoldReason::Replay,
+                UsageEventHoldReason::Carry => storage_usage::UsageEventHoldReason::Carry,
+            },
+        })
+        .collect::<Vec<_>>();
     let skill_events = dto
         .skill_events
         .iter()
@@ -156,6 +243,7 @@ fn source_commit(
         })
         .collect::<BuildResult<Vec<_>>>()?;
     let anomalies = dto
+        .patch
         .anomalies
         .iter()
         .map(|anomaly| anomaly_write(anomaly, &dto))
@@ -184,7 +272,13 @@ fn source_commit(
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
         complete_line_count: i64::try_from(dto.complete_line_count)
             .map_err(|_| "usage count exceeds SQLite INTEGER")?,
-        candidate_count: i64::try_from(dto.candidate_count)
+        canonical_event_count: i64::try_from(dto.canonical_event_count)
+            .map_err(|_| "usage count exceeds SQLite INTEGER")?,
+        occurrence_count: i64::try_from(dto.occurrence_count)
+            .map_err(|_| "usage count exceeds SQLite INTEGER")?,
+        evidence_write_count: i64::try_from(dto.evidence_write_count)
+            .map_err(|_| "usage count exceeds SQLite INTEGER")?,
+        write_unit_count: i64::try_from(dto.write_unit_count)
             .map_err(|_| "usage count exceeds SQLite INTEGER")?,
         replayed_prefix_bytes: i64::try_from(dto.replayed_prefix_bytes)
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
@@ -197,11 +291,25 @@ fn source_commit(
             .map(i64::try_from)
             .transpose()
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
-        events,
-        occurrences,
+        patch: storage_usage::ReconciliationPatchWrite {
+            delete_event_ids: dto.patch.delete_event_ids,
+            delete_markers,
+            delete_windows,
+            delete_holds,
+            events,
+            occurrences,
+            facts,
+            marker_upserts,
+            window_upserts,
+            hold_upserts,
+            turn_upserts,
+            turn_rewrites,
+            anomalies,
+            ..storage_usage::ReconciliationPatchWrite::default()
+        },
         skill_events,
-        turns,
-        anomalies,
+        reconciliation_request: dto.reconciliation_request,
+        reconciliation_expected_fingerprint: dto.reconciliation_expected_fingerprint,
         updated_state,
         next_guard_hash: dto.next_guard_hash,
         committed_at_ms: dto.committed_at_ms,
@@ -313,6 +421,11 @@ fn source_state(value: &SourceStateProof) -> BuildResult<storage_usage::UsageSou
             .map(i64::try_from)
             .transpose()
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+        reconciliation_state_json: value
+            .processor_state
+            .reconciliation_carry
+            .to_json()
+            .map_err(|_| "invalid usage reconciliation carry")?,
         updated_at_ms: value.updated_at_ms,
     })
 }
@@ -334,7 +447,11 @@ fn chain_state(state: super::usage_processor::ChainState) -> storage_usage::Usag
     }
 }
 
-fn turn_common(turn: &TurnState, through: u64, updated_at: i64) -> BuildResult<TurnCommon> {
+fn persisted_turn(
+    snapshot: &PersistedTurnSnapshot,
+    updated_at: i64,
+) -> BuildResult<storage_usage::UsageTurnWrite> {
+    let turn = &snapshot.state;
     let model_state = match &turn.model_state {
         TurnModelState::None => storage_usage::UsageTurnModelState::None,
         TurnModelState::Single(value) => storage_usage::UsageTurnModelState::Single(value.clone()),
@@ -348,111 +465,109 @@ fn turn_common(turn: &TurnState, through: u64, updated_at: i64) -> BuildResult<T
         TurnReasoningEffortState::Mixed => storage_usage::UsageTurnReasoningEffortState::Mixed,
     };
     let blocks = blocks(turn.blocks);
-    let quality = if blocks == storage_usage::UsageCompensationBlocks::default()
-        && !turn.unresolved_model_seen
-    {
-        "complete"
-    } else {
-        "partial"
-    };
-    let _ = (through, updated_at);
-    Ok((
-        turn.start_total.as_ref().map(snapshot),
-        turn.last_total.as_ref().map(snapshot),
-        snapshot(&turn.accounted),
-        model_state,
-        reasoning,
-        turn.unresolved_reasoning_effort_seen,
-        blocks,
-        quality,
-    ))
-}
-
-fn open_turn(
-    turn: &TurnState,
-    through: u64,
-    updated_at: i64,
-) -> BuildResult<storage_usage::UsageTurnWrite> {
-    let (
-        start_total,
-        last_total,
-        accounted,
-        model_state,
-        reasoning_effort_state,
-        unresolved_reasoning_effort_seen,
-        blocks,
-        quality_status,
-    ) = turn_common(turn, through, updated_at)?;
     Ok(storage_usage::UsageTurnWrite {
+        source_file_id: snapshot.key.source_file_id,
+        file_generation: snapshot.key.file_generation,
+        thread_id: snapshot.owning_thread_id.clone(),
         turn_key: turn.turn_key.clone(),
         raw_turn_id: turn.raw_turn_id.clone(),
         started_at_ms: turn.started_at_ms,
-        ended_at_ms: None,
+        ended_at_ms: snapshot.ended_at_ms,
         start_offset: i64::try_from(turn.start_offset)
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
-        end_offset: None,
-        status: storage_usage::UsageTurnStatus::Open,
-        start_total,
-        last_total,
-        accounted,
+        end_offset: snapshot
+            .end_offset
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+        status: match snapshot.status {
+            PersistedTurnStatus::Open => storage_usage::UsageTurnStatus::Open,
+            PersistedTurnStatus::Completed => storage_usage::UsageTurnStatus::Completed,
+            PersistedTurnStatus::Aborted => storage_usage::UsageTurnStatus::Aborted,
+            PersistedTurnStatus::Failed => storage_usage::UsageTurnStatus::Failed,
+        },
+        start_total: turn.start_total.as_ref().map(snapshot_usage),
+        last_total: turn.last_total.as_ref().map(snapshot_usage),
+        accounted: snapshot_usage(&turn.accounted),
         accounted_candidate_count: i64::try_from(turn.accounted_candidate_count)
             .map_err(|_| "usage count exceeds SQLite INTEGER")?,
         model_state,
-        reasoning_effort_state,
-        unresolved_reasoning_effort_seen,
+        reasoning_effort_state: reasoning,
+        unresolved_reasoning_effort_seen: turn.unresolved_reasoning_effort_seen,
         unresolved_model_seen: turn.unresolved_model_seen,
         blocks,
-        quality_status,
-        state_through_offset: i64::try_from(through)
+        quality_status: match snapshot.quality_status.as_str() {
+            "complete" => "complete",
+            "partial" => "partial",
+            "conflict" => "conflict",
+            _ => return Err("invalid persisted turn quality status"),
+        },
+        state_through_offset: i64::try_from(snapshot.state_through_offset)
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
         updated_at_ms: updated_at,
     })
 }
 
-fn closed_turn(
-    turn: &ClosedTurn,
-    through: u64,
+fn turn_rewrite(
+    rewrite: &TurnRewrite,
     updated_at: i64,
-) -> BuildResult<storage_usage::UsageTurnWrite> {
-    let (
-        start_total,
-        last_total,
-        accounted,
-        model_state,
-        reasoning_effort_state,
-        unresolved_reasoning_effort_seen,
-        blocks,
-        quality_status,
-    ) = turn_common(&turn.turn, through, updated_at)?;
-    Ok(storage_usage::UsageTurnWrite {
-        turn_key: turn.turn.turn_key.clone(),
-        raw_turn_id: turn.turn.raw_turn_id.clone(),
-        started_at_ms: turn.turn.started_at_ms,
-        ended_at_ms: turn.ended_at_ms,
-        start_offset: i64::try_from(turn.turn.start_offset)
+) -> BuildResult<storage_usage::UsageTurnRewriteWrite> {
+    Ok(storage_usage::UsageTurnRewriteWrite {
+        expected: persisted_turn(&rewrite.expected, updated_at)?,
+        replacement: persisted_turn(&rewrite.replacement, updated_at)?,
+    })
+}
+
+fn snapshot_usage(value: &crate::usage::NormalizedTokenUsage) -> storage_usage::UsageSnapshot {
+    storage_usage::UsageSnapshot {
+        vector: value.clone(),
+        fingerprint: usage_fingerprint(value).to_vec(),
+    }
+}
+
+fn marker_write(
+    marker: &super::usage_processor::CompactionMarkerWrite,
+) -> BuildResult<storage_usage::UsageCompactionMarkerWrite> {
+    Ok(storage_usage::UsageCompactionMarkerWrite {
+        source_file_id: marker.source_file_id,
+        file_generation: marker.file_generation,
+        source_start_offset: i64::try_from(marker.source_start_offset)
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
-        end_offset: Some(
-            i64::try_from(turn.end_offset).map_err(|_| "usage offset exceeds SQLite INTEGER")?,
-        ),
-        status: match turn.status {
-            TurnEndStatus::Completed => storage_usage::UsageTurnStatus::Completed,
-            TurnEndStatus::Aborted => storage_usage::UsageTurnStatus::Aborted,
-            TurnEndStatus::Failed => storage_usage::UsageTurnStatus::Failed,
-        },
-        start_total,
-        last_total,
-        accounted,
-        accounted_candidate_count: i64::try_from(turn.turn.accounted_candidate_count)
-            .map_err(|_| "usage count exceeds SQLite INTEGER")?,
-        model_state,
-        reasoning_effort_state,
-        unresolved_reasoning_effort_seen,
-        unresolved_model_seen: turn.turn.unresolved_model_seen,
-        blocks,
-        quality_status,
-        state_through_offset: i64::try_from(through)
+        source_end_offset: i64::try_from(marker.source_end_offset)
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
-        updated_at_ms: updated_at,
+        owning_thread_id: marker.owning_thread_id.clone(),
+        root_session_id: marker.root_session_id.clone(),
+        occurred_at_ms: marker.occurred_at_ms,
+        model: marker.model.clone(),
+        reasoning_effort: marker.reasoning_effort.clone(),
+        response_id: marker.response_id.clone(),
+        resolved_event_id: marker.resolved_event_id.clone(),
+        unknown_reason: marker.unknown_reason.map(|reason| match reason {
+            MarkerUnknownReason::UsageMissing => "usage_missing",
+            MarkerUnknownReason::IdentityMissing => "identity_missing",
+            MarkerUnknownReason::UsageInvalid => "usage_invalid",
+            MarkerUnknownReason::TimeMissing => "time_missing",
+            MarkerUnknownReason::ModelUnresolved => "model_unresolved",
+        }),
+    })
+}
+
+fn window_write(
+    window: &LegacyWindowWrite,
+) -> BuildResult<storage_usage::UsageReconciliationWindowWrite> {
+    Ok(storage_usage::UsageReconciliationWindowWrite {
+        source_file_id: window.source_file_id,
+        file_generation: window.file_generation,
+        source_start_offset: i64::try_from(window.source_start_offset)
+            .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+        source_end_offset: i64::try_from(window.source_end_offset)
+            .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+        owning_thread_id: window.owning_thread_id.clone(),
+        turn_key: window.turn_key.clone(),
+        state_json: window
+            .state
+            .to_json()
+            .map_err(|_| "invalid usage reconciliation window")?,
     })
 }
 
@@ -472,6 +587,22 @@ fn anomaly_write(
     anomaly: &Anomaly,
     dto: &UsageSourceCommitDto,
 ) -> BuildResult<storage_usage::UsageAnomalyWrite> {
+    anomaly_write_for(
+        anomaly,
+        dto.source_file_id,
+        dto.expected_file_generation,
+        &dto.owning_thread_id,
+        dto.committed_at_ms,
+    )
+}
+
+pub(super) fn anomaly_write_for(
+    anomaly: &Anomaly,
+    source_file_id: i64,
+    file_generation: i64,
+    owning_thread_id: &str,
+    detected_at_ms: i64,
+) -> BuildResult<storage_usage::UsageAnomalyWrite> {
     let kind = match anomaly.code {
         AnomalyCode::UsageTimeMissing => storage_usage::UsageAnomalyKind::UsageTimeMissing,
         AnomalyCode::RequiredTotalInvalid => storage_usage::UsageAnomalyKind::RequiredTotalInvalid,
@@ -489,29 +620,52 @@ fn anomaly_write(
         AnomalyCode::TurnIdMismatch => storage_usage::UsageAnomalyKind::TurnIdMismatch,
         AnomalyCode::TurnReplaced => storage_usage::UsageAnomalyKind::TurnReplaced,
         AnomalyCode::ArithmeticOverflow => storage_usage::UsageAnomalyKind::ArithmeticOverflow,
+        AnomalyCode::ReconciliationPatchTooLarge => {
+            storage_usage::UsageAnomalyKind::ReconciliationPatchTooLarge
+        }
+        AnomalyCode::ResponseUsageConflict => {
+            storage_usage::UsageAnomalyKind::ResponseUsageConflict
+        }
+        AnomalyCode::ResponseOwnershipMismatch => {
+            storage_usage::UsageAnomalyKind::ResponseOwnershipMismatch
+        }
+        AnomalyCode::CompactionIdentityMismatch => {
+            storage_usage::UsageAnomalyKind::CompactionIdentityMismatch
+        }
+        AnomalyCode::LegacyCoverageAmbiguous => {
+            storage_usage::UsageAnomalyKind::LegacyCoverageAmbiguous
+        }
+        AnomalyCode::ThreadUsageMismatch => storage_usage::UsageAnomalyKind::ThreadUsageMismatch,
     };
     let mut encoder = AnomalyEncoder::new(b"usage-anomaly-v1");
     encoder.byte(anomaly_code(anomaly.code));
-    encoder.i64(dto.source_file_id);
-    encoder.i64(dto.expected_file_generation);
+    encoder.i64(source_file_id);
+    encoder.i64(file_generation);
     encoder.optional_u64(anomaly.source_start_offset);
-    encoder.text(&dto.owning_thread_id);
+    encoder.text(owning_thread_id);
     encoder.optional_text(anomaly.turn_key.as_deref());
     let anomaly_id = encoder.finish();
     Ok(storage_usage::UsageAnomalyWrite {
         anomaly_id,
-        detected_at_ms: dto.committed_at_ms,
+        detected_at_ms,
         occurred_at_ms: None,
         kind,
         severity_error: matches!(
             anomaly.code,
-            AnomalyCode::RequiredTotalInvalid | AnomalyCode::ArithmeticOverflow
+            AnomalyCode::RequiredTotalInvalid
+                | AnomalyCode::ArithmeticOverflow
+                | AnomalyCode::ReconciliationPatchTooLarge
+                | AnomalyCode::ResponseUsageConflict
+                | AnomalyCode::ResponseOwnershipMismatch
+                | AnomalyCode::CompactionIdentityMismatch
+                | AnomalyCode::LegacyCoverageAmbiguous
         ),
         source_start_offset: anomaly
             .source_start_offset
             .map(i64::try_from)
             .transpose()
             .map_err(|_| "usage offset exceeds SQLite INTEGER")?,
+        turn_key: anomaly.turn_key.clone(),
     })
 }
 
@@ -527,6 +681,12 @@ const fn anomaly_code(code: AnomalyCode) -> u8 {
         AnomalyCode::TurnIdMismatch => 8,
         AnomalyCode::TurnReplaced => 9,
         AnomalyCode::ArithmeticOverflow => 10,
+        AnomalyCode::ReconciliationPatchTooLarge => 11,
+        AnomalyCode::ResponseUsageConflict => 12,
+        AnomalyCode::ResponseOwnershipMismatch => 13,
+        AnomalyCode::CompactionIdentityMismatch => 14,
+        AnomalyCode::LegacyCoverageAmbiguous => 15,
+        AnomalyCode::ThreadUsageMismatch => 16,
     }
 }
 

@@ -163,7 +163,39 @@ impl<'connection> RebuildLedger<'connection> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = rebuild_quarantine_session(&tx, root_session_id, error_code, now_ms)?;
+        let result = rebuild_quarantine_session(&tx, root_session_id, error_code, None, now_ms)?;
+        let (build_epoch, _) = current_build(&tx)?;
+        let orphan_ids = {
+            let mut statement = tx.prepare(
+                "SELECT event_id FROM usage_events e
+                 WHERE e.source='codex' AND e.source_epoch=?1
+                   AND NOT EXISTS (
+                     SELECT 1 FROM codex_usage_event_occurrences o
+                     WHERE o.source='codex' AND o.ledger_epoch=e.source_epoch
+                       AND o.event_id=e.event_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM codex_compaction_markers m
+                     WHERE m.source='codex' AND m.ledger_epoch=e.source_epoch
+                       AND m.resolved_event_id=e.event_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM codex_usage_event_holds h
+                     WHERE h.source='codex' AND h.ledger_epoch=e.source_epoch
+                       AND h.event_id=e.event_id)
+                 ORDER BY e.rowid",
+            )?;
+            statement
+                .query_map([build_epoch], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        crate::codex::storage::usage::strip_orphan_window_references(&tx, build_epoch, &orphan_ids)
+            .map_err(|_| RebuildError::Invalid("failed to strip orphan usage window references"))?;
+        for event_id in orphan_ids {
+            tx.execute(
+                "DELETE FROM usage_events WHERE source='codex' AND source_epoch=?1 AND event_id=?2",
+                params![build_epoch, event_id],
+            )?;
+        }
+        verify_quarantined_session_clean(&tx, build_epoch, root_session_id)?;
         tx.commit()?;
         Ok(result)
     }
@@ -393,9 +425,16 @@ fn database() -> Connection {
                     WHERE source='codex';
                  END;
                  ALTER TABLE threads ADD COLUMN source TEXT NOT NULL DEFAULT 'codex';
-                 ALTER TABLE threads ADD COLUMN native_session_id TEXT NOT NULL DEFAULT '';",
+                 ALTER TABLE threads ADD COLUMN native_session_id TEXT NOT NULL DEFAULT '';
+                 CREATE UNIQUE INDEX usage_events_source_identity_fixture_idx
+                    ON usage_events(source,source_epoch,event_id);",
             )
             .unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../../storage/schema/0014_codex_compaction_evidence.sql"
+        ))
+        .unwrap();
     connection
 }
 
@@ -1495,7 +1534,7 @@ fn seed_parser9_skill_fixture(fixture: &SkillFixture) -> (Arc<Ledger>, i64, i64)
     );
 
     // Fixture seed: this is the parser-9 active state that predates the
-    // parser-11 rebuild exercised by the tests below.
+    // parser-12 rebuild exercised by the tests below.
     connection
         .execute(
             "UPDATE source_usage_epochs SET active_parser_version=9
@@ -1790,17 +1829,17 @@ fn t_mu04_b03_parser_v5_shadow_rebuild_repairs_historical_owning_context() {
 
 #[test]
 fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() {
-    assert_eq!(USAGE_PARSER_VERSION, 11);
+    assert_eq!(USAGE_PARSER_VERSION, 12);
     let fixture = SkillFixture::new("legacy-skill");
     let (ledger, active_before, source_file_id) = seed_parser9_skill_fixture(&fixture);
     let mut rebuild_connection =
         Connection::open(&fixture.db).expect("open parser-9 rebuild database");
     let build = RebuildLedger::new(&mut rebuild_connection)
         .begin_or_resume(USAGE_PARSER_VERSION, &[source_file_id], 10)
-        .expect("begin parser-11 rebuild");
+        .expect("begin parser-12 rebuild");
     drop(rebuild_connection);
     assert_eq!(build.active_epoch, active_before);
-    assert_eq!(build.target_parser_version, 11);
+    assert_eq!(build.target_parser_version, 12);
     assert_eq!(build.build_epoch, active_before + 1);
 
     let connection = Connection::open(&fixture.db).expect("open parser-9 rebuild database");
@@ -1815,7 +1854,7 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
         .expect("read parser-9 rebuild state");
     assert_eq!(
         before,
-        (active_before, Some(build.build_epoch), 9, Some(11))
+        (active_before, Some(build.build_epoch), 9, Some(12))
     );
     drop(connection);
 
@@ -1833,13 +1872,13 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
     assert_eq!(
         ledger
             .app_state()
-            .expect("read parser-11 rebuild state")
+            .expect("read parser-12 rebuild state")
             .scan
             .last_finished_scan_result,
         Some(ScanResult::Completed)
     );
 
-    let connection = Connection::open(&fixture.db).expect("open activated parser-11 database");
+    let connection = Connection::open(&fixture.db).expect("open activated parser-12 database");
     let after: (i64, Option<i64>, i64, Option<i64>) = connection
         .query_row(
             "SELECT active_epoch,build_epoch,
@@ -1848,8 +1887,8 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .expect("read activated parser-11 state");
-    assert_eq!(after, (build.build_epoch, None, 11, None));
+        .expect("read activated parser-12 state");
+    assert_eq!(after, (build.build_epoch, None, 12, None));
     drop(connection);
 
     let after_snapshot = skills_usage_snapshot(
@@ -1857,19 +1896,19 @@ fn t_s07_003_rebuild_activation_keeps_parser9_active_until_parser11_completes() 
         &[all_time_skill_day()],
         &UsageFilter::default(),
     )
-    .expect("read parser-11 Skills aggregate");
+    .expect("read parser-12 Skills aggregate");
     assert!(after_snapshot.value.ready);
     assert_eq!(after_snapshot.value.days[0].total, 1);
     assert_eq!(
         after_snapshot.value.days[0].skills[0].skill_name,
         "legacy-skill"
     );
-    scanner.shutdown().expect("stop parser-11 scanner");
+    scanner.shutdown().expect("stop parser-12 scanner");
 }
 
 #[test]
 fn t_s07_004_skill_event_source_replace_clears_old_rows_before_activation() {
-    assert_eq!(USAGE_PARSER_VERSION, 11);
+    assert_eq!(USAGE_PARSER_VERSION, 12);
     let fixture = SkillFixture::new("legacy-skill");
     let (ledger, active_before, source_file_id) = seed_parser9_skill_fixture(&fixture);
     let replacement_rollout = fixture.rollout.with_extension("replacement.jsonl");
@@ -1877,18 +1916,18 @@ fn t_s07_004_skill_event_source_replace_clears_old_rows_before_activation() {
         &replacement_rollout,
         records_to_bytes(&skill_records("replacement-skill")),
     )
-    .expect("write parser-11 replacement rollout");
+    .expect("write parser-12 replacement rollout");
     fs::rename(&replacement_rollout, &fixture.rollout)
-        .expect("atomically replace parser-11 rollout");
+        .expect("atomically replace parser-12 rollout");
 
     let mut rebuild_connection =
         Connection::open(&fixture.db).expect("open skill replacement database");
     let build = RebuildLedger::new(&mut rebuild_connection)
         .begin_or_resume(USAGE_PARSER_VERSION, &[source_file_id], 10)
-        .expect("begin parser-11 skill replacement");
+        .expect("begin parser-12 skill replacement");
     drop(rebuild_connection);
     assert_eq!(build.active_epoch, active_before);
-    assert_eq!(build.target_parser_version, 11);
+    assert_eq!(build.target_parser_version, 12);
 
     let connection = Connection::open(&fixture.db).expect("open skill replacement database");
     let old_row: (
@@ -1960,7 +1999,7 @@ fn t_s07_004_skill_event_source_replace_clears_old_rows_before_activation() {
             &[source_file_id],
             11,
         )
-        .expect("replace parser-11 source build");
+        .expect("replace parser-12 source build");
     let connection = Connection::open(&fixture.db).expect("reopen replaced skill database");
     assert!(skill_names_for_epoch(&connection, build.build_epoch, source_file_id).is_empty());
     assert_eq!(
@@ -2000,7 +2039,7 @@ fn t_s07_004_skill_event_source_replace_clears_old_rows_before_activation() {
         .expect("read activated replacement state");
     assert_eq!(active_epoch, build.build_epoch);
     assert_eq!(build_epoch, None);
-    assert_eq!(parser_version, 11);
+    assert_eq!(parser_version, 12);
     assert_eq!(
         skill_names_for_epoch(&connection, active_epoch, source_file_id),
         vec!["replacement-skill"]

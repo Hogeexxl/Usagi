@@ -35,6 +35,193 @@ fn empty_summary_query(range: TimeRange) -> SummaryQuery {
     SummaryQuery::new(range, UsageFilter::default())
 }
 
+fn append_test_proof_rows<P: rusqlite::Params>(
+    connection: &Connection,
+    hasher: &mut blake3::Hasher,
+    table_tag: &[u8],
+    sql: &str,
+    parameters: P,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(sql)?;
+    hasher.update(&(table_tag.len() as u64).to_be_bytes());
+    hasher.update(table_tag);
+    let column_count = statement.column_count() as u64;
+    let mut rows = statement.query(parameters)?;
+    while let Some(row) = rows.next()? {
+        hasher.update(&[0xff]);
+        hasher.update(&column_count.to_be_bytes());
+        for index in 0..column_count as usize {
+            match row.get_ref(index)? {
+                ValueRef::Null => {
+                    hasher.update(&[0]);
+                }
+                ValueRef::Integer(value) => {
+                    hasher.update(&[1]);
+                    hasher.update(&value.to_be_bytes());
+                }
+                ValueRef::Real(value) => {
+                    hasher.update(&[2]);
+                    hasher.update(&value.to_bits().to_be_bytes());
+                }
+                ValueRef::Text(value) => {
+                    hasher.update(&[3]);
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+                ValueRef::Blob(value) => {
+                    hasher.update(&[4]);
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+            }
+        }
+    }
+    hasher.update(&[0xfe]);
+    Ok(())
+}
+
+fn append_test_usage_private_proof(
+    connection: &Connection,
+    epoch: i64,
+    source_file_id: i64,
+    file_generation: i64,
+    hasher: &mut blake3::Hasher,
+) -> rusqlite::Result<()> {
+    hasher.update(b"usage-source-private-evidence-v1\0");
+    for value in [epoch, source_file_id, file_generation] {
+        hasher.update(&[1]);
+        hasher.update(&value.to_be_bytes());
+    }
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_occurrences",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,event_id
+         FROM codex_usage_event_occurrences
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_facts",
+        "SELECT f.source,f.ledger_epoch,f.event_id,f.owning_thread_id,f.response_id,
+                f.evidence_kind,f.operation
+         FROM codex_usage_event_facts f
+         WHERE f.source='codex' AND f.ledger_epoch=?1 AND (
+             EXISTS(SELECT 1 FROM codex_usage_event_occurrences o
+                    WHERE o.source=f.source AND o.ledger_epoch=f.ledger_epoch
+                      AND o.source_file_id=?2 AND o.file_generation=?3 AND o.event_id=f.event_id)
+             OR EXISTS(SELECT 1 FROM codex_compaction_markers m
+                       WHERE m.source=f.source AND m.ledger_epoch=f.ledger_epoch
+                         AND m.source_file_id=?2 AND m.file_generation=?3
+                         AND m.resolved_event_id=f.event_id)
+             OR EXISTS(SELECT 1 FROM codex_turns t JOIN usage_events e
+                       ON e.source='codex' AND e.source_epoch=t.ledger_epoch
+                         AND e.thread_id=t.thread_id AND e.turn_key=t.turn_key
+                       WHERE t.ledger_epoch=f.ledger_epoch AND t.source_file_id=?2
+                         AND t.file_generation=?3 AND e.event_kind='turn_compensation'
+                         AND e.event_id=f.event_id))
+         ORDER BY f.event_id",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_compaction_markers",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,root_session_id,occurred_at_ms,model,
+                reasoning_effort,response_id,resolved_event_id,unknown_reason
+         FROM codex_compaction_markers
+         WHERE source='codex' AND ledger_epoch=?1 AND (
+             (source_file_id=?2 AND file_generation=?3)
+             OR resolved_event_id IN (SELECT event_id FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3))
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_usage_reconciliation_windows",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,turn_key,state_json
+         FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_holds",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,event_id,hold_reason
+         FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND (
+             (source_file_id=?2 AND file_generation=?3)
+             OR event_id IN (SELECT event_id FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3))
+         ORDER BY source_file_id,file_generation,event_id",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"codex_turns",
+        "SELECT ledger_epoch,source_file_id,file_generation,turn_key,thread_id,raw_turn_id,
+                started_at_ms,ended_at_ms,start_offset,end_offset,status,
+                start_total_input_tokens,start_total_cached_tokens,start_total_cache_write_tokens,
+                start_total_output_tokens,start_total_reasoning_tokens,start_total_total_tokens,
+                start_total_fingerprint,last_total_input_tokens,last_total_cached_tokens,
+                last_total_cache_write_tokens,last_total_output_tokens,last_total_reasoning_tokens,
+                last_total_total_tokens,last_total_fingerprint,accounted_input_tokens,
+                accounted_cached_tokens,accounted_cache_write_tokens,accounted_output_tokens,
+                accounted_reasoning_tokens,accounted_total_tokens,accounted_fingerprint,
+                accounted_candidate_count,model_state,single_model,unresolved_model_seen,
+                reasoning_effort_state,single_reasoning_effort,unresolved_reasoning_effort_seen,
+                compensation_allowed,block_start_missing,block_time_missing,block_reset,
+                block_ownership_gap,block_parser_gap,block_required_invalid,block_model_unresolved,
+                quality_status,state_through_offset
+         FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,turn_key",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"turn_compensation_events",
+        "SELECT e.source,e.source_epoch,e.event_id,e.event_kind,e.occurred_at_ms,e.thread_id,
+                e.root_session_id,e.turn_key,e.model,e.reasoning_effort,e.estimated_cost_nanos_usd,
+                e.input_tokens,e.cached_tokens,e.cache_write_tokens,e.output_tokens,
+                e.reasoning_tokens,e.total_tokens,e.quality_status
+         FROM usage_events e
+         WHERE e.source='codex' AND e.source_epoch=?1 AND e.event_kind='turn_compensation'
+           AND EXISTS(SELECT 1 FROM codex_turns t
+                      WHERE t.ledger_epoch=e.source_epoch AND t.source_file_id=?2
+                        AND t.file_generation=?3 AND t.thread_id=e.thread_id AND t.turn_key=e.turn_key)
+         ORDER BY e.event_id",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_test_proof_rows(
+        connection,
+        hasher,
+        b"turn_compensation_occurrences",
+        "SELECT o.source,o.ledger_epoch,o.source_file_id,o.file_generation,o.source_start_offset,
+                o.source_end_offset,o.event_id
+         FROM codex_usage_event_occurrences o JOIN usage_events e
+           ON e.source=o.source AND e.source_epoch=o.ledger_epoch AND e.event_id=o.event_id
+         WHERE o.source='codex' AND o.ledger_epoch=?1 AND e.event_kind='turn_compensation'
+           AND EXISTS(SELECT 1 FROM codex_turns t
+                      WHERE t.ledger_epoch=e.source_epoch AND t.source_file_id=?2
+                        AND t.file_generation=?3 AND t.thread_id=e.thread_id AND t.turn_key=e.turn_key)
+         ORDER BY o.source_file_id,o.file_generation,o.source_start_offset,o.event_id",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    Ok(())
+}
+
 fn seed_usage_rebuild_for_carry(
     connection: &Connection,
     source_file_id: i64,
@@ -79,7 +266,7 @@ fn seed_usage_rebuild_for_carry(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let active_state_fingerprint = connection
+    let (mut active_state_hasher, active_state_generation, reconciliation_state_json) = connection
         .query_row(
             "SELECT file_generation,device_id,inode,usage_parser_version,
                     canonical_algorithm_version,resolved_through_offset,observed_raw_size,
@@ -90,13 +277,13 @@ fn seed_usage_rebuild_for_carry(
                     previous_total_total_tokens,previous_total_fingerprint,
                     previous_total_offset,chain_state,chain_block_reason,active_turn_key,
                     active_model,active_model_offset,active_reasoning_effort,
-                    active_reasoning_effort_offset
+                    active_reasoning_effort_offset,reconciliation_state_json
              FROM codex_usage_source_states
              WHERE ledger_epoch=?1 AND source_file_id=?2",
             params![active_epoch, source_file_id],
             |row| {
                 let mut hasher = blake3::Hasher::new();
-                hasher.update(b"usage-source-state-proof-v2");
+                hasher.update(b"usage-source-state-proof-v3\0");
                 for index in 0..27 {
                     match row.get_ref(index)? {
                         ValueRef::Null => {
@@ -122,10 +309,24 @@ fn seed_usage_rebuild_for_carry(
                         }
                     }
                 }
-                Ok(hasher.finalize().as_bytes().to_vec())
+                let reconciliation_state_json: String = row.get(27)?;
+                let file_generation: i64 = row.get(0)?;
+                Ok((hasher, file_generation, reconciliation_state_json))
             },
         )
         .unwrap();
+    active_state_hasher.update(&[3]);
+    active_state_hasher.update(&(reconciliation_state_json.len() as u64).to_be_bytes());
+    active_state_hasher.update(reconciliation_state_json.as_bytes());
+    append_test_usage_private_proof(
+        connection,
+        active_epoch,
+        source_file_id,
+        active_state_generation,
+        &mut active_state_hasher,
+    )
+    .unwrap();
+    let active_state_fingerprint = active_state_hasher.finalize().as_bytes().to_vec();
     let (raw_tail_status, raw_tail_start_offset): (String, Option<i64>) = connection
         .query_row(
             "SELECT raw_tail_status,raw_tail_start_offset
@@ -562,7 +763,11 @@ fn seed_v3_guardian_database(fixture: &Fixture, rollout: &Path) {
 }
 
 fn wait_scan(ledger: &Ledger, wanted: Option<&str>) {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    wait_scan_for(ledger, wanted, Duration::from_secs(8));
+}
+
+fn wait_scan_for(ledger: &Ledger, wanted: Option<&str>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
     loop {
         let scan = ledger.app_state().unwrap().scan;
         let done = match wanted {
@@ -604,7 +809,7 @@ fn t_s04_053_full_incident_replays_guardian_repairs_blocked_build_and_activates_
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 13);
+    assert_eq!(user_version, 14);
     let source_id = 1_i64;
     let db = Connection::open(&fixture.db).unwrap();
     let old_metadata: (i64, i64, Option<String>, Option<String>, Option<i64>) = db
@@ -919,14 +1124,14 @@ fn t_mu03_f02_v5_upgrade_rebuilds_metadata_usage_and_cost_without_loss() {
     drop(db);
 
     // Opening a schema-v5 database performs every migration through the
-    // current schema-v10 boundary, including the independent cost backfill,
+    // current schema-14 boundary, including the independent cost backfill,
     // before scanner metadata/usage rebuilds run.
     let ledger = fixture.ledger();
     let db = Connection::open(&fixture.db).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     let backfilled_cost: Option<i64> = db
         .query_row(
@@ -1144,6 +1349,7 @@ async fn t_mu03_s03_usage_v3_to_v5_rebuild_uses_rollout_effort_and_preserves_tok
             UsageFilter::default(),
             None,
             ROOT.to_owned(),
+            &[],
         )
         .unwrap()
         .value;
@@ -1249,7 +1455,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         )
         .unwrap();
     assert_eq!(initial.1, usagi::codex::normalization::USAGE_PARSER_VERSION);
-    assert_eq!((initial.2, initial.3), (1, 4));
+    assert_eq!((initial.2, initial.3), (1, 7));
     let initial_tokens: i64 = db
         .query_row(
             "SELECT COALESCE(SUM(total_tokens),0) FROM usage_events
@@ -1338,7 +1544,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         )
         .unwrap();
     assert_eq!(cost_only.0, initial.0);
-    assert_eq!((cost_only.1, cost_only.2), (1, 4));
+    assert_eq!((cost_only.1, cost_only.2), (1, 7));
     assert!(cost_only.3.is_some());
     drop(db);
 
@@ -1404,7 +1610,7 @@ fn t_mu03_s02_version_upgrades_remain_independent() {
         usage_only.1,
         usagi::codex::normalization::USAGE_PARSER_VERSION
     );
-    assert_eq!((usage_only.2, usage_only.3), (1, 4));
+    assert_eq!((usage_only.2, usage_only.3), (1, 7));
     assert_eq!(usage_only.4, usagi::codex::METADATA_PARSER_VERSION);
     scanner.shutdown().unwrap();
 }
@@ -1887,7 +2093,7 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
     write_main_state(&fixture.home, &rollout);
     let ledger = fixture.ledger();
     let handle = fixture.start(Arc::clone(&ledger));
-    wait_scan(&ledger, None);
+    wait_scan_for(&ledger, None, Duration::from_secs(30));
     let normalized_rollout = paths::normalize_source_path(&rollout).unwrap();
     let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
     assert_eq!(
@@ -1931,7 +2137,13 @@ fn t_s04_030_041_buildfrom_multibatch_and_localreplay_over_budget_promotes_to_sh
             [source_id],
         )
         .unwrap();
-    request_and_wait(&handle, &ledger);
+    let scan_id = match handle.request(ScanTrigger::Manual).unwrap() {
+        RequestDisposition::Started { scan_id, .. } => scan_id,
+        RequestDisposition::Coalesced {
+            followup_scan_id, ..
+        } => followup_scan_id,
+    };
+    wait_scan_for(&ledger, Some(&scan_id), Duration::from_secs(30));
 
     let db = Connection::open(&fixture.db).unwrap();
     let (active, build, revision, offset, raw): (i64, Option<i64>, i64, i64, i64) = db.query_row(

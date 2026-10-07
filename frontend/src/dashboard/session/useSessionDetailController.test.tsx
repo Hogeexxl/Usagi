@@ -81,8 +81,8 @@ function detail(revision: number, total = revision, rootSessionId = "root-1"): S
       root_session_id: rootSessionId,
       models_used: ["model-a", "model-b"],
       model_usage: [
-        { model: "model-a", reasoning_effort: null, usage },
-        { model: "model-b", reasoning_effort: null, usage: secondModelUsage },
+        { model: "model-a", reasoning_effort: null, compaction_tokens: null, usage },
+        { model: "model-b", reasoning_effort: null, compaction_tokens: null, usage: secondModelUsage },
       ],
       self_usage: usage,
       subagent_count: 0,

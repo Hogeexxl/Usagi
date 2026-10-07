@@ -45,7 +45,15 @@ function ReceiptDivider() {
   );
 }
 
-function UsageReceipt({ usage }: { usage: UsageDto }) {
+function UsageReceipt({
+  usage,
+  compactionTokens,
+  showCompaction,
+}: {
+  usage: UsageDto;
+  compactionTokens: number | null;
+  showCompaction: boolean;
+}) {
   const rows = [
     { label: "Total Tokens", value: formatSessionTokenInteger(usage.total_tokens), emphasized: true },
     { label: "Input", value: formatSessionTokenInteger(usage.input_tokens), emphasized: false },
@@ -55,6 +63,7 @@ function UsageReceipt({ usage }: { usage: UsageDto }) {
     { label: "Cache Write", value: formatSessionNullableTokenInteger(usage.cache_write_tokens), emphasized: false },
     { label: "Cache Hit Rate", value: formatRatio(usage.cache_hit_rate), emphasized: false },
   ] as const;
+  const compactionValue = formatSessionNullableTokenInteger(compactionTokens);
 
   return (
     <dl className="space-y-2 text-sm">
@@ -66,6 +75,14 @@ function UsageReceipt({ usage }: { usage: UsageDto }) {
           </dd>
         </div>
       ))}
+      {showCompaction ? (
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-muted-foreground">Compaction</dt>
+          <dd>
+            <StaticValue value={compactionValue.text} ariaLabel={`Compaction：${compactionValue.accessibleName}`} />
+          </dd>
+        </div>
+      ) : null}
       <div className="flex items-baseline justify-between gap-4">
         <dt className="font-semibold text-foreground">Estimated Cost</dt>
         <dd className="font-semibold tabular-nums text-foreground">
@@ -76,8 +93,8 @@ function UsageReceipt({ usage }: { usage: UsageDto }) {
   );
 }
 
-function MainReceipt({ item }: { item: MainModelUsageDto }) {
-  return <UsageReceipt usage={item.usage} />;
+function MainReceipt({ item, showCompaction }: { item: MainModelUsageDto; showCompaction: boolean }) {
+  return <UsageReceipt usage={item.usage} compactionTokens={item.compaction_tokens} showCompaction={showCompaction} />;
 }
 
 function SubagentReceipt({ item, timezone }: { item: SubagentDetailDto; timezone: string }) {
@@ -102,7 +119,11 @@ function SubagentReceipt({ item, timezone }: { item: SubagentDetailDto; timezone
               <dd className="min-w-0 truncate text-right text-foreground" title={model}>{model}</dd>
             </dl>
             <div className="mt-4">
-              <UsageReceipt usage={modelUsage.usage} />
+              <UsageReceipt
+                usage={modelUsage.usage}
+                compactionTokens={modelUsage.compaction_tokens}
+                showCompaction={item.source === "codex"}
+              />
             </div>
           </div>
         );
@@ -254,7 +275,9 @@ export function SessionDetailDrawer({ view, timezone, sourceDisplay }: SessionDe
       return {
         id,
         title: formatModelWithReasoningEffort(item.model, item.reasoning_effort, false),
-        ...(mountedMainItems.has(id) ? { description: <MainReceipt item={item} /> } : {}),
+        ...(mountedMainItems.has(id)
+          ? { description: <MainReceipt item={item} showCompaction={detail?.main.source === "codex"} /> }
+          : {}),
       };
     }),
     [detail, mountedMainItems],

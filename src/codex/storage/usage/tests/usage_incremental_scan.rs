@@ -11,10 +11,10 @@ fn commit_source(
 ) {
     let mut source = source_commit(source_id, device, thread, root, id, false);
     let event_id = format!("{source_id:064x}");
-    source.events[0].event_id = event_id.clone();
-    source.occurrences[0].event_id = event_id;
+    source.patch.events[0].event_id = event_id.clone();
+    source.patch.occurrences[0].event_id = event_id;
     with_codex(&fixture.ledger, |storage| {
-        storage.commit_group(batch(thread, root, source))
+        test_commit_group(storage, batch(thread, root, source))
     })
     .unwrap();
 }
@@ -94,10 +94,10 @@ fn t_perf_001_stable_no_build_worklist_matrix() {
             source_id == 13,
         );
         let event_id = format!("{source_id:064x}");
-        source.events[0].event_id = event_id.clone();
-        source.occurrences[0].event_id = event_id;
+        source.patch.events[0].event_id = event_id.clone();
+        source.patch.occurrences[0].event_id = event_id;
         with_codex(&fixture.ledger, |storage| {
-            storage.commit_group(batch("child", "root", source))
+            test_commit_group(storage, batch("child", "root", source))
         })
         .unwrap_or_else(|error| {
             panic!(

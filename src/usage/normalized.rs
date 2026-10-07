@@ -4,7 +4,7 @@ use crate::domain::DomainError;
 
 /// Provider-independent token counts.  All values are validated before they
 /// cross the adapter boundary and all arithmetic is checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NormalizedTokenUsage {
     pub input_tokens: i64,
     pub cached_tokens: i64,

@@ -264,6 +264,7 @@ pub struct MainModelUsageDto {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub usage: TokenUsageDto,
+    pub compaction_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -284,6 +285,7 @@ pub struct SubagentModelUsageDto {
     pub reasoning_effort: Option<String>,
     pub last_activity_at_ms: i64,
     pub usage: TokenUsageDto,
+    pub compaction_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1067,6 +1069,10 @@ fn map_detail(
                 model: model.model,
                 reasoning_effort: model.reasoning_effort,
                 usage: map_totals(model.usage)?,
+                compaction_tokens: model
+                    .compaction_tokens
+                    .map(|tokens| ensure_safe(tokens).map(|()| tokens))
+                    .transpose()?,
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -1119,11 +1125,16 @@ fn map_detail(
 
 fn map_subagent_model_usage(model: SubagentModelUsage) -> Result<SubagentModelUsageDto, ApiError> {
     ensure_safe(model.last_activity_at_ms)?;
+    let compaction_tokens = model
+        .compaction_tokens
+        .map(|tokens| ensure_safe(tokens).map(|()| tokens))
+        .transpose()?;
     Ok(SubagentModelUsageDto {
         model: model.model,
         reasoning_effort: model.reasoning_effort,
         last_activity_at_ms: model.last_activity_at_ms,
         usage: map_totals(model.usage)?,
+        compaction_tokens,
     })
 }
 
@@ -1741,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn t_s05_006_subagent_model_usage_dto_has_exact_block_shape() {
+    fn compaction_api_contract() {
         let range = utc_range(RangeKey::Today);
         let usage = totals(Some(3), 10, 4);
         let response = session_detail_response(
@@ -1760,7 +1771,12 @@ mod tests {
                         thread_id: "root".into(),
                         root_session_id: "root".into(),
                         models_used: vec!["main-model".into()],
-                        model_usage: Vec::new(),
+                        model_usage: vec![crate::usage::aggregate::MainModelUsage {
+                            model: "main-model".into(),
+                            reasoning_effort: None,
+                            usage: usage.clone(),
+                            compaction_tokens: Some(0),
+                        }],
                         self_usage: usage.clone(),
                         subagent_count: 1,
                         inclusive_usage: usage.clone(),
@@ -1777,7 +1793,8 @@ mod tests {
                             model: "child-model".into(),
                             reasoning_effort: Some("high".into()),
                             last_activity_at_ms: 19,
-                            usage,
+                            usage: usage.clone(),
+                            compaction_tokens: None,
                         }],
                     }],
                 },
@@ -1788,6 +1805,8 @@ mod tests {
         assert_eq!(response.native_session_id, "root");
         assert_eq!(response.main.source, "codex");
         assert_eq!(response.main.native_session_id, "root");
+        let main = serde_json::to_value(&response.main).unwrap();
+        assert_eq!(main["model_usage"][0]["compaction_tokens"], 0);
         let subagent = serde_json::to_value(&response.subagents[0]).unwrap();
         assert_eq!(
             subagent,
@@ -1803,6 +1822,7 @@ mod tests {
                     "model": "child-model",
                     "reasoning_effort": "high",
                     "last_activity_at_ms": 19,
+                    "compaction_tokens": null,
                     "usage": {
                         "input_tokens": 10,
                         "cached_tokens": 4,
@@ -1818,6 +1838,53 @@ mod tests {
                     }
                 }]
             })
+        );
+
+        let non_codex = session_detail_response(
+            &range,
+            SessionDetailSnapshot {
+                data_revision: 10,
+                value: SessionDetail {
+                    root_session_id: "antigravity-root".into(),
+                    source: "antigravity".into(),
+                    native_session_id: "antigravity-root".into(),
+                    last_activity_at_ms: 30,
+                    main: crate::usage::aggregate::MainSessionDetail {
+                        source: "antigravity".into(),
+                        native_session_id: "antigravity-root".into(),
+                        title: None,
+                        thread_id: "antigravity-root".into(),
+                        root_session_id: "antigravity-root".into(),
+                        models_used: vec!["model".into()],
+                        model_usage: vec![crate::usage::aggregate::MainModelUsage {
+                            model: "model".into(),
+                            reasoning_effort: None,
+                            usage: usage.clone(),
+                            compaction_tokens: None,
+                        }],
+                        self_usage: usage.clone(),
+                        subagent_count: 0,
+                        inclusive_usage: usage,
+                    },
+                    subagents: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        let non_codex_json = serde_json::to_value(non_codex).unwrap();
+        assert_eq!(non_codex_json["source"], "antigravity");
+        assert_eq!(
+            non_codex_json["main"]["model_usage"][0]["compaction_tokens"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            non_codex_json["main"]["model_usage"][0]["usage"]["total_tokens"],
+            12
+        );
+        assert_eq!(non_codex_json["main"]["self_usage"]["total_tokens"], 12);
+        assert_eq!(
+            non_codex_json["main"]["inclusive_usage"]["total_tokens"],
+            12
         );
     }
 

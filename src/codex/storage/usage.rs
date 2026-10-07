@@ -1,10 +1,11 @@
 //! Atomic persistence seam for usage ingestion batches.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
 use crate::codex::domain::CheckpointProcessingStatus;
+use crate::codex::usage::{CodexOperation, EvidenceKind};
 use crate::domain::SourceUsageEpochState;
 use crate::source::{CanonicalUsageEventWrite, SourceStorageError, UsageWriteTarget};
 use crate::usage::event::EventKind;
@@ -16,7 +17,7 @@ use crate::storage::{Result as StorageResult, StorageError};
 
 pub(crate) const MAX_USAGE_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const MAX_USAGE_BATCH_LINES: u64 = 4096;
-pub(crate) const MAX_USAGE_BATCH_CANDIDATES: u64 = 2048;
+pub(crate) const MAX_USAGE_BATCH_WRITE_UNITS: u64 = 2048;
 const MAX_LEGAL_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
 type SnapshotColumns = (
@@ -28,7 +29,24 @@ type SnapshotColumns = (
     Option<i64>,
     Option<Vec<u8>>,
 );
-type ExistingAnomaly = (Option<i64>, String, i64, i64, Option<i64>, String, String);
+type ExistingAnomaly = (
+    Option<i64>,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    String,
+    String,
+    String,
+);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UsageEventHoldReference {
+    source_file_id: i64,
+    file_generation: i64,
+    event_id: String,
+    hold_reason: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UsageTailStatus {
@@ -149,6 +167,7 @@ pub(crate) struct UsageSourceStateWrite {
     pub active_model_offset: Option<i64>,
     pub active_reasoning_effort: Option<String>,
     pub active_reasoning_effort_offset: Option<i64>,
+    pub reconciliation_state_json: String,
     pub updated_at_ms: i64,
 }
 
@@ -269,6 +288,9 @@ pub(crate) struct UsageCompensationBlocks {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsageTurnWrite {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub thread_id: String,
     pub turn_key: String,
     pub raw_turn_id: Option<String>,
     pub started_at_ms: Option<i64>,
@@ -302,6 +324,12 @@ pub(crate) enum UsageAnomalyKind {
     TurnIdMismatch,
     TurnReplaced,
     ArithmeticOverflow,
+    ReconciliationPatchTooLarge,
+    ResponseUsageConflict,
+    ResponseOwnershipMismatch,
+    CompactionIdentityMismatch,
+    LegacyCoverageAmbiguous,
+    ThreadUsageMismatch,
 }
 
 impl UsageAnomalyKind {
@@ -317,6 +345,34 @@ impl UsageAnomalyKind {
             Self::TurnIdMismatch => "TURN_ID_MISMATCH",
             Self::TurnReplaced => "TURN_REPLACED",
             Self::ArithmeticOverflow => "TOKEN_ARITHMETIC_OVERFLOW",
+            Self::ReconciliationPatchTooLarge => "RECONCILIATION_PATCH_TOO_LARGE",
+            Self::ResponseUsageConflict => "RESPONSE_USAGE_CONFLICT",
+            Self::ResponseOwnershipMismatch => "RESPONSE_OWNERSHIP_MISMATCH",
+            Self::CompactionIdentityMismatch => "COMPACTION_IDENTITY_MISMATCH",
+            Self::LegacyCoverageAmbiguous => "LEGACY_COVERAGE_AMBIGUOUS",
+            Self::ThreadUsageMismatch => "THREAD_USAGE_MISMATCH",
+        }
+    }
+
+    fn parse(value: &str) -> StorageResult<Self> {
+        match value {
+            "USAGE_TIME_MISSING" => Ok(Self::UsageTimeMissing),
+            "REQUIRED_TOTAL_INVALID" => Ok(Self::RequiredTotalInvalid),
+            "LAST_USAGE_INVALID" => Ok(Self::LastUsageInvalid),
+            "TOTAL_CHAIN_RESET" => Ok(Self::TotalChainReset),
+            "CACHE_WRITE_CHAIN_DECREASE" => Ok(Self::CacheWriteChainDecrease),
+            "TURN_ACCOUNTED_EXCEEDS_TOTAL" => Ok(Self::TurnAccountedExceedsTotal),
+            "TURN_CACHE_WRITE_DELTA_NEGATIVE" => Ok(Self::TurnCacheWriteDeltaNegative),
+            "TURN_ID_MISMATCH" => Ok(Self::TurnIdMismatch),
+            "TURN_REPLACED" => Ok(Self::TurnReplaced),
+            "TOKEN_ARITHMETIC_OVERFLOW" => Ok(Self::ArithmeticOverflow),
+            "RECONCILIATION_PATCH_TOO_LARGE" => Ok(Self::ReconciliationPatchTooLarge),
+            "RESPONSE_USAGE_CONFLICT" => Ok(Self::ResponseUsageConflict),
+            "RESPONSE_OWNERSHIP_MISMATCH" => Ok(Self::ResponseOwnershipMismatch),
+            "COMPACTION_IDENTITY_MISMATCH" => Ok(Self::CompactionIdentityMismatch),
+            "LEGACY_COVERAGE_AMBIGUOUS" => Ok(Self::LegacyCoverageAmbiguous),
+            "THREAD_USAGE_MISMATCH" => Ok(Self::ThreadUsageMismatch),
+            _ => Err(StorageError::invalid_state("invalid usage anomaly type")),
         }
     }
 }
@@ -329,6 +385,104 @@ pub(crate) struct UsageAnomalyWrite {
     pub kind: UsageAnomalyKind,
     pub severity_error: bool,
     pub source_start_offset: Option<i64>,
+    pub turn_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageQuarantineDiagnostic {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub owning_thread_id: String,
+    pub anomaly: UsageAnomalyWrite,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageEventFactWrite {
+    pub event_id: String,
+    pub owning_thread_id: String,
+    pub response_id: Option<String>,
+    pub evidence_kind: EvidenceKind,
+    pub operation: CodexOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageCompactionMarkerWrite {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub source_start_offset: i64,
+    pub source_end_offset: i64,
+    pub owning_thread_id: String,
+    pub root_session_id: String,
+    pub occurred_at_ms: Option<i64>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub response_id: Option<String>,
+    pub resolved_event_id: Option<String>,
+    pub unknown_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageReconciliationWindowWrite {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub source_start_offset: i64,
+    pub source_end_offset: i64,
+    pub owning_thread_id: String,
+    pub turn_key: Option<String>,
+    pub state_json: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UsageEventHoldReason {
+    Replay,
+    Carry,
+}
+
+impl UsageEventHoldReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replay => "replay",
+            Self::Carry => "carry",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageEventHoldWrite {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub event_id: String,
+    pub hold_reason: UsageEventHoldReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct UsagePrivateRowKey {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub source_start_offset: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageTurnRewriteWrite {
+    pub expected: UsageTurnWrite,
+    pub replacement: UsageTurnWrite,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReconciliationPatchWrite {
+    pub delete_event_ids: Vec<String>,
+    pub delete_markers: Vec<UsagePrivateRowKey>,
+    pub delete_windows: Vec<UsagePrivateRowKey>,
+    pub delete_holds: Vec<(i64, i64, String)>,
+    pub events: Vec<UsageEventWrite>,
+    pub occurrences: Vec<UsageOccurrenceWrite>,
+    pub facts: Vec<UsageEventFactWrite>,
+    pub marker_upserts: Vec<UsageCompactionMarkerWrite>,
+    pub window_upserts: Vec<UsageReconciliationWindowWrite>,
+    pub hold_upserts: Vec<UsageEventHoldWrite>,
+    pub turn_upserts: Vec<UsageTurnWrite>,
+    pub turn_rewrites: Vec<UsageTurnRewriteWrite>,
+    pub anomalies: Vec<UsageAnomalyWrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,17 +507,19 @@ pub(crate) struct UsageSourceCommit {
     pub last_complete_offset: i64,
     pub source_bytes_consumed: i64,
     pub complete_line_count: i64,
-    pub candidate_count: i64,
+    pub canonical_event_count: i64,
+    pub occurrence_count: i64,
+    pub evidence_write_count: i64,
+    pub write_unit_count: i64,
     pub replayed_prefix_bytes: i64,
     pub replayed_prefix_lines: i64,
     pub fixed_view_exhausted: bool,
     pub tail_status: UsageTailStatus,
     pub tail_start_offset: Option<i64>,
-    pub events: Vec<UsageEventWrite>,
-    pub occurrences: Vec<UsageOccurrenceWrite>,
     pub skill_events: Vec<SkillUsageEventWrite>,
-    pub turns: Vec<UsageTurnWrite>,
-    pub anomalies: Vec<UsageAnomalyWrite>,
+    pub patch: ReconciliationPatchWrite,
+    pub reconciliation_request: crate::codex::ingestion::usage_processor::ReconciliationRequest,
+    pub reconciliation_expected_fingerprint: Vec<u8>,
     pub updated_state: UsageSourceStateWrite,
     pub next_guard_hash: Option<Vec<u8>>,
     pub committed_at_ms: i64,
@@ -414,6 +570,9 @@ pub(crate) enum UsageBuildCompletion {
 pub(crate) enum UsageCarryPhase {
     None,
     Occurrences,
+    Facts,
+    Markers,
+    Windows,
     Turns,
     Anomalies,
     Finalize,
@@ -464,6 +623,48 @@ pub(crate) struct UsageSourceScanPlan {
 pub(crate) struct UsageScanState {
     pub epoch: SourceUsageEpochState,
     pub plans: Vec<UsageSourceScanPlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageReconciliationBasicProof {
+    pub device_id: i64,
+    pub inode: i64,
+    pub observed_raw_size: i64,
+    pub expected_checkpoint: Option<UsageCheckpointExpectation>,
+    pub expected_state: Option<UsageSourceStateWrite>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageWindowMetadata {
+    pub source_file_id: i64,
+    pub file_generation: i64,
+    pub source_start_offset: u64,
+    pub source_end_offset: u64,
+    pub owning_thread_id: String,
+    pub turn_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageReconciliationContext {
+    pub context: crate::codex::ingestion::usage_processor::ReconciliationContext,
+    pub window_metadata:
+        BTreeMap<crate::codex::ingestion::usage_processor::WindowKey, UsageWindowMetadata>,
+    pub window_proposals: BTreeMap<
+        crate::codex::ingestion::usage_processor::WindowKey,
+        Vec<UsageWindowProposalBinding>,
+    >,
+    pub response_occurrences: BTreeMap<
+        crate::codex::ingestion::usage_processor::ResponseKey,
+        Vec<crate::codex::ingestion::usage_processor::Occurrence>,
+    >,
+    pub closure_response_keys: BTreeSet<crate::codex::ingestion::usage_processor::ResponseKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageWindowProposalBinding {
+    pub proposal: crate::codex::ingestion::usage_processor::CanonicalUsageProposal,
+    pub fact: crate::codex::ingestion::usage_processor::UsageEventFact,
+    pub occurrences: Vec<crate::codex::ingestion::usage_processor::Occurrence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -626,6 +827,1864 @@ fn load_usage_scan_state_inner(
     })
 }
 
+pub(super) fn load_usage_reconciliation_context(
+    storage: &CodexStorage<'_>,
+    ledger_epoch: i64,
+    context: crate::codex::ingestion::usage_processor::UsageContext,
+    request: crate::codex::ingestion::usage_processor::ReconciliationRequest,
+    basic_proof: UsageReconciliationBasicProof,
+) -> Result<UsageReconciliationContext, CodexStorageError> {
+    storage.with_read(|connection| {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(CodexStorageError::from)?;
+        let epoch = read_epoch(&transaction).map_err(CodexStorageError::from)?;
+        if ledger_epoch != epoch.working_epoch() {
+            return Err(CodexStorageError::Storage(StorageError::invalid_state(
+                "usage reconciliation epoch changed",
+            )));
+        }
+        if !reconciliation_basic_proof_matches(&transaction, ledger_epoch, &context, &basic_proof)
+            .map_err(CodexStorageError::from)?
+        {
+            return Err(CodexStorageError::ReconciliationPlanStale);
+        }
+        let result =
+            read_reconciliation_context(&transaction, ledger_epoch, context, request, &basic_proof)
+                .map_err(CodexStorageError::from)?;
+        transaction.commit().map_err(CodexStorageError::from)?;
+        Ok(result)
+    })
+}
+
+fn read_reconciliation_context(
+    connection: &Connection,
+    epoch: i64,
+    context: crate::codex::ingestion::usage_processor::UsageContext,
+    request: crate::codex::ingestion::usage_processor::ReconciliationRequest,
+    basic_proof: &UsageReconciliationBasicProof,
+) -> StorageResult<UsageReconciliationContext> {
+    use crate::codex::ingestion::usage_processor::{
+        AffectedTurn, ReconciliationContext, ReconciliationRequest, ResponseKey, WindowKey,
+    };
+
+    if epoch <= 0
+        || context.source_file_id <= 0
+        || context.file_generation <= 0
+        || context.owning_thread_id.is_empty()
+        || context.root_session_id.is_empty()
+        || request.response_keys.len() + request.owning_turn_keys.len() > 8192
+        || request
+            != ReconciliationRequest::new(
+                request.response_keys.clone(),
+                request.owning_turn_keys.clone(),
+            )
+        || request.response_keys.iter().any(|key| {
+            key.owning_thread_id != context.owning_thread_id || key.response_id.is_empty()
+        })
+        || request
+            .owning_turn_keys
+            .iter()
+            .any(|(thread, _)| thread != &context.owning_thread_id)
+    {
+        return Err(StorageError::invalid_state(
+            "invalid usage reconciliation request",
+        ));
+    }
+    validate_reconciliation_basic_proof(connection, epoch, &context, basic_proof)?;
+    validate_reconciliation_scope(connection, &context)?;
+
+    let mut reconciliation = ReconciliationContext {
+        request: request.clone(),
+        ..ReconciliationContext::default()
+    };
+    let mut result = UsageReconciliationContext {
+        context: ReconciliationContext::default(),
+        window_metadata: BTreeMap::new(),
+        window_proposals: BTreeMap::new(),
+        response_occurrences: BTreeMap::new(),
+        closure_response_keys: request.response_keys.iter().cloned().collect(),
+    };
+    let mut affected = BTreeMap::new();
+    for (thread_id, turn_key) in &request.owning_turn_keys {
+        for window in load_turn_windows(connection, epoch, thread_id, turn_key.as_deref())? {
+            if window.owning_thread_id != *thread_id || window.turn_key != *turn_key {
+                return Err(StorageError::usage_conflict(
+                    "reconciliation window is bound to a different Turn",
+                ));
+            }
+            let key = WindowKey {
+                source_file_id: window.source_file_id,
+                file_generation: window.file_generation,
+                start_offset: window.source_start_offset,
+            };
+            validate_window_physical_source(connection, &window)?;
+            let metadata = UsageWindowMetadata {
+                source_file_id: window.source_file_id,
+                file_generation: window.file_generation,
+                source_start_offset: window.source_start_offset,
+                source_end_offset: window.source_end_offset,
+                owning_thread_id: window.owning_thread_id.clone(),
+                turn_key: window.turn_key.clone(),
+            };
+            if reconciliation
+                .windows
+                .insert(key, window.state.clone())
+                .is_some()
+            {
+                return Err(StorageError::invalid_state(
+                    "duplicate persisted reconciliation window key",
+                ));
+            }
+            result.window_metadata.insert(key, metadata);
+            for response_id in window
+                .state
+                .explicit_response_ids
+                .iter()
+                .chain(window.state.legacy_covered_response_ids.iter())
+            {
+                result.closure_response_keys.insert(ResponseKey {
+                    owning_thread_id: window.owning_thread_id.clone(),
+                    response_id: response_id.clone(),
+                });
+            }
+            let mut proposals = Vec::with_capacity(window.state.proposal_event_ids.len());
+            for event_id in &window.state.proposal_event_ids {
+                let (proposal, fact) = load_event_binding(connection, epoch, event_id)?
+                    .ok_or_else(|| {
+                        StorageError::usage_conflict(
+                            "reconciliation window proposal is missing its canonical fact",
+                        )
+                    })?;
+                if fact.owning_thread_id != window.owning_thread_id {
+                    return Err(StorageError::usage_conflict(
+                        "reconciliation window proposal belongs to another Thread",
+                    ));
+                }
+                validate_proposal_thread_binding(connection, &proposal, &window.owning_thread_id)?;
+                let occurrences = load_event_occurrences(connection, epoch, event_id)?;
+                if occurrences.is_empty() {
+                    return Err(StorageError::usage_conflict(
+                        "reconciliation window proposal has no physical occurrence",
+                    ));
+                }
+                validate_occurrence_sources(connection, &occurrences, &fact.owning_thread_id)?;
+                proposals.push(UsageWindowProposalBinding {
+                    proposal,
+                    fact,
+                    occurrences,
+                });
+            }
+            result.window_proposals.insert(key, proposals);
+        }
+        for snapshot in load_turn_snapshots(connection, epoch, thread_id, turn_key.as_deref())? {
+            validate_turn_physical_source(connection, &snapshot)?;
+            let (compensation_events, compensation_occurrences) =
+                load_turn_compensation(connection, epoch, &snapshot)?;
+            let key = snapshot.key.clone();
+            if affected
+                .insert(
+                    key,
+                    AffectedTurn {
+                        snapshot,
+                        compensation_events,
+                        compensation_occurrences,
+                    },
+                )
+                .is_some()
+            {
+                return Err(StorageError::usage_conflict(
+                    "duplicate persisted Turn dependency key",
+                ));
+            }
+        }
+    }
+    reconciliation.affected_turns = affected;
+    for (thread_id, turn_key) in &request.owning_turn_keys {
+        let Some(turn_key) = turn_key.as_deref() else {
+            continue;
+        };
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT f.response_id
+             FROM codex_usage_event_facts f
+             JOIN usage_events e
+               ON e.source='codex' AND e.source_epoch=f.ledger_epoch AND e.event_id=f.event_id
+             JOIN codex_usage_event_occurrences o
+               ON o.source='codex' AND o.ledger_epoch=f.ledger_epoch AND o.event_id=f.event_id
+             WHERE f.source='codex' AND f.ledger_epoch=?1
+               AND f.owning_thread_id=?2 AND f.response_id IS NOT NULL
+               AND f.evidence_kind='explicit' AND e.turn_key=?3
+               AND o.source_file_id=?4 AND o.file_generation=?5
+             ORDER BY f.response_id",
+        )?;
+        for row in statement.query_map(
+            params![
+                epoch,
+                thread_id,
+                turn_key,
+                context.source_file_id,
+                context.file_generation
+            ],
+            |row| row.get::<_, String>(0),
+        )? {
+            result.closure_response_keys.insert(ResponseKey {
+                owning_thread_id: thread_id.clone(),
+                response_id: row?,
+            });
+        }
+    }
+    for key in &result.closure_response_keys {
+        let markers = load_response_markers(connection, epoch, key)?;
+        for marker in &markers {
+            validate_marker_physical_source(connection, marker)?;
+        }
+        if let Some(binding) = load_response_binding(connection, epoch, key)? {
+            validate_proposal_thread_binding(connection, &binding.proposal, &key.owning_thread_id)?;
+            let occurrences =
+                load_event_occurrences(connection, epoch, &binding.proposal.event_id)?;
+            validate_occurrence_sources(connection, &occurrences, &binding.fact.owning_thread_id)?;
+            let holds = load_event_holds(connection, epoch, &binding.proposal.event_id)?;
+            validate_event_hold_sources(connection, &holds, &key.owning_thread_id)?;
+            let has_resolved_marker = markers.iter().any(|marker| {
+                marker.resolved_event_id.as_deref() == Some(binding.proposal.event_id.as_str())
+            });
+            if occurrences.is_empty() && !has_resolved_marker && holds.is_empty() {
+                return Err(StorageError::usage_conflict(
+                    "response binding has no occurrence, resolved marker, or hold",
+                ));
+            }
+            reconciliation.bindings.insert(key.clone(), binding);
+            result.response_occurrences.insert(key.clone(), occurrences);
+        }
+        reconciliation.markers.extend(markers);
+    }
+    reconciliation.markers.sort_by_key(|marker| {
+        (
+            marker.source_file_id,
+            marker.file_generation,
+            marker.source_start_offset,
+        )
+    });
+    reconciliation.markers.dedup_by(|left, right| {
+        left.source_file_id == right.source_file_id
+            && left.file_generation == right.file_generation
+            && left.source_start_offset == right.source_start_offset
+    });
+    result.context = reconciliation;
+    result.context.expected_fingerprint =
+        compute_reconciliation_context_fingerprint(connection, epoch, &context, &result)?;
+    Ok(result)
+}
+
+fn validate_reconciliation_basic_proof(
+    connection: &Connection,
+    epoch: i64,
+    context: &crate::codex::ingestion::usage_processor::UsageContext,
+    proof: &UsageReconciliationBasicProof,
+) -> StorageResult<()> {
+    if reconciliation_basic_proof_matches(connection, epoch, context, proof)? {
+        Ok(())
+    } else {
+        Err(StorageError::usage_conflict(
+            "usage reconciliation basic proof changed",
+        ))
+    }
+}
+
+fn reconciliation_basic_proof_matches(
+    connection: &Connection,
+    epoch: i64,
+    context: &crate::codex::ingestion::usage_processor::UsageContext,
+    proof: &UsageReconciliationBasicProof,
+) -> StorageResult<bool> {
+    let source: Option<(Option<String>, i64, i64, i64, i64, String)> = connection
+        .query_row(
+            "SELECT thread_id,file_generation,device_id,inode,observed_size,file_status
+             FROM codex_source_files WHERE source_file_id=?1",
+            [context.source_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((thread_id, generation, device_id, inode, observed_size, status)) = source else {
+        return Ok(false);
+    };
+    if thread_id.as_deref() != Some(context.owning_thread_id.as_str())
+        || generation != context.file_generation
+        || device_id != proof.device_id
+        || inode != proof.inode
+        || observed_size != proof.observed_raw_size
+        || status != "present"
+        || proof.observed_raw_size < 0
+    {
+        return Ok(false);
+    }
+    if read_usage_checkpoint(connection, context.source_file_id)? != proof.expected_checkpoint {
+        return Ok(false);
+    }
+    if read_usage_source_state(connection, epoch, context.source_file_id)? != proof.expected_state {
+        return Ok(false);
+    }
+    if proof.expected_state.as_ref().is_some_and(|state| {
+        state.file_generation != context.file_generation
+            || state.device_id != proof.device_id
+            || state.inode != proof.inode
+            || state.owning_thread_id != context.owning_thread_id
+            || state.root_session_id != context.root_session_id
+    }) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn validate_reconciliation_scope(
+    connection: &Connection,
+    context: &crate::codex::ingestion::usage_processor::UsageContext,
+) -> StorageResult<()> {
+    let scope: Option<(
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )> = connection
+        .query_row(
+            "SELECT sf.file_generation,sf.thread_id,t.root_session_id,
+                        mf.file_generation,mf.owning_thread_id
+                 FROM codex_source_files sf
+                 LEFT JOIN threads t ON t.thread_id=sf.thread_id
+                 LEFT JOIN codex_rollout_metadata_facts mf ON mf.source_file_id=sf.source_file_id
+                 WHERE sf.source_file_id=?1",
+            [context.source_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((generation, thread, root, metadata_generation, metadata_thread)) = scope else {
+        return Err(StorageError::usage_conflict(
+            "usage reconciliation source metadata is missing",
+        ));
+    };
+    if generation != context.file_generation
+        || thread.as_deref() != Some(context.owning_thread_id.as_str())
+        || root.as_deref() != Some(context.root_session_id.as_str())
+        || metadata_generation.is_some_and(|value| value != generation)
+        || metadata_thread
+            .as_deref()
+            .is_some_and(|value| value != context.owning_thread_id)
+    {
+        return Err(StorageError::usage_conflict(
+            "usage reconciliation source binding changed",
+        ));
+    }
+    Ok(())
+}
+
+fn load_response_binding(
+    connection: &Connection,
+    epoch: i64,
+    key: &crate::codex::ingestion::usage_processor::ResponseKey,
+) -> StorageResult<Option<crate::codex::ingestion::usage_processor::ResponseBinding>> {
+    use crate::codex::ingestion::usage_processor::{
+        CanonicalUsageProposal, ResponseBinding, UsageEventFact,
+    };
+
+    let mut statement = connection.prepare(
+        "SELECT e.event_id,e.event_kind,e.occurred_at_ms,e.thread_id,e.root_session_id,
+                e.turn_key,e.model,e.reasoning_effort,e.input_tokens,e.cached_tokens,
+                e.cache_write_tokens,e.output_tokens,e.reasoning_tokens,e.total_tokens,
+                f.owning_thread_id,f.response_id,f.evidence_kind,f.operation
+         FROM codex_usage_event_facts f JOIN usage_events e
+           ON e.source=f.source AND e.source_epoch=f.ledger_epoch AND e.event_id=f.event_id
+         WHERE f.source='codex' AND f.ledger_epoch=?1 AND f.owning_thread_id=?2
+           AND f.response_id=?3 ORDER BY e.event_id",
+    )?;
+    let mut rows = statement.query(params![epoch, key.owning_thread_id, key.response_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let usage = NormalizedTokenUsage::new(
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+    )
+    .map_err(super::to_domain_sql_error)?;
+    let event_id: String = row.get(0)?;
+    let proposal = CanonicalUsageProposal {
+        event_id: event_id.clone(),
+        kind: parse_event_kind(&row.get::<_, String>(1)?)?,
+        occurred_at_ms: row.get(2)?,
+        thread_id: row.get(3)?,
+        root_session_id: row.get(4)?,
+        turn_key: row.get(5)?,
+        model: row.get(6)?,
+        reasoning_effort: row.get(7)?,
+        usage,
+    };
+    let fact = UsageEventFact {
+        event_id,
+        owning_thread_id: row.get(14)?,
+        response_id: row.get(15)?,
+        evidence_kind: parse_evidence_kind(&row.get::<_, String>(16)?)?,
+        operation: parse_codex_operation(&row.get::<_, String>(17)?)?,
+    };
+    if fact.response_id.as_deref() != Some(key.response_id.as_str())
+        || fact.owning_thread_id != key.owning_thread_id
+        || rows.next()?.is_some()
+    {
+        return Err(StorageError::invalid_state(
+            "response identity has multiple canonical bindings",
+        ));
+    }
+    Ok(Some(ResponseBinding { proposal, fact }))
+}
+
+fn load_event_binding(
+    connection: &Connection,
+    epoch: i64,
+    event_id: &str,
+) -> StorageResult<
+    Option<(
+        crate::codex::ingestion::usage_processor::CanonicalUsageProposal,
+        crate::codex::ingestion::usage_processor::UsageEventFact,
+    )>,
+> {
+    use crate::codex::ingestion::usage_processor::{CanonicalUsageProposal, UsageEventFact};
+
+    let mut statement = connection.prepare(
+        "SELECT e.event_id,e.event_kind,e.occurred_at_ms,e.thread_id,e.root_session_id,
+                e.turn_key,e.model,e.reasoning_effort,e.input_tokens,e.cached_tokens,
+                e.cache_write_tokens,e.output_tokens,e.reasoning_tokens,e.total_tokens,
+                f.owning_thread_id,f.response_id,f.evidence_kind,f.operation
+         FROM usage_events e JOIN codex_usage_event_facts f
+           ON f.source=e.source AND f.ledger_epoch=e.source_epoch AND f.event_id=e.event_id
+         WHERE e.source='codex' AND e.source_epoch=?1 AND e.event_id=?2
+         ORDER BY f.owning_thread_id,f.response_id",
+    )?;
+    let mut rows = statement.query(params![epoch, event_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let usage = NormalizedTokenUsage::new(
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+    )
+    .map_err(super::to_domain_sql_error)?;
+    let id: String = row.get(0)?;
+    let proposal = CanonicalUsageProposal {
+        event_id: id.clone(),
+        kind: parse_event_kind(&row.get::<_, String>(1)?)?,
+        occurred_at_ms: row.get(2)?,
+        thread_id: row.get(3)?,
+        root_session_id: row.get(4)?,
+        turn_key: row.get(5)?,
+        model: row.get(6)?,
+        reasoning_effort: row.get(7)?,
+        usage,
+    };
+    let fact = UsageEventFact {
+        event_id: id,
+        owning_thread_id: row.get(14)?,
+        response_id: row.get(15)?,
+        evidence_kind: parse_evidence_kind(&row.get::<_, String>(16)?)?,
+        operation: parse_codex_operation(&row.get::<_, String>(17)?)?,
+    };
+    if fact.event_id != event_id
+        || fact.owning_thread_id != proposal.thread_id
+        || rows.next()?.is_some()
+    {
+        return Err(StorageError::usage_conflict(
+            "canonical event has an ambiguous reconciliation fact",
+        ));
+    }
+    Ok(Some((proposal, fact)))
+}
+
+fn load_event_occurrences(
+    connection: &Connection,
+    epoch: i64,
+    event_id: &str,
+) -> StorageResult<Vec<crate::codex::ingestion::usage_processor::Occurrence>> {
+    use crate::codex::ingestion::usage_processor::Occurrence;
+
+    let mut statement = connection.prepare(
+        "SELECT source_file_id,file_generation,source_start_offset,source_end_offset,event_id
+         FROM codex_usage_event_occurrences INDEXED BY codex_usage_event_occurrences_event_idx
+         WHERE source='codex' AND ledger_epoch=?1 AND event_id=?2
+         ORDER BY source_file_id,file_generation,source_start_offset",
+    )?;
+    statement
+        .query_map(params![epoch, event_id], |row| {
+            Ok(Occurrence {
+                source_file_id: row.get(0)?,
+                file_generation: row.get(1)?,
+                source_start_offset: u64::try_from(row.get::<_, i64>(2)?).map_err(|_| {
+                    rusqlite::Error::InvalidParameterName("invalid occurrence offset".to_owned())
+                })?,
+                source_end_offset: u64::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+                    rusqlite::Error::InvalidParameterName("invalid occurrence offset".to_owned())
+                })?,
+                event_id: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StorageError::from)
+}
+
+fn load_event_holds(
+    connection: &Connection,
+    epoch: i64,
+    event_id: &str,
+) -> StorageResult<Vec<UsageEventHoldReference>> {
+    let mut statement = connection.prepare(
+        "SELECT source_file_id,file_generation,event_id,hold_reason
+         FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND event_id=?2
+         ORDER BY source_file_id,file_generation,event_id",
+    )?;
+    statement
+        .query_map(params![epoch, event_id], |row| {
+            Ok(UsageEventHoldReference {
+                source_file_id: row.get(0)?,
+                file_generation: row.get(1)?,
+                event_id: row.get(2)?,
+                hold_reason: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StorageError::from)
+}
+
+fn validate_event_hold_sources(
+    connection: &Connection,
+    holds: &[UsageEventHoldReference],
+    owning_thread_id: &str,
+) -> StorageResult<()> {
+    for hold in holds {
+        if hold.source_file_id <= 0
+            || hold.file_generation <= 0
+            || hold.event_id.is_empty()
+            || !matches!(hold.hold_reason.as_str(), "replay" | "carry")
+        {
+            return Err(StorageError::invalid_state(
+                "invalid Codex usage event hold",
+            ));
+        }
+        let metadata: Option<(Option<String>, i64, Option<i64>, Option<String>)> = connection
+            .query_row(
+                "SELECT sf.thread_id,sf.file_generation,mf.file_generation,mf.owning_thread_id
+                 FROM codex_source_files sf
+                 LEFT JOIN codex_rollout_metadata_facts mf
+                   ON mf.source_file_id=sf.source_file_id
+                 WHERE sf.source_file_id=?1",
+                [hold.source_file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((source_thread, source_generation, metadata_generation, metadata_thread)) =
+            metadata
+        else {
+            return Err(StorageError::usage_conflict(
+                "response hold source metadata is missing",
+            ));
+        };
+        if source_thread.as_deref() != Some(owning_thread_id)
+            || source_generation != hold.file_generation
+            || metadata_generation.is_some_and(|generation| generation != hold.file_generation)
+            || metadata_thread
+                .as_deref()
+                .is_some_and(|thread| thread != owning_thread_id)
+        {
+            return Err(StorageError::usage_conflict(
+                "response hold source binding changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_occurrence_sources(
+    connection: &Connection,
+    occurrences: &[crate::codex::ingestion::usage_processor::Occurrence],
+    owning_thread_id: &str,
+) -> StorageResult<()> {
+    for occurrence in occurrences {
+        if occurrence.source_file_id <= 0
+            || occurrence.file_generation <= 0
+            || occurrence.source_end_offset <= occurrence.source_start_offset
+        {
+            return Err(StorageError::usage_conflict(
+                "reconciliation dependency has an invalid physical occurrence",
+            ));
+        }
+        validate_physical_source_binding(
+            connection,
+            occurrence.source_file_id,
+            occurrence.file_generation,
+            owning_thread_id,
+            i64::try_from(occurrence.source_end_offset).map_err(|_| {
+                StorageError::usage_conflict("reconciliation occurrence offset exceeds storage")
+            })?,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_physical_source_binding(
+    connection: &Connection,
+    source_file_id: i64,
+    file_generation: i64,
+    owning_thread_id: &str,
+    required_through_offset: i64,
+) -> StorageResult<()> {
+    let physical: Option<(
+        Option<String>,
+        i64,
+        i64,
+        String,
+        Option<i64>,
+        Option<String>,
+    )> = connection
+        .query_row(
+            "SELECT sf.thread_id,sf.file_generation,sf.observed_size,sf.file_status,
+                    mf.file_generation,mf.owning_thread_id
+             FROM codex_source_files sf
+             LEFT JOIN codex_rollout_metadata_facts mf ON mf.source_file_id=sf.source_file_id
+             WHERE sf.source_file_id=?1",
+            [source_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((thread, generation, observed, status, metadata_generation, metadata_thread)) =
+        physical
+    else {
+        return Err(StorageError::usage_conflict(
+            "reconciliation dependency source metadata is missing",
+        ));
+    };
+    if thread.as_deref() != Some(owning_thread_id)
+        || generation != file_generation
+        || observed < required_through_offset
+        || status != "present"
+        || metadata_generation.is_some_and(|value| value != file_generation)
+        || metadata_thread
+            .as_deref()
+            .is_some_and(|value| value != owning_thread_id)
+    {
+        return Err(StorageError::usage_conflict(
+            "reconciliation dependency physical source binding changed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_proposal_thread_binding(
+    connection: &Connection,
+    proposal: &crate::codex::ingestion::usage_processor::CanonicalUsageProposal,
+    owning_thread_id: &str,
+) -> StorageResult<()> {
+    if proposal.thread_id != owning_thread_id {
+        return Err(StorageError::usage_conflict(
+            "reconciliation canonical event Thread binding changed",
+        ));
+    }
+    let thread: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT source,root_session_id FROM threads WHERE thread_id=?1",
+            [owning_thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if thread
+        .as_ref()
+        .map(|(source, root)| (source.as_str(), root.as_deref()))
+        != Some(("codex", Some(proposal.root_session_id.as_str())))
+    {
+        return Err(StorageError::usage_conflict(
+            "reconciliation canonical event root binding changed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_window_physical_source(
+    connection: &Connection,
+    window: &crate::codex::ingestion::usage_processor::LegacyWindowWrite,
+) -> StorageResult<()> {
+    let start = i64::try_from(window.source_start_offset)
+        .map_err(|_| StorageError::usage_conflict("window start offset exceeds storage"))?;
+    let end = i64::try_from(window.source_end_offset)
+        .map_err(|_| StorageError::usage_conflict("window end offset exceeds storage"))?;
+    if start < 0 || end <= start {
+        return Err(StorageError::usage_conflict(
+            "reconciliation window has an invalid physical range",
+        ));
+    }
+    validate_physical_source_binding(
+        connection,
+        window.source_file_id,
+        window.file_generation,
+        &window.owning_thread_id,
+        end,
+    )
+}
+
+fn validate_turn_physical_source(
+    connection: &Connection,
+    turn: &crate::codex::ingestion::usage_processor::PersistedTurnSnapshot,
+) -> StorageResult<()> {
+    let required = turn
+        .end_offset
+        .unwrap_or(turn.state_through_offset)
+        .max(turn.state.start_offset);
+    let required = i64::try_from(required)
+        .map_err(|_| StorageError::usage_conflict("Turn offset exceeds storage"))?;
+    validate_physical_source_binding(
+        connection,
+        turn.key.source_file_id,
+        turn.key.file_generation,
+        &turn.owning_thread_id,
+        required,
+    )
+}
+
+fn validate_marker_physical_source(
+    connection: &Connection,
+    marker: &crate::codex::ingestion::usage_processor::CompactionMarkerWrite,
+) -> StorageResult<()> {
+    let start = i64::try_from(marker.source_start_offset)
+        .map_err(|_| StorageError::usage_conflict("marker offset exceeds storage"))?;
+    let end = i64::try_from(marker.source_end_offset)
+        .map_err(|_| StorageError::usage_conflict("marker offset exceeds storage"))?;
+    if start < 0 || end <= start {
+        return Err(StorageError::usage_conflict(
+            "compaction marker has an invalid physical range",
+        ));
+    }
+    validate_physical_source_binding(
+        connection,
+        marker.source_file_id,
+        marker.file_generation,
+        &marker.owning_thread_id,
+        end,
+    )
+}
+
+fn load_response_markers(
+    connection: &Connection,
+    epoch: i64,
+    key: &crate::codex::ingestion::usage_processor::ResponseKey,
+) -> StorageResult<Vec<crate::codex::ingestion::usage_processor::CompactionMarkerWrite>> {
+    use crate::codex::ingestion::usage_processor::CompactionMarkerWrite;
+
+    let mut statement = connection.prepare(
+        "SELECT source_file_id,file_generation,source_start_offset,source_end_offset,
+                owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,response_id,
+                resolved_event_id,unknown_reason
+         FROM codex_compaction_markers
+         WHERE source='codex' AND ledger_epoch=?1 AND owning_thread_id=?2 AND response_id=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+    )?;
+    statement
+        .query_map(
+            params![epoch, key.owning_thread_id, key.response_id],
+            |row| {
+                let unknown: Option<String> = row.get(11)?;
+                Ok(CompactionMarkerWrite {
+                    source_file_id: row.get(0)?,
+                    file_generation: row.get(1)?,
+                    source_start_offset: u64::try_from(row.get::<_, i64>(2)?).map_err(|_| {
+                        rusqlite::Error::InvalidParameterName("invalid marker offset".to_owned())
+                    })?,
+                    source_end_offset: u64::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+                        rusqlite::Error::InvalidParameterName("invalid marker offset".to_owned())
+                    })?,
+                    owning_thread_id: row.get(4)?,
+                    root_session_id: row.get(5)?,
+                    occurred_at_ms: row.get(6)?,
+                    model: row.get(7)?,
+                    reasoning_effort: row.get(8)?,
+                    response_id: row.get(9)?,
+                    resolved_event_id: row.get(10)?,
+                    unknown_reason: unknown
+                        .as_deref()
+                        .map(parse_marker_unknown_reason)
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::InvalidParameterName(error.to_string())
+                        })?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StorageError::from)
+}
+
+fn load_turn_windows(
+    connection: &Connection,
+    epoch: i64,
+    thread_id: &str,
+    turn_key: Option<&str>,
+) -> StorageResult<Vec<crate::codex::ingestion::usage_processor::LegacyWindowWrite>> {
+    use crate::codex::ingestion::usage_processor::LegacyWindowWrite;
+
+    let mut statement = connection.prepare(
+        "SELECT source_file_id,file_generation,source_start_offset,source_end_offset,
+                owning_thread_id,turn_key,state_json
+         FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND owning_thread_id=?2 AND turn_key IS ?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+    )?;
+    let mut windows = Vec::new();
+    for row in statement.query_map(params![epoch, thread_id, turn_key], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })? {
+        let (source_file_id, file_generation, start, end, owning, turn, state_json) = row?;
+        let canonical = canonical_window_state(&state_json)?;
+        let state =
+            crate::codex::ingestion::usage_processor::LegacyReconciliationWindow::from_json(
+                &canonical,
+            )
+            .map_err(|_| StorageError::invalid_state("invalid persisted reconciliation window"))?;
+        windows.push(LegacyWindowWrite {
+            source_file_id,
+            file_generation,
+            source_start_offset: u64::try_from(start)
+                .map_err(|_| StorageError::invalid_state("invalid window start offset"))?,
+            source_end_offset: u64::try_from(end)
+                .map_err(|_| StorageError::invalid_state("invalid window end offset"))?,
+            owning_thread_id: owning,
+            turn_key: turn,
+            state,
+        });
+    }
+    Ok(windows)
+}
+
+fn load_turn_snapshots(
+    connection: &Connection,
+    epoch: i64,
+    thread_id: &str,
+    turn_key: Option<&str>,
+) -> StorageResult<Vec<crate::codex::ingestion::usage_processor::PersistedTurnSnapshot>> {
+    let mut statement = connection.prepare(
+        "SELECT source_file_id,file_generation,turn_key,thread_id,raw_turn_id,started_at_ms,
+                ended_at_ms,start_offset,end_offset,status,
+                start_total_input_tokens,start_total_cached_tokens,start_total_cache_write_tokens,
+                start_total_output_tokens,start_total_reasoning_tokens,start_total_total_tokens,start_total_fingerprint,
+                last_total_input_tokens,last_total_cached_tokens,last_total_cache_write_tokens,
+                last_total_output_tokens,last_total_reasoning_tokens,last_total_total_tokens,last_total_fingerprint,
+                accounted_input_tokens,accounted_cached_tokens,accounted_cache_write_tokens,
+                accounted_output_tokens,accounted_reasoning_tokens,accounted_total_tokens,accounted_fingerprint,
+                accounted_candidate_count,model_state,single_model,unresolved_model_seen,
+                reasoning_effort_state,single_reasoning_effort,unresolved_reasoning_effort_seen,
+                compensation_allowed,block_start_missing,block_time_missing,block_reset,
+                block_ownership_gap,block_parser_gap,block_required_invalid,block_model_unresolved,
+                quality_status,state_through_offset
+         FROM codex_turns
+         WHERE ledger_epoch=?1 AND thread_id=?2 AND turn_key IS ?3
+         ORDER BY source_file_id,file_generation,turn_key",
+    )?;
+    let mut snapshots = Vec::new();
+    for row in statement.query_map(
+        params![epoch, thread_id, turn_key],
+        read_persisted_turn_snapshot,
+    )? {
+        snapshots.push(row?);
+    }
+    Ok(snapshots)
+}
+
+fn load_turn_compensation(
+    connection: &Connection,
+    epoch: i64,
+    turn: &crate::codex::ingestion::usage_processor::PersistedTurnSnapshot,
+) -> StorageResult<(
+    Vec<crate::codex::ingestion::usage_processor::CanonicalUsageProposal>,
+    Vec<crate::codex::ingestion::usage_processor::Occurrence>,
+)> {
+    use crate::codex::ingestion::usage_processor::CanonicalUsageProposal;
+
+    let mut statement = connection.prepare(
+        "SELECT e.event_id,e.event_kind,e.occurred_at_ms,e.thread_id,e.root_session_id,
+                e.turn_key,e.model,e.reasoning_effort,e.input_tokens,e.cached_tokens,
+                e.cache_write_tokens,e.output_tokens,e.reasoning_tokens,e.total_tokens
+         FROM usage_events e
+         WHERE e.source='codex' AND e.source_epoch=?1 AND e.thread_id=?2
+           AND e.turn_key=?3 AND e.event_kind='turn_compensation'
+         ORDER BY e.event_id",
+    )?;
+    let mut event_map = BTreeMap::new();
+    let mut occurrences = Vec::new();
+    for row in statement.query_map(
+        params![epoch, turn.owning_thread_id, turn.key.turn_key],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+            ))
+        },
+    )? {
+        let (
+            event_id,
+            kind,
+            occurred,
+            thread,
+            root,
+            event_turn,
+            model,
+            effort,
+            input,
+            cached,
+            cache_write,
+            output,
+            reasoning,
+            total,
+        ) = row?;
+        if thread != turn.owning_thread_id
+            || event_turn.as_deref() != Some(turn.key.turn_key.as_str())
+        {
+            return Err(StorageError::usage_conflict(
+                "Turn compensation event identity changed",
+            ));
+        }
+        let usage = NormalizedTokenUsage::new(input, cached, cache_write, output, reasoning, total)
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+        let proposal = CanonicalUsageProposal {
+            event_id: event_id.clone(),
+            kind: parse_event_kind(&kind)?,
+            occurred_at_ms: occurred,
+            thread_id: thread,
+            root_session_id: root,
+            turn_key: event_turn,
+            model,
+            reasoning_effort: effort,
+            usage,
+        };
+        validate_proposal_thread_binding(connection, &proposal, &turn.owning_thread_id)?;
+        event_map.insert(event_id.clone(), proposal);
+        let event_occurrences = load_event_occurrences(connection, epoch, &event_id)?;
+        if event_occurrences.is_empty() {
+            return Err(StorageError::usage_conflict(
+                "Turn compensation event has no physical occurrence",
+            ));
+        }
+        validate_occurrence_sources(connection, &event_occurrences, &turn.owning_thread_id)?;
+        occurrences.extend(event_occurrences);
+    }
+    let events = event_map.into_values().collect();
+    Ok((events, occurrences))
+}
+
+fn read_persisted_turn_snapshot(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::codex::ingestion::usage_processor::PersistedTurnSnapshot> {
+    use crate::codex::ingestion::usage_processor::{
+        CompensationBlocks, PersistedTurnKey, PersistedTurnSnapshot, PersistedTurnStatus,
+        TurnModelState, TurnReasoningEffortState, TurnState,
+    };
+
+    let vector = |start: usize| -> rusqlite::Result<Option<NormalizedTokenUsage>> {
+        let Some(input) = row.get::<_, Option<i64>>(start)? else {
+            for index in 1..6 {
+                if row.get::<_, Option<i64>>(start + index)?.is_some() {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "partial persisted Turn usage vector".to_owned(),
+                    ));
+                }
+            }
+            if row.get::<_, Option<Vec<u8>>>(start + 6)?.is_some() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "Turn usage fingerprint without vector".to_owned(),
+                ));
+            }
+            return Ok(None);
+        };
+        let value = NormalizedTokenUsage::new(
+            input,
+            row.get(start + 1)?,
+            row.get(start + 2)?,
+            row.get(start + 3)?,
+            row.get(start + 4)?,
+            row.get(start + 5)?,
+        )
+        .map_err(super::to_domain_sql_error)?;
+        let fingerprint: Option<Vec<u8>> = row.get(start + 6)?;
+        if fingerprint.as_deref()
+            != Some(crate::codex::normalization::usage_fingerprint(&value).as_slice())
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "persisted Turn usage fingerprint mismatch".to_owned(),
+            ));
+        }
+        Ok(Some(value))
+    };
+    let start_total = vector(10)?;
+    let last_total = vector(17)?;
+    let accounted = vector(24)?.ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName("Turn accounted usage is missing".to_owned())
+    })?;
+    let status_text: String = row.get(9)?;
+    let status = match status_text.as_str() {
+        "open" => PersistedTurnStatus::Open,
+        "completed" => PersistedTurnStatus::Completed,
+        "aborted" => PersistedTurnStatus::Aborted,
+        "failed" => PersistedTurnStatus::Failed,
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid Turn status".to_owned(),
+            ));
+        }
+    };
+    let model_state_text: String = row.get(32)?;
+    let model_state_value: Option<String> = row.get(33)?;
+    let model_state = match (model_state_text.as_str(), model_state_value) {
+        ("none", None) => TurnModelState::None,
+        ("single", Some(model)) => TurnModelState::Single(model),
+        ("mixed", None) => TurnModelState::Mixed,
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid Turn model state".to_owned(),
+            ));
+        }
+    };
+    let effort_state_text: String = row.get(35)?;
+    let effort_state_value: Option<String> = row.get(36)?;
+    let reasoning_effort_state = match (effort_state_text.as_str(), effort_state_value) {
+        ("none", None) => TurnReasoningEffortState::None,
+        ("single", Some(effort)) => TurnReasoningEffortState::Single(effort),
+        ("mixed", None) => TurnReasoningEffortState::Mixed,
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid Turn reasoning state".to_owned(),
+            ));
+        }
+    };
+    let blocks = CompensationBlocks {
+        start_missing: row.get::<_, i64>(39)? != 0,
+        time_missing: row.get::<_, i64>(40)? != 0,
+        reset: row.get::<_, i64>(41)? != 0,
+        ownership_gap: row.get::<_, i64>(42)? != 0,
+        parser_gap: row.get::<_, i64>(43)? != 0,
+        required_invalid: row.get::<_, i64>(44)? != 0,
+        model_unresolved: row.get::<_, i64>(45)? != 0,
+    };
+    if (row.get::<_, i64>(38)? != 0) != blocks.allowed() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "persisted Turn compensation state mismatch".to_owned(),
+        ));
+    }
+    let quality_status: String = row.get(46)?;
+    if !matches!(quality_status.as_str(), "complete" | "partial" | "conflict") {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid Turn quality state".to_owned(),
+        ));
+    }
+    let source_file_id: i64 = row.get(0)?;
+    let file_generation: i64 = row.get(1)?;
+    let turn_key: String = row.get(2)?;
+    let thread_id: String = row.get(3)?;
+    let state = TurnState {
+        turn_key: turn_key.clone(),
+        raw_turn_id: row.get(4)?,
+        started_at_ms: row.get(5)?,
+        start_offset: u64::try_from(row.get::<_, i64>(7)?).map_err(|_| {
+            rusqlite::Error::InvalidParameterName("invalid Turn start offset".to_owned())
+        })?,
+        start_total,
+        last_total,
+        accounted,
+        accounted_candidate_count: u64::try_from(row.get::<_, i64>(31)?).map_err(|_| {
+            rusqlite::Error::InvalidParameterName("invalid Turn accounted count".to_owned())
+        })?,
+        model_state,
+        unresolved_model_seen: row.get::<_, i64>(34)? != 0,
+        reasoning_effort_state,
+        unresolved_reasoning_effort_seen: row.get::<_, i64>(37)? != 0,
+        blocks,
+    };
+    Ok(PersistedTurnSnapshot {
+        key: PersistedTurnKey {
+            source_file_id,
+            file_generation,
+            turn_key,
+        },
+        owning_thread_id: thread_id,
+        state,
+        status,
+        ended_at_ms: row.get(6)?,
+        end_offset: row
+            .get::<_, Option<i64>>(8)?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| {
+                rusqlite::Error::InvalidParameterName("invalid Turn end offset".to_owned())
+            })?,
+        quality_status,
+        state_through_offset: u64::try_from(row.get::<_, i64>(47)?).map_err(|_| {
+            rusqlite::Error::InvalidParameterName("invalid Turn state offset".to_owned())
+        })?,
+    })
+}
+
+fn parse_event_kind(value: &str) -> StorageResult<EventKind> {
+    match value {
+        "normal" => Ok(EventKind::Normal),
+        "recovered" => Ok(EventKind::Recovered),
+        "turn_compensation" => Ok(EventKind::TurnCompensation),
+        _ => Err(StorageError::invalid_state(
+            "invalid canonical usage event kind",
+        )),
+    }
+}
+
+fn parse_evidence_kind(value: &str) -> StorageResult<EvidenceKind> {
+    match value {
+        "explicit" => Ok(EvidenceKind::Explicit),
+        "legacy" => Ok(EvidenceKind::Legacy),
+        _ => Err(StorageError::invalid_state("invalid usage evidence kind")),
+    }
+}
+
+fn parse_codex_operation(value: &str) -> StorageResult<CodexOperation> {
+    match value {
+        "response" => Ok(CodexOperation::Response),
+        "compaction" => Ok(CodexOperation::Compaction),
+        _ => Err(StorageError::invalid_state("invalid Codex usage operation")),
+    }
+}
+
+fn parse_marker_unknown_reason(
+    value: &str,
+) -> StorageResult<crate::codex::ingestion::usage_processor::MarkerUnknownReason> {
+    use crate::codex::ingestion::usage_processor::MarkerUnknownReason;
+
+    match value {
+        "usage_missing" => Ok(MarkerUnknownReason::UsageMissing),
+        "identity_missing" => Ok(MarkerUnknownReason::IdentityMissing),
+        "usage_invalid" => Ok(MarkerUnknownReason::UsageInvalid),
+        "time_missing" => Ok(MarkerUnknownReason::TimeMissing),
+        "model_unresolved" => Ok(MarkerUnknownReason::ModelUnresolved),
+        _ => Err(StorageError::invalid_state(
+            "invalid Compaction marker reason",
+        )),
+    }
+}
+
+fn compute_reconciliation_context_fingerprint(
+    connection: &Connection,
+    epoch: i64,
+    context: &crate::codex::ingestion::usage_processor::UsageContext,
+    frozen: &UsageReconciliationContext,
+) -> StorageResult<Vec<u8>> {
+    use crate::codex::ingestion::usage_processor::{
+        PersistedTurnStatus, TurnModelState, TurnReasoningEffortState,
+    };
+
+    let reconciliation = &frozen.context;
+    let request = &reconciliation.request;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"codex-reconciliation-context-v1\0");
+    hash_i64(&mut hasher, epoch);
+    hash_i64(&mut hasher, context.source_file_id);
+    hash_i64(&mut hasher, context.file_generation);
+    hash_text(&mut hasher, &context.owning_thread_id);
+    hash_text(&mut hasher, &context.root_session_id);
+    hash_len(&mut hasher, request.response_keys.len());
+    for key in &request.response_keys {
+        hash_text(&mut hasher, &key.owning_thread_id);
+        hash_text(&mut hasher, &key.response_id);
+        if let Some(binding) = reconciliation.bindings.get(key) {
+            hasher.update(&[1]);
+            hash_proposal(&mut hasher, &binding.proposal);
+            hash_fact(&mut hasher, &binding.fact);
+        } else {
+            hasher.update(&[0]);
+        }
+    }
+    hash_len(&mut hasher, frozen.closure_response_keys.len());
+    for key in &frozen.closure_response_keys {
+        hash_text(&mut hasher, &key.owning_thread_id);
+        hash_text(&mut hasher, &key.response_id);
+        if let Some(binding) = reconciliation.bindings.get(key) {
+            hasher.update(&[1]);
+            hash_proposal(&mut hasher, &binding.proposal);
+            hash_fact(&mut hasher, &binding.fact);
+        } else {
+            hasher.update(&[0]);
+        }
+        if let Some(occurrences) = frozen.response_occurrences.get(key) {
+            hasher.update(&[1]);
+            hash_len(&mut hasher, occurrences.len());
+            for occurrence in occurrences {
+                hash_occurrence(&mut hasher, occurrence);
+            }
+        } else {
+            hasher.update(&[0]);
+        }
+    }
+    let mut markers = reconciliation.markers.iter().collect::<Vec<_>>();
+    markers.sort_by_key(|marker| {
+        (
+            marker.source_file_id,
+            marker.file_generation,
+            marker.source_start_offset,
+        )
+    });
+    hash_len(&mut hasher, markers.len());
+    for marker in markers {
+        hash_i64(&mut hasher, marker.source_file_id);
+        hash_i64(&mut hasher, marker.file_generation);
+        hash_u64(&mut hasher, marker.source_start_offset);
+        hash_u64(&mut hasher, marker.source_end_offset);
+        hash_text(&mut hasher, &marker.owning_thread_id);
+        hash_text(&mut hasher, &marker.root_session_id);
+        hash_opt_i64(&mut hasher, marker.occurred_at_ms);
+        hash_opt_text(&mut hasher, marker.model.as_deref());
+        hash_opt_text(&mut hasher, marker.reasoning_effort.as_deref());
+        hash_opt_text(&mut hasher, marker.response_id.as_deref());
+        hash_opt_text(&mut hasher, marker.resolved_event_id.as_deref());
+        hash_opt_text(
+            &mut hasher,
+            marker.unknown_reason.map(marker_unknown_reason_str),
+        );
+    }
+    hash_len(&mut hasher, reconciliation.windows.len());
+    for (key, window) in &reconciliation.windows {
+        hash_i64(&mut hasher, key.source_file_id);
+        hash_i64(&mut hasher, key.file_generation);
+        hash_u64(&mut hasher, key.start_offset);
+        let json = window
+            .to_json()
+            .map_err(|_| StorageError::invalid_state("invalid context window"))?;
+        hash_text(&mut hasher, &json);
+        if let Some(metadata) = frozen.window_metadata.get(key) {
+            hasher.update(&[1]);
+            hash_i64(&mut hasher, metadata.source_file_id);
+            hash_i64(&mut hasher, metadata.file_generation);
+            hash_u64(&mut hasher, metadata.source_start_offset);
+            hash_u64(&mut hasher, metadata.source_end_offset);
+            hash_text(&mut hasher, &metadata.owning_thread_id);
+            hash_opt_text(&mut hasher, metadata.turn_key.as_deref());
+        } else {
+            return Err(StorageError::usage_conflict(
+                "reconciliation context omitted physical window metadata",
+            ));
+        }
+        let proposals = frozen.window_proposals.get(key).ok_or_else(|| {
+            StorageError::usage_conflict("reconciliation context omitted window proposal closure")
+        })?;
+        hash_len(&mut hasher, proposals.len());
+        for binding in proposals {
+            hash_proposal(&mut hasher, &binding.proposal);
+            hash_fact(&mut hasher, &binding.fact);
+            hash_len(&mut hasher, binding.occurrences.len());
+            for occurrence in &binding.occurrences {
+                hash_occurrence(&mut hasher, occurrence);
+            }
+        }
+    }
+    hash_len(&mut hasher, request.owning_turn_keys.len());
+    for (thread_id, turn_key) in &request.owning_turn_keys {
+        hash_text(&mut hasher, thread_id);
+        hash_opt_text(&mut hasher, turn_key.as_deref());
+        let turns = reconciliation
+            .affected_turns
+            .iter()
+            .filter(|(_, affected)| {
+                affected.snapshot.owning_thread_id == *thread_id
+                    && affected.snapshot.key.turn_key.as_str() == turn_key.as_deref().unwrap_or("")
+            })
+            .collect::<Vec<_>>();
+        hash_len(&mut hasher, turns.len());
+        for (key, affected) in turns {
+            hash_i64(&mut hasher, key.source_file_id);
+            hash_i64(&mut hasher, key.file_generation);
+            hash_text(&mut hasher, &key.turn_key);
+            let snapshot = &affected.snapshot;
+            hash_text(&mut hasher, &snapshot.owning_thread_id);
+            hash_text(&mut hasher, &snapshot.state.turn_key);
+            hash_opt_text(&mut hasher, snapshot.state.raw_turn_id.as_deref());
+            hash_opt_i64(&mut hasher, snapshot.state.started_at_ms);
+            hash_u64(&mut hasher, snapshot.state.start_offset);
+            hash_optional_usage(&mut hasher, snapshot.state.start_total.as_ref());
+            hash_optional_usage(&mut hasher, snapshot.state.last_total.as_ref());
+            hash_usage(&mut hasher, &snapshot.state.accounted);
+            hash_u64(&mut hasher, snapshot.state.accounted_candidate_count);
+            match &snapshot.state.model_state {
+                TurnModelState::None => {
+                    hasher.update(&[0]);
+                }
+                TurnModelState::Single(model) => {
+                    hasher.update(&[1]);
+                    hash_text(&mut hasher, model);
+                }
+                TurnModelState::Mixed => {
+                    hasher.update(&[2]);
+                }
+            }
+            hasher.update(&[u8::from(snapshot.state.unresolved_model_seen)]);
+            match &snapshot.state.reasoning_effort_state {
+                TurnReasoningEffortState::None => {
+                    hasher.update(&[0]);
+                }
+                TurnReasoningEffortState::Single(effort) => {
+                    hasher.update(&[1]);
+                    hash_text(&mut hasher, effort);
+                }
+                TurnReasoningEffortState::Mixed => {
+                    hasher.update(&[2]);
+                }
+            }
+            hasher.update(&[u8::from(snapshot.state.unresolved_reasoning_effort_seen)]);
+            let blocks = snapshot.state.blocks;
+            for flag in [
+                blocks.start_missing,
+                blocks.time_missing,
+                blocks.reset,
+                blocks.ownership_gap,
+                blocks.parser_gap,
+                blocks.required_invalid,
+                blocks.model_unresolved,
+            ] {
+                hasher.update(&[u8::from(flag)]);
+            }
+            hasher.update(&[match snapshot.status {
+                PersistedTurnStatus::Open => 0,
+                PersistedTurnStatus::Completed => 1,
+                PersistedTurnStatus::Aborted => 2,
+                PersistedTurnStatus::Failed => 3,
+            }]);
+            hash_opt_i64(&mut hasher, snapshot.ended_at_ms);
+            hash_opt_u64(&mut hasher, snapshot.end_offset);
+            hash_text(&mut hasher, &snapshot.quality_status);
+            hash_u64(&mut hasher, snapshot.state_through_offset);
+            hash_len(&mut hasher, affected.compensation_events.len());
+            for event in &affected.compensation_events {
+                hash_proposal(&mut hasher, event);
+            }
+            hash_len(&mut hasher, affected.compensation_occurrences.len());
+            for occurrence in &affected.compensation_occurrences {
+                hash_i64(&mut hasher, occurrence.source_file_id);
+                hash_i64(&mut hasher, occurrence.file_generation);
+                hash_u64(&mut hasher, occurrence.source_start_offset);
+                hash_u64(&mut hasher, occurrence.source_end_offset);
+                hash_text(&mut hasher, &occurrence.event_id);
+            }
+        }
+    }
+    append_context_metadata_fingerprint(connection, epoch, context, frozen, &mut hasher)?;
+    Ok(hasher.finalize().as_bytes().to_vec())
+}
+
+fn append_context_metadata_fingerprint(
+    connection: &Connection,
+    epoch: i64,
+    context: &crate::codex::ingestion::usage_processor::UsageContext,
+    frozen: &UsageReconciliationContext,
+    hasher: &mut blake3::Hasher,
+) -> StorageResult<()> {
+    let reconciliation = &frozen.context;
+    let mut source_ids = BTreeSet::from([context.source_file_id]);
+    let mut thread_ids = BTreeSet::from([
+        context.owning_thread_id.clone(),
+        context.root_session_id.clone(),
+    ]);
+    for key in &reconciliation.request.response_keys {
+        thread_ids.insert(key.owning_thread_id.clone());
+    }
+    for key in &frozen.closure_response_keys {
+        thread_ids.insert(key.owning_thread_id.clone());
+    }
+    for marker in &reconciliation.markers {
+        source_ids.insert(marker.source_file_id);
+        thread_ids.insert(marker.owning_thread_id.clone());
+        thread_ids.insert(marker.root_session_id.clone());
+    }
+    for key in reconciliation.windows.keys() {
+        source_ids.insert(key.source_file_id);
+    }
+    for affected in reconciliation.affected_turns.values() {
+        source_ids.insert(affected.snapshot.key.source_file_id);
+        thread_ids.insert(affected.snapshot.owning_thread_id.clone());
+        for occurrence in &affected.compensation_occurrences {
+            source_ids.insert(occurrence.source_file_id);
+        }
+        for event in &affected.compensation_events {
+            thread_ids.insert(event.thread_id.clone());
+            thread_ids.insert(event.root_session_id.clone());
+        }
+    }
+    for binding in reconciliation.bindings.values() {
+        thread_ids.insert(binding.proposal.thread_id.clone());
+        thread_ids.insert(binding.proposal.root_session_id.clone());
+    }
+    for proposals in frozen.window_proposals.values() {
+        for binding in proposals {
+            thread_ids.insert(binding.proposal.thread_id.clone());
+            thread_ids.insert(binding.proposal.root_session_id.clone());
+            for occurrence in &binding.occurrences {
+                source_ids.insert(occurrence.source_file_id);
+            }
+        }
+    }
+    for occurrences in frozen.response_occurrences.values() {
+        for occurrence in occurrences {
+            source_ids.insert(occurrence.source_file_id);
+        }
+    }
+    for metadata in frozen.window_metadata.values() {
+        source_ids.insert(metadata.source_file_id);
+        thread_ids.insert(metadata.owning_thread_id.clone());
+    }
+    let mut referenced_event_ids = reconciliation
+        .bindings
+        .values()
+        .map(|binding| binding.proposal.event_id.clone())
+        .collect::<BTreeSet<_>>();
+    for proposals in frozen.window_proposals.values() {
+        referenced_event_ids.extend(
+            proposals
+                .iter()
+                .map(|binding| binding.proposal.event_id.clone()),
+        );
+    }
+    for affected in reconciliation.affected_turns.values() {
+        referenced_event_ids.extend(
+            affected
+                .compensation_events
+                .iter()
+                .map(|event| event.event_id.clone()),
+        );
+    }
+    hasher.update(b"reconciliation-event-holds-v1\0");
+    hash_len(hasher, referenced_event_ids.len());
+    for event_id in referenced_event_ids {
+        hash_text(hasher, &event_id);
+        let holds = load_event_holds(connection, epoch, &event_id)?;
+        hash_len(hasher, holds.len());
+        for hold in holds {
+            hash_i64(hasher, hold.source_file_id);
+            hash_i64(hasher, hold.file_generation);
+            hash_text(hasher, &hold.event_id);
+            hash_text(hasher, &hold.hold_reason);
+            source_ids.insert(hold.source_file_id);
+        }
+    }
+    for source_id in source_ids {
+        hash_i64(hasher, source_id);
+        append_query_rows(
+            connection,
+            hasher,
+            b"codex_source_files",
+            "SELECT source_file_id,thread_id,current_path,source_area,device_id,inode,
+                    file_generation,observed_size,observed_mtime_ns,file_status
+             FROM codex_source_files WHERE source_file_id=?1",
+            params![source_id],
+        )?;
+        append_query_rows(
+            connection,
+            hasher,
+            b"codex_rollout_metadata_facts",
+            "SELECT source_file_id,file_generation,metadata_parser_version,resolved_through_offset,
+                    owning_thread_id,continuation_state,cwd,cwd_provenance,cwd_record_offset,
+                    latest_context_model,latest_context_at_ms,parent_thread_id_hint,
+                    parent_hint_provenance,parent_hint_record_offset,agent_role_hint,
+                    agent_role_provenance,agent_role_record_offset,replay_start_offset,
+                    owning_records_start_offset,ownership_confidence,fact_quality_status
+             FROM codex_rollout_metadata_facts WHERE source_file_id=?1",
+            params![source_id],
+        )?;
+    }
+    for thread_id in thread_ids {
+        hash_text(hasher, &thread_id);
+        append_query_rows(
+            connection,
+            hasher,
+            b"threads",
+            "SELECT thread_id,source,native_session_id,parent_thread_id,root_session_id,
+                    agent_role,metadata_model,metadata_quality_status
+             FROM threads WHERE thread_id=?1",
+            params![thread_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn append_query_rows<P: rusqlite::Params>(
+    connection: &Connection,
+    hasher: &mut blake3::Hasher,
+    table_tag: &[u8],
+    sql: &str,
+    params: P,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(sql)?;
+    hasher.update(&(table_tag.len() as u64).to_be_bytes());
+    hasher.update(table_tag);
+    let column_count = statement.column_count() as u64;
+    let mut rows = statement.query(params)?;
+    while let Some(row) = rows.next()? {
+        hasher.update(&[0xff]);
+        hasher.update(&column_count.to_be_bytes());
+        for index in 0..column_count as usize {
+            match row.get_ref(index)? {
+                rusqlite::types::ValueRef::Null => {
+                    hasher.update(&[0]);
+                }
+                rusqlite::types::ValueRef::Integer(value) => {
+                    hasher.update(&[1]);
+                    hasher.update(&value.to_be_bytes());
+                }
+                rusqlite::types::ValueRef::Real(value) => {
+                    hasher.update(&[2]);
+                    hasher.update(&value.to_bits().to_be_bytes());
+                }
+                rusqlite::types::ValueRef::Text(value) => {
+                    hasher.update(&[3]);
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+                rusqlite::types::ValueRef::Blob(value) => {
+                    hasher.update(&[4]);
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value);
+                }
+            };
+        }
+    }
+    hasher.update(&[0xfe]);
+    Ok(())
+}
+
+pub(super) fn append_usage_source_private_proof(
+    connection: &Connection,
+    epoch: i64,
+    source_file_id: i64,
+    file_generation: i64,
+    hasher: &mut blake3::Hasher,
+) -> StorageResult<()> {
+    hasher.update(b"usage-source-private-evidence-v1\0");
+    hash_i64(hasher, epoch);
+    hash_i64(hasher, source_file_id);
+    hash_i64(hasher, file_generation);
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_occurrences",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,event_id
+         FROM codex_usage_event_occurrences
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_facts",
+        "SELECT f.source,f.ledger_epoch,f.event_id,f.owning_thread_id,f.response_id,
+                f.evidence_kind,f.operation
+         FROM codex_usage_event_facts f
+         WHERE f.source='codex' AND f.ledger_epoch=?1 AND (
+             EXISTS(SELECT 1 FROM codex_usage_event_occurrences o
+                    WHERE o.source=f.source AND o.ledger_epoch=f.ledger_epoch
+                      AND o.source_file_id=?2 AND o.file_generation=?3 AND o.event_id=f.event_id)
+             OR EXISTS(SELECT 1 FROM codex_compaction_markers m
+                       WHERE m.source=f.source AND m.ledger_epoch=f.ledger_epoch
+                         AND m.source_file_id=?2 AND m.file_generation=?3
+                         AND m.resolved_event_id=f.event_id)
+             OR EXISTS(SELECT 1 FROM codex_turns t JOIN usage_events e
+                       ON e.source='codex' AND e.source_epoch=t.ledger_epoch
+                         AND e.thread_id=t.thread_id AND e.turn_key=t.turn_key
+                       WHERE t.ledger_epoch=f.ledger_epoch AND t.source_file_id=?2
+                         AND t.file_generation=?3 AND e.event_kind='turn_compensation'
+                         AND e.event_id=f.event_id))
+         ORDER BY f.event_id",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    let mut windows = connection.prepare(
+        "SELECT state_json FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+    )?;
+    for row in windows.query_map(params![epoch, source_file_id, file_generation], |row| {
+        row.get::<_, String>(0)
+    })? {
+        canonical_window_state(&row?)?;
+    }
+    drop(windows);
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_compaction_markers",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,root_session_id,occurred_at_ms,model,
+                reasoning_effort,response_id,resolved_event_id,unknown_reason
+         FROM codex_compaction_markers
+         WHERE source='codex' AND ledger_epoch=?1 AND (
+             (source_file_id=?2 AND file_generation=?3)
+             OR resolved_event_id IN (SELECT event_id FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3))
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch,source_file_id,file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_usage_reconciliation_windows",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,turn_key,state_json
+         FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,source_start_offset",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_usage_event_holds",
+        "SELECT source,ledger_epoch,source_file_id,file_generation,event_id,hold_reason
+         FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND (
+             (source_file_id=?2 AND file_generation=?3)
+             OR event_id IN (SELECT event_id FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3))
+         ORDER BY source_file_id,file_generation,event_id",
+        params![epoch,source_file_id,file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"codex_turns",
+        "SELECT ledger_epoch,source_file_id,file_generation,turn_key,thread_id,raw_turn_id,
+                started_at_ms,ended_at_ms,start_offset,end_offset,status,
+                start_total_input_tokens,start_total_cached_tokens,start_total_cache_write_tokens,
+                start_total_output_tokens,start_total_reasoning_tokens,start_total_total_tokens,
+                start_total_fingerprint,last_total_input_tokens,last_total_cached_tokens,
+                last_total_cache_write_tokens,last_total_output_tokens,last_total_reasoning_tokens,
+                last_total_total_tokens,last_total_fingerprint,accounted_input_tokens,
+                accounted_cached_tokens,accounted_cache_write_tokens,accounted_output_tokens,
+                accounted_reasoning_tokens,accounted_total_tokens,accounted_fingerprint,
+                accounted_candidate_count,model_state,single_model,unresolved_model_seen,
+                reasoning_effort_state,single_reasoning_effort,unresolved_reasoning_effort_seen,
+                compensation_allowed,block_start_missing,block_time_missing,block_reset,
+                block_ownership_gap,block_parser_gap,block_required_invalid,block_model_unresolved,
+                quality_status,state_through_offset
+         FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ORDER BY source_file_id,file_generation,turn_key",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"turn_compensation_events",
+        "SELECT e.source,e.source_epoch,e.event_id,e.event_kind,e.occurred_at_ms,e.thread_id,
+                e.root_session_id,e.turn_key,e.model,e.reasoning_effort,e.estimated_cost_nanos_usd,
+                e.input_tokens,e.cached_tokens,e.cache_write_tokens,e.output_tokens,
+                e.reasoning_tokens,e.total_tokens,e.quality_status
+         FROM usage_events e
+         WHERE e.source='codex' AND e.source_epoch=?1 AND e.event_kind='turn_compensation'
+           AND EXISTS(SELECT 1 FROM codex_turns t
+                      WHERE t.ledger_epoch=e.source_epoch AND t.source_file_id=?2
+                        AND t.file_generation=?3 AND t.thread_id=e.thread_id AND t.turn_key=e.turn_key)
+         ORDER BY e.event_id",
+        params![epoch,source_file_id,file_generation],
+    )?;
+    append_query_rows(
+        connection,
+        hasher,
+        b"turn_compensation_occurrences",
+        "SELECT o.source,o.ledger_epoch,o.source_file_id,o.file_generation,o.source_start_offset,
+                o.source_end_offset,o.event_id
+         FROM codex_usage_event_occurrences o JOIN usage_events e
+           ON e.source=o.source AND e.source_epoch=o.ledger_epoch AND e.event_id=o.event_id
+         WHERE o.source='codex' AND o.ledger_epoch=?1 AND e.event_kind='turn_compensation'
+           AND EXISTS(SELECT 1 FROM codex_turns t
+                      WHERE t.ledger_epoch=e.source_epoch AND t.source_file_id=?2
+                        AND t.file_generation=?3 AND t.thread_id=e.thread_id AND t.turn_key=e.turn_key)
+         ORDER BY o.source_file_id,o.file_generation,o.source_start_offset,o.event_id",
+        params![epoch,source_file_id,file_generation],
+    )?;
+    Ok(())
+}
+
+fn hash_len(hasher: &mut blake3::Hasher, len: usize) {
+    hasher.update(&(len as u64).to_be_bytes());
+}
+
+fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&[1]);
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_opt_text(hasher: &mut blake3::Hasher, value: Option<&str>) {
+    if let Some(value) = value {
+        hasher.update(&[1]);
+        hash_text(hasher, value);
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn hash_i64(hasher: &mut blake3::Hasher, value: i64) {
+    hasher.update(&[1]);
+    hasher.update(&value.to_be_bytes());
+}
+
+fn hash_u64(hasher: &mut blake3::Hasher, value: u64) {
+    hasher.update(&[1]);
+    hasher.update(&value.to_be_bytes());
+}
+
+fn hash_opt_i64(hasher: &mut blake3::Hasher, value: Option<i64>) {
+    if let Some(value) = value {
+        hasher.update(&[1]);
+        hasher.update(&value.to_be_bytes());
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn hash_opt_u64(hasher: &mut blake3::Hasher, value: Option<u64>) {
+    if let Some(value) = value {
+        hasher.update(&[1]);
+        hasher.update(&value.to_be_bytes());
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn hash_usage(hasher: &mut blake3::Hasher, usage: &NormalizedTokenUsage) {
+    hash_i64(hasher, usage.input_tokens);
+    hash_i64(hasher, usage.cached_tokens);
+    hash_opt_i64(hasher, usage.cache_write_tokens);
+    hash_i64(hasher, usage.output_tokens);
+    hash_i64(hasher, usage.reasoning_tokens);
+    hash_i64(hasher, usage.total_tokens);
+}
+
+fn hash_optional_usage(hasher: &mut blake3::Hasher, usage: Option<&NormalizedTokenUsage>) {
+    if let Some(usage) = usage {
+        hasher.update(&[1]);
+        hash_usage(hasher, usage);
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn hash_proposal(
+    hasher: &mut blake3::Hasher,
+    proposal: &crate::codex::ingestion::usage_processor::CanonicalUsageProposal,
+) {
+    hash_text(hasher, &proposal.event_id);
+    hasher.update(&[match proposal.kind {
+        EventKind::Normal => 0,
+        EventKind::Recovered => 1,
+        EventKind::TurnCompensation => 2,
+    }]);
+    hash_i64(hasher, proposal.occurred_at_ms);
+    hash_text(hasher, &proposal.thread_id);
+    hash_text(hasher, &proposal.root_session_id);
+    hash_opt_text(hasher, proposal.turn_key.as_deref());
+    hash_text(hasher, &proposal.model);
+    hash_opt_text(hasher, proposal.reasoning_effort.as_deref());
+    hash_usage(hasher, &proposal.usage);
+}
+
+fn hash_occurrence(
+    hasher: &mut blake3::Hasher,
+    occurrence: &crate::codex::ingestion::usage_processor::Occurrence,
+) {
+    hash_i64(hasher, occurrence.source_file_id);
+    hash_i64(hasher, occurrence.file_generation);
+    hash_u64(hasher, occurrence.source_start_offset);
+    hash_u64(hasher, occurrence.source_end_offset);
+    hash_text(hasher, &occurrence.event_id);
+}
+
+fn hash_fact(
+    hasher: &mut blake3::Hasher,
+    fact: &crate::codex::ingestion::usage_processor::UsageEventFact,
+) {
+    hash_text(hasher, &fact.event_id);
+    hash_text(hasher, &fact.owning_thread_id);
+    hash_opt_text(hasher, fact.response_id.as_deref());
+    hasher.update(&[match fact.evidence_kind {
+        EvidenceKind::Explicit => 0,
+        EvidenceKind::Legacy => 1,
+    }]);
+    hasher.update(&[match fact.operation {
+        CodexOperation::Response => 0,
+        CodexOperation::Compaction => 1,
+    }]);
+}
+
+fn marker_unknown_reason_str(
+    reason: crate::codex::ingestion::usage_processor::MarkerUnknownReason,
+) -> &'static str {
+    use crate::codex::ingestion::usage_processor::MarkerUnknownReason;
+
+    match reason {
+        MarkerUnknownReason::UsageMissing => "usage_missing",
+        MarkerUnknownReason::IdentityMissing => "identity_missing",
+        MarkerUnknownReason::UsageInvalid => "usage_invalid",
+        MarkerUnknownReason::TimeMissing => "time_missing",
+        MarkerUnknownReason::ModelUnresolved => "model_unresolved",
+    }
+}
+
 pub(super) fn commit_group(
     storage: &CodexStorage<'_>,
     batch: UsageCommitBatch,
@@ -656,9 +2715,13 @@ pub(super) fn begin_carry(
     now_ms: i64,
 ) -> Result<(), CodexStorageError> {
     let mut tx = storage.begin_write_txn()?;
+    let build_epoch = tx.usage_epoch_state()?.build_epoch.ok_or_else(|| {
+        CodexStorageError::Storage(StorageError::invalid_state("usage carry requires a build"))
+    })?;
     tx.with_private_state(|connection| {
         begin_usage_carry(connection, source_file_id, now_ms).map_err(CodexStorageError::from)
     })?;
+    crate::codex::storage::rebuild::delete_orphan_build_events(&mut tx, build_epoch)?;
     tx.commit()?;
     Ok(())
 }
@@ -699,7 +2762,7 @@ pub(super) fn cleanup_inactive(
     // Keep the historical first-non-zero phase order.  Canonical event rows
     // are the only phase that crosses the source transaction seam.
     let deleted = tx.with_private_state(|connection| {
-        cleanup_private_phases(connection, max_rows, 0, 3).map_err(CodexStorageError::from)
+        cleanup_private_phases(connection, max_rows, 0, 6).map_err(CodexStorageError::from)
     })?;
     if deleted > 0 {
         tx.commit()?;
@@ -730,6 +2793,14 @@ pub(super) fn cleanup_inactive(
                      SELECT 1 FROM codex_usage_event_occurrences o
                      WHERE o.source='codex' AND o.ledger_epoch=e.source_epoch
                        AND o.event_id=e.event_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM codex_compaction_markers m
+                     WHERE m.source='codex' AND m.ledger_epoch=e.source_epoch
+                       AND m.resolved_event_id=e.event_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM codex_usage_event_holds h
+                     WHERE h.source='codex' AND h.ledger_epoch=e.source_epoch
+                       AND h.event_id=e.event_id)
                  ORDER BY e.rowid LIMIT ?2",
             )?;
             statement
@@ -743,6 +2814,10 @@ pub(super) fn cleanup_inactive(
         if ids.is_empty() {
             continue;
         }
+        tx.with_private_state(|connection| {
+            strip_orphan_window_references(connection, inactive_epoch, &ids)
+                .map_err(CodexStorageError::from)
+        })?;
         let count = tx.delete_inactive_usage_events_no_revision(inactive_epoch, &ids)?;
         if count > 0 {
             tx.commit()?;
@@ -750,7 +2825,7 @@ pub(super) fn cleanup_inactive(
         }
     }
     let deleted = tx.with_private_state(|connection| {
-        cleanup_private_phases(connection, max_rows, 3, 7).map_err(CodexStorageError::from)
+        cleanup_private_phases(connection, max_rows, 6, 10).map_err(CodexStorageError::from)
     })?;
     tx.commit()?;
     Ok(deleted)
@@ -779,6 +2854,34 @@ fn apply_usage_batch(
     let canonical_before = tx.with_private_state(|transaction| {
         capture_affected_canonical_visibility(transaction, batch).map_err(CodexStorageError::from)
     })?;
+    let compaction_owners = std::iter::once(batch.thread_id.clone())
+        .chain(batch.sources.iter().filter_map(|source| {
+            source
+                .expected_state
+                .as_ref()
+                .map(|state| state.owning_thread_id.clone())
+        }))
+        .collect::<BTreeSet<_>>();
+    let compaction_before = if batch.ledger_epoch == epoch.active_epoch {
+        Some(tx.with_private_state(|transaction| {
+            let mut signatures = BTreeMap::new();
+            for owner in &compaction_owners {
+                signatures.insert(
+                    owner.clone(),
+                    crate::codex::analytics::compaction_visibility_signature_for_owner(
+                        transaction,
+                        batch.ledger_epoch,
+                        epoch.active_parser_version,
+                        owner,
+                    )
+                    .map_err(CodexStorageError::from)?,
+                );
+            }
+            Ok::<_, CodexStorageError>(signatures)
+        })?)
+    } else {
+        None
+    };
     let skills_before = tx.with_private_state(|transaction| {
         capture_skill_visibility(transaction, batch).map_err(CodexStorageError::from)
     })?;
@@ -789,6 +2892,8 @@ fn apply_usage_batch(
     for source in &batch.sources {
         tx.with_private_state(|transaction| {
             validate_source_preconditions(transaction, batch, source)
+                .map_err(CodexStorageError::from)?;
+            validate_reconciliation_context(transaction, batch, source)
                 .map_err(CodexStorageError::from)?;
             if source.local_replay {
                 prepare_local_replay(transaction, batch, source)
@@ -801,55 +2906,14 @@ fn apply_usage_batch(
         } else {
             UsageWriteTarget::Build
         };
-        for (event, occurrence) in source.events.iter().zip(&source.occurrences) {
-            let canonical = CanonicalUsageEventWrite {
-                event_id: event.event_id.clone(),
-                kind: event.kind,
-                occurred_at_ms: event.occurred_at_ms,
-                thread_id: event.thread_id.clone(),
-                root_session_id: event.root_session_id.clone(),
-                turn_key: event.turn_key.clone(),
-                model: event.model.clone(),
-                reasoning_effort: event.reasoning_effort.clone(),
-                estimated_cost_nanos_usd: event.estimated_cost_nanos_usd,
-                usage: event.usage.clone(),
-                created_at_ms: source.committed_at_ms,
-            };
-            match tx.write_usage_no_revision(target, canonical)? {
-                crate::source::CanonicalWriteOutcome::Inserted => inserted += 1,
-                crate::source::CanonicalWriteOutcome::Duplicate => deduplicated += 1,
-            }
-            tx.with_private_state(|transaction| {
-                write_or_compare_occurrence(transaction, batch.ledger_epoch, source, occurrence)
-                    .map_err(CodexStorageError::from)
-            })?;
-        }
+        let (source_inserted, source_deduplicated) =
+            apply_reconciliation_patch(tx, batch, source, target)?;
+        inserted += source_inserted;
+        deduplicated += source_deduplicated;
         tx.with_private_state(|transaction| {
             for skill in &source.skill_events {
                 write_or_compare_skill_event(transaction, batch.ledger_epoch, source, skill)
                     .map_err(CodexStorageError::from)?;
-            }
-            for turn in &source.turns {
-                write_turn(
-                    transaction,
-                    batch.ledger_epoch,
-                    source.source_file_id,
-                    source.expected_file_generation,
-                    &batch.thread_id,
-                    turn,
-                )
-                .map_err(CodexStorageError::from)?;
-            }
-            for anomaly in &source.anomalies {
-                write_anomaly(
-                    transaction,
-                    batch.ledger_epoch,
-                    &batch.thread_id,
-                    source.source_file_id,
-                    source.expected_file_generation,
-                    anomaly,
-                )
-                .map_err(CodexStorageError::from)?;
             }
             write_source_state(transaction, batch, source).map_err(CodexStorageError::from)?;
             write_usage_checkpoint(transaction, batch, source).map_err(CodexStorageError::from)?;
@@ -857,6 +2921,18 @@ fn apply_usage_batch(
                 .map_err(CodexStorageError::from)?;
             verify_source_postconditions(transaction, batch, source)
                 .map_err(CodexStorageError::from)?;
+            if source.local_replay {
+                transaction.execute(
+                    "DELETE FROM codex_usage_event_holds
+                     WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                       AND file_generation=?3 AND hold_reason='replay'",
+                    params![
+                        batch.ledger_epoch,
+                        source.source_file_id,
+                        source.expected_file_generation
+                    ],
+                )?;
+            }
             Ok::<_, CodexStorageError>(())
         })?;
     }
@@ -880,7 +2956,30 @@ fn apply_usage_batch(
         affected_skill_visibility_changed(transaction, batch.ledger_epoch, &skills_before)
             .map_err(CodexStorageError::from)
     })?;
-    let canonical_changed = token_visibility_changed || skill_visibility_changed;
+    let compaction_visibility_changed = match compaction_before {
+        Some(before) => {
+            let after = tx.with_private_state(|transaction| {
+                let mut signatures = BTreeMap::new();
+                for owner in &compaction_owners {
+                    signatures.insert(
+                        owner.clone(),
+                        crate::codex::analytics::compaction_visibility_signature_for_owner(
+                            transaction,
+                            batch.ledger_epoch,
+                            epoch.active_parser_version,
+                            owner,
+                        )
+                        .map_err(CodexStorageError::from)?,
+                    );
+                }
+                Ok::<_, CodexStorageError>(signatures)
+            })?;
+            before != after
+        }
+        None => false,
+    };
+    let canonical_changed =
+        token_visibility_changed || skill_visibility_changed || compaction_visibility_changed;
 
     let active_epoch = epoch.active_epoch;
     let current_revision: i64 = tx.with_private_state(|transaction| {
@@ -900,6 +2999,578 @@ fn apply_usage_batch(
         },
         visible_changed: canonical_changed && batch.ledger_epoch == active_epoch,
     })
+}
+
+fn apply_reconciliation_patch(
+    tx: &mut CodexWriteTxn<'_>,
+    batch: &UsageCommitBatch,
+    source: &UsageSourceCommit,
+    target: UsageWriteTarget,
+) -> Result<(usize, usize), CodexStorageError> {
+    let patch = &source.patch;
+    let mut inserted = 0;
+    let mut deduplicated = 0;
+    let replaced_ids = patch
+        .delete_event_ids
+        .iter()
+        .filter(|event_id| {
+            patch
+                .events
+                .iter()
+                .any(|event| &event.event_id == *event_id)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    tx.with_private_state(|connection| {
+        stage_bound_markers_for_patch(connection, batch.ledger_epoch, patch)
+            .map_err(CodexStorageError::from)?;
+        for hold in &patch.hold_upserts {
+            let canonical_exists: i64 = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_events
+                 WHERE source='codex' AND source_epoch=?1 AND event_id=?2)",
+                params![batch.ledger_epoch, hold.event_id],
+                |row| row.get(0),
+            )?;
+            if canonical_exists != 0 {
+                upsert_usage_hold(connection, batch.ledger_epoch, hold)?;
+            }
+        }
+        Ok::<_, CodexStorageError>(())
+    })?;
+
+    let held_ids = tx.with_private_state(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT event_id FROM codex_usage_event_holds
+             WHERE source='codex' AND ledger_epoch=?1",
+        )?;
+        statement
+            .query_map([batch.ledger_epoch], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()
+            .map_err(StorageError::from)
+            .map_err(CodexStorageError::from)
+    })?;
+    let replaceable_occurrence_event_ids = patch
+        .delete_event_ids
+        .iter()
+        .filter(|event_id| !held_ids.contains(*event_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let replaced = replaced_ids
+        .into_iter()
+        .filter(|event_id| !held_ids.contains(event_id))
+        .collect::<Vec<_>>();
+    if !replaced.is_empty() {
+        tx.with_private_state(|connection| {
+            strip_orphan_window_references(connection, batch.ledger_epoch, &replaced)
+                .map_err(CodexStorageError::from)
+        })?;
+        tx.delete_usage_events_no_revision(target, &replaced)?;
+    }
+
+    for event in &patch.events {
+        match write_canonical_event(tx, target, source, event)? {
+            crate::source::CanonicalWriteOutcome::Inserted => inserted += 1,
+            crate::source::CanonicalWriteOutcome::Duplicate => deduplicated += 1,
+        }
+    }
+
+    tx.with_private_state(|connection| {
+        for occurrence in &patch.occurrences {
+            write_or_compare_occurrence(
+                connection,
+                batch.ledger_epoch,
+                source,
+                occurrence,
+                &replaceable_occurrence_event_ids,
+            )
+            .map_err(CodexStorageError::from)?;
+        }
+        for fact in &patch.facts {
+            upsert_usage_fact(connection, batch.ledger_epoch, fact)
+                .map_err(CodexStorageError::from)?;
+        }
+        for marker in &patch.marker_upserts {
+            upsert_compaction_marker(connection, batch.ledger_epoch, marker)
+                .map_err(CodexStorageError::from)?;
+        }
+        for window in &patch.window_upserts {
+            upsert_reconciliation_window(connection, batch.ledger_epoch, window)
+                .map_err(CodexStorageError::from)?;
+        }
+        for turn in &patch.turn_upserts {
+            write_turn(
+                connection,
+                batch.ledger_epoch,
+                turn.source_file_id,
+                turn.file_generation,
+                &turn.thread_id,
+                turn,
+            )
+            .map_err(CodexStorageError::from)?;
+        }
+        for rewrite in &patch.turn_rewrites {
+            write_turn_rewrite(connection, batch.ledger_epoch, rewrite)
+                .map_err(CodexStorageError::from)?;
+        }
+        for anomaly in &patch.anomalies {
+            write_anomaly(
+                connection,
+                batch.ledger_epoch,
+                &batch.thread_id,
+                source.source_file_id,
+                source.expected_file_generation,
+                anomaly,
+            )
+            .map_err(CodexStorageError::from)?;
+        }
+        Ok::<_, CodexStorageError>(())
+    })?;
+
+    let deletions = patch
+        .delete_event_ids
+        .iter()
+        .filter(|event_id| {
+            !patch
+                .events
+                .iter()
+                .any(|event| &event.event_id == *event_id)
+        })
+        .cloned()
+        .filter(|event_id| !held_ids.contains(event_id))
+        .collect::<Vec<_>>();
+    if !deletions.is_empty() {
+        tx.with_private_state(|connection| {
+            for event_id in &deletions {
+                let references: i64 = connection.query_row(
+                    "SELECT count(*) FROM codex_usage_event_occurrences
+                     WHERE source='codex' AND ledger_epoch=?1 AND event_id=?2",
+                    params![batch.ledger_epoch, event_id],
+                    |row| row.get(0),
+                )?;
+                if references != 0 {
+                    return Err(StorageError::usage_conflict(
+                        "deleted usage event still has occurrences",
+                    ));
+                }
+            }
+            Ok::<_, StorageError>(())
+        })?;
+        tx.with_private_state(|connection| {
+            strip_orphan_window_references(connection, batch.ledger_epoch, &deletions)
+                .map_err(CodexStorageError::from)
+        })?;
+        tx.delete_usage_events_no_revision(target, &deletions)?;
+    }
+
+    Ok((inserted, deduplicated))
+}
+
+fn write_canonical_event(
+    tx: &mut CodexWriteTxn<'_>,
+    target: UsageWriteTarget,
+    source: &UsageSourceCommit,
+    event: &UsageEventWrite,
+) -> Result<crate::source::CanonicalWriteOutcome, CodexStorageError> {
+    Ok(tx.write_usage_no_revision(
+        target,
+        CanonicalUsageEventWrite {
+            event_id: event.event_id.clone(),
+            kind: event.kind,
+            occurred_at_ms: event.occurred_at_ms,
+            thread_id: event.thread_id.clone(),
+            root_session_id: event.root_session_id.clone(),
+            turn_key: event.turn_key.clone(),
+            model: event.model.clone(),
+            reasoning_effort: event.reasoning_effort.clone(),
+            estimated_cost_nanos_usd: event.estimated_cost_nanos_usd,
+            usage: event.usage.clone(),
+            created_at_ms: source.committed_at_ms,
+        },
+    )?)
+}
+
+fn stage_bound_markers_for_patch(
+    transaction: &Connection,
+    epoch: i64,
+    patch: &ReconciliationPatchWrite,
+) -> StorageResult<()> {
+    let mut affected_ids = patch
+        .delete_event_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for fact in &patch.facts {
+        affected_ids.insert(fact.event_id.clone());
+    }
+    let mut keys_to_stage = BTreeSet::new();
+    for event_id in affected_ids {
+        let mut statement = transaction.prepare(
+            "SELECT source_file_id,file_generation,source_start_offset
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND resolved_event_id=?2
+             ORDER BY source_file_id,file_generation,source_start_offset",
+        )?;
+        for row in statement.query_map(params![epoch, event_id], |row| {
+            Ok(UsagePrivateRowKey {
+                source_file_id: row.get(0)?,
+                file_generation: row.get(1)?,
+                source_start_offset: row.get(2)?,
+            })
+        })? {
+            keys_to_stage.insert(row?);
+        }
+    }
+    for key in &patch.delete_markers {
+        keys_to_stage.insert(*key);
+    }
+    for marker in &patch.marker_upserts {
+        keys_to_stage.insert(UsagePrivateRowKey {
+            source_file_id: marker.source_file_id,
+            file_generation: marker.file_generation,
+            source_start_offset: marker.source_start_offset,
+        });
+    }
+
+    for key in keys_to_stage {
+        let exists: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND source_start_offset=?4 AND resolved_event_id IS NOT NULL)",
+            params![epoch,key.source_file_id,key.file_generation,key.source_start_offset],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        let explicit = patch.delete_markers.contains(&key)
+            || patch.marker_upserts.iter().any(|marker| {
+                marker.source_file_id == key.source_file_id
+                    && marker.file_generation == key.file_generation
+                    && marker.source_start_offset == key.source_start_offset
+            });
+        if !explicit {
+            return Err(StorageError::usage_conflict(
+                "bound Compaction marker is absent from reconciliation patch",
+            ));
+        }
+        transaction.execute(
+            "UPDATE codex_compaction_markers
+             SET resolved_event_id=NULL,unknown_reason='usage_missing'
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND source_start_offset=?4",
+            params![
+                epoch,
+                key.source_file_id,
+                key.file_generation,
+                key.source_start_offset
+            ],
+        )?;
+    }
+    for key in &patch.delete_markers {
+        transaction.execute(
+            "DELETE FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND source_start_offset=?4",
+            params![
+                epoch,
+                key.source_file_id,
+                key.file_generation,
+                key.source_start_offset
+            ],
+        )?;
+    }
+    for key in &patch.delete_windows {
+        transaction.execute(
+            "DELETE FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND source_start_offset=?4",
+            params![
+                epoch,
+                key.source_file_id,
+                key.file_generation,
+                key.source_start_offset
+            ],
+        )?;
+    }
+    for (source_file_id, generation, event_id) in &patch.delete_holds {
+        transaction.execute(
+            "DELETE FROM codex_usage_event_holds
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND event_id=?4",
+            params![epoch, source_file_id, generation, event_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_usage_fact(
+    transaction: &Connection,
+    epoch: i64,
+    fact: &UsageEventFactWrite,
+) -> StorageResult<()> {
+    let evidence_kind = match fact.evidence_kind {
+        EvidenceKind::Explicit => "explicit",
+        EvidenceKind::Legacy => "legacy",
+    };
+    let operation = match fact.operation {
+        CodexOperation::Response => "response",
+        CodexOperation::Compaction => "compaction",
+    };
+    let existing: Option<(String, Option<String>, String, String)> = transaction
+        .query_row(
+            "SELECT owning_thread_id,response_id,evidence_kind,operation
+             FROM codex_usage_event_facts
+             WHERE source='codex' AND ledger_epoch=?1 AND event_id=?2",
+            params![epoch, fact.event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if let Some((owner, response, evidence, existing_operation)) = existing {
+        if owner != fact.owning_thread_id
+            || response != fact.response_id
+            || evidence != evidence_kind
+        {
+            return Err(StorageError::usage_conflict(
+                "usage fact identity changed for an existing event",
+            ));
+        }
+        if existing_operation == "response" && operation == "compaction" {
+            transaction.execute(
+                "UPDATE codex_usage_event_facts SET operation='compaction'
+                 WHERE source='codex' AND ledger_epoch=?1 AND event_id=?2
+                   AND operation='response'",
+                params![epoch, fact.event_id],
+            )?;
+        }
+        return Ok(());
+    }
+    transaction.execute(
+        "INSERT INTO codex_usage_event_facts(
+            source,ledger_epoch,event_id,owning_thread_id,response_id,evidence_kind,operation
+         ) VALUES ('codex',?1,?2,?3,?4,?5,?6)",
+        params![
+            epoch,
+            fact.event_id,
+            fact.owning_thread_id,
+            fact.response_id,
+            evidence_kind,
+            operation
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_compaction_marker(
+    transaction: &Connection,
+    epoch: i64,
+    marker: &UsageCompactionMarkerWrite,
+) -> StorageResult<()> {
+    if (marker.resolved_event_id.is_some()) != marker.unknown_reason.is_none() {
+        return Err(StorageError::invalid_state(
+            "Compaction marker resolution state is inconsistent",
+        ));
+    }
+    transaction.execute(
+        "INSERT INTO codex_compaction_markers(
+            source,ledger_epoch,source_file_id,file_generation,source_start_offset,source_end_offset,
+            owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,response_id,
+            resolved_event_id,unknown_reason
+         ) VALUES ('codex',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+         ON CONFLICT(source,ledger_epoch,source_file_id,file_generation,source_start_offset)
+         DO UPDATE SET source_end_offset=excluded.source_end_offset,
+            owning_thread_id=excluded.owning_thread_id,root_session_id=excluded.root_session_id,
+            occurred_at_ms=excluded.occurred_at_ms,model=excluded.model,
+            reasoning_effort=excluded.reasoning_effort,response_id=excluded.response_id,
+            resolved_event_id=excluded.resolved_event_id,unknown_reason=excluded.unknown_reason",
+        params![epoch,marker.source_file_id,marker.file_generation,marker.source_start_offset,
+            marker.source_end_offset,marker.owning_thread_id,marker.root_session_id,
+            marker.occurred_at_ms,marker.model,marker.reasoning_effort,marker.response_id,
+            marker.resolved_event_id,marker.unknown_reason],
+    )?;
+    Ok(())
+}
+
+fn upsert_reconciliation_window(
+    transaction: &Connection,
+    epoch: i64,
+    window: &UsageReconciliationWindowWrite,
+) -> StorageResult<()> {
+    let state_json = canonical_window_state(&window.state_json)?;
+    transaction.execute(
+        "INSERT INTO codex_usage_reconciliation_windows(
+            source,ledger_epoch,source_file_id,file_generation,source_start_offset,source_end_offset,
+            owning_thread_id,turn_key,state_json
+         ) VALUES ('codex',?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(source,ledger_epoch,source_file_id,file_generation,source_start_offset)
+         DO UPDATE SET source_end_offset=excluded.source_end_offset,
+            owning_thread_id=excluded.owning_thread_id,turn_key=excluded.turn_key,
+            state_json=excluded.state_json",
+        params![epoch,window.source_file_id,window.file_generation,window.source_start_offset,
+            window.source_end_offset,window.owning_thread_id,window.turn_key,state_json],
+    )?;
+    Ok(())
+}
+
+fn canonical_window_state(json: &str) -> StorageResult<String> {
+    use crate::codex::ingestion::usage_processor::{CarryError, LegacyReconciliationWindow};
+
+    let window = LegacyReconciliationWindow::from_json(json).map_err(|error| match error {
+        CarryError::UnsupportedVersion => {
+            StorageError::usage_conflict("reconciliation window version requires parser rebuild")
+        }
+        CarryError::Invalid => StorageError::invalid_state("invalid reconciliation window state"),
+    })?;
+    let canonical = window.to_json().map_err(|error| match error {
+        CarryError::UnsupportedVersion => {
+            StorageError::usage_conflict("reconciliation window version requires parser rebuild")
+        }
+        CarryError::Invalid => StorageError::invalid_state("invalid reconciliation window state"),
+    })?;
+    if canonical != json {
+        return Err(StorageError::invalid_state(
+            "reconciliation window state is not canonical",
+        ));
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn strip_orphan_window_references(
+    transaction: &Connection,
+    epoch: i64,
+    orphan_event_ids: &[String],
+) -> StorageResult<()> {
+    if orphan_event_ids.is_empty() {
+        return Ok(());
+    }
+    let orphan_event_ids = orphan_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut statement = transaction.prepare(
+        "SELECT source_file_id,file_generation,source_start_offset,state_json
+         FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1
+         ORDER BY source_file_id,file_generation,source_start_offset",
+    )?;
+    let windows = statement
+        .query_map([epoch], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (source_file_id, generation, start_offset, state_json) in windows {
+        canonical_window_state(&state_json)?;
+        let mut window =
+            crate::codex::ingestion::usage_processor::LegacyReconciliationWindow::from_json(
+                &state_json,
+            )
+            .map_err(|_| StorageError::invalid_state("invalid reconciliation window state"))?;
+        let old_len = window.proposal_event_ids.len();
+        window
+            .proposal_event_ids
+            .retain(|event_id| !orphan_event_ids.contains(event_id.as_str()));
+        if window.proposal_event_ids.len() == old_len {
+            continue;
+        }
+        let state_json = window
+            .to_json()
+            .map_err(|_| StorageError::invalid_state("invalid reconciliation window state"))?;
+        transaction.execute(
+            "UPDATE codex_usage_reconciliation_windows SET state_json=?1
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?4 AND source_start_offset=?5",
+            params![state_json, epoch, source_file_id, generation, start_offset],
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn cleanup_private_source_generation(
+    transaction: &Connection,
+    epoch: i64,
+    source_file_id: i64,
+    file_generation: i64,
+) -> StorageResult<()> {
+    transaction.execute(
+        "DELETE FROM codex_compaction_markers
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_event_occurrences
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_skill_usage_events
+         WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_turns
+         WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_ingest_anomalies
+         WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    // Keep the active epoch's last committed identity and tail snapshot as the
+    // stopped generation's classification boundary until its replacement is
+    // scanned and writes a new source state.
+    transaction.execute(
+        "DELETE FROM codex_usage_session_quarantine_sources
+         WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3",
+        params![epoch, source_file_id, file_generation],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_session_quarantine
+         WHERE ledger_epoch=?1 AND NOT EXISTS (
+             SELECT 1 FROM codex_usage_session_quarantine_sources s
+             WHERE s.ledger_epoch=codex_usage_session_quarantine.ledger_epoch
+               AND s.root_session_id=codex_usage_session_quarantine.root_session_id)",
+        [epoch],
+    )?;
+    Ok(())
+}
+
+fn upsert_usage_hold(
+    transaction: &Connection,
+    epoch: i64,
+    hold: &UsageEventHoldWrite,
+) -> StorageResult<()> {
+    transaction.execute(
+        "INSERT INTO codex_usage_event_holds(
+            source,ledger_epoch,source_file_id,file_generation,event_id,hold_reason
+         ) VALUES ('codex',?1,?2,?3,?4,?5)
+         ON CONFLICT(source,ledger_epoch,source_file_id,file_generation,event_id)
+         DO UPDATE SET hold_reason=excluded.hold_reason",
+        params![
+            epoch,
+            hold.source_file_id,
+            hold.file_generation,
+            hold.event_id,
+            hold.hold_reason.as_str()
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn begin_usage_carry(
@@ -927,15 +3598,26 @@ pub(crate) fn begin_usage_carry(
         .ok_or_else(|| StorageError::invalid_state("usage carry manifest is missing"))?;
     verify_carry_canonical_events(transaction, build_epoch)?;
 
-    let partial_seed = plan.checkpoint.as_ref().is_some_and(|checkpoint| {
-        checkpoint.processing_status == CheckpointProcessingStatus::Ready
-    });
-    if partial_seed {
-        transaction.execute(
-            "DELETE FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
-            params![build_epoch, source_file_id],
-        )?;
+    let replay_holds: i64 = transaction.query_row(
+        "SELECT count(*) FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3 AND hold_reason='replay'",
+        params![
+            epoch.active_epoch,
+            source_file_id,
+            build.expected_file_generation
+        ],
+        |row| row.get(0),
+    )?;
+    if replay_holds != 0 {
+        return Err(StorageError::usage_conflict(
+            "usage source has an unfinished local replay",
+        ));
     }
+
+    crate::codex::storage::rebuild::cleanup_build_source(transaction, build_epoch, source_file_id)
+        .map_err(rebuild_storage_error)?;
+
     let changed = transaction.execute(
         "UPDATE codex_source_checkpoints SET parser_version=?1,committed_offset=0,guard_hash=NULL,
                 processing_status='rebuild_required',last_error_code=NULL
@@ -950,6 +3632,8 @@ pub(crate) fn begin_usage_carry(
     let changed = transaction.execute(
         "UPDATE codex_usage_build_sources SET carry_from_epoch=?1,carry_phase='occurrences',
                 carry_after_start_offset=NULL,carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,
                 completion_status='pending',completion_error_code=NULL,
                 completed_generation=NULL,completed_through_offset=NULL,updated_at_ms=?2
          WHERE build_epoch=?3 AND source_file_id=?4
@@ -1020,11 +3704,16 @@ pub(crate) fn resume_usage_carry(
             .map_err(CodexStorageError::from)
     })?;
 
-    match build.carry_phase {
+    let outcome = match build.carry_phase {
         UsageCarryPhase::Occurrences => {
             let event_ids = tx.with_private_state(|transaction| {
-                carry_occurrence_event_ids(transaction, epoch.active_epoch, source_file_id)
-                    .map_err(CodexStorageError::from)
+                carry_occurrence_event_ids(
+                    transaction,
+                    epoch.active_epoch,
+                    source_file_id,
+                    build.expected_file_generation,
+                )
+                .map_err(CodexStorageError::from)
             })?;
             for event_id in event_ids {
                 tx.copy_usage_event_no_revision(
@@ -1035,6 +3724,64 @@ pub(crate) fn resume_usage_carry(
             }
             tx.with_private_state(|transaction| {
                 carry_occurrence_page(
+                    transaction,
+                    epoch.active_epoch,
+                    build_epoch,
+                    source_file_id,
+                    now_ms,
+                )
+                .map_err(CodexStorageError::from)
+            })?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Facts => {
+            let (after, event_ids, has_more) = tx.with_private_state(|transaction| {
+                carry_fact_page_event_ids(
+                    transaction,
+                    epoch.active_epoch,
+                    build_epoch,
+                    source_file_id,
+                )
+                .map_err(CodexStorageError::from)
+            })?;
+            for event_id in &event_ids {
+                tx.copy_usage_event_no_revision(
+                    UsageWriteTarget::Active,
+                    UsageWriteTarget::Build,
+                    event_id,
+                )?;
+            }
+            tx.with_private_state(|transaction| {
+                carry_fact_page(
+                    transaction,
+                    epoch.active_epoch,
+                    build_epoch,
+                    source_file_id,
+                    &event_ids,
+                    has_more,
+                    after,
+                    now_ms,
+                )
+                .map_err(CodexStorageError::from)
+            })?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Markers => {
+            tx.with_private_state(|transaction| {
+                carry_marker_page(
+                    transaction,
+                    epoch.active_epoch,
+                    build_epoch,
+                    source_file_id,
+                    now_ms,
+                )
+                .map_err(CodexStorageError::from)
+            })?;
+            Ok(CarryStepOutcome::Progress)
+        }
+        UsageCarryPhase::Windows => {
+            tx.with_private_state(|transaction| {
+                carry_window_page(
                     transaction,
                     epoch.active_epoch,
                     build_epoch,
@@ -1078,7 +3825,14 @@ pub(crate) fn resume_usage_carry(
         UsageCarryPhase::None => Err(CodexStorageError::Storage(StorageError::invalid_state(
             "usage carry cursor is not initialized",
         ))),
+    }?;
+    if matches!(
+        outcome,
+        CarryStepOutcome::FinalizedMissing | CarryStepOutcome::FinalizedPresent
+    ) {
+        crate::codex::storage::rebuild::delete_orphan_build_events(tx, build_epoch)?;
     }
+    Ok(outcome)
 }
 
 pub(crate) fn complete_usage_build_source(
@@ -1111,7 +3865,9 @@ pub(crate) fn complete_usage_build_source(
         "UPDATE codex_usage_build_sources SET completion_status='rebuilt',completion_error_code=NULL,
                 completed_generation=required_generation,completed_through_offset=required_through_offset,
                 carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?1
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,carry_after_turn_key=NULL,
+                carry_after_anomaly_id=NULL,updated_at_ms=?1
          WHERE build_epoch=?2 AND source_file_id=?3 AND carry_phase='none'
            AND completion_status IN ('pending','blocked')
            AND required_generation=?4 AND required_through_offset=?5",
@@ -1165,6 +3921,18 @@ pub(crate) fn cleanup_private_phases(
                 SELECT 1 FROM codex_usage_session_quarantine_sources qs
                 WHERE qs.ledger_epoch=q.ledger_epoch AND qs.root_session_id=q.root_session_id)
             ORDER BY q.ledger_epoch,q.rowid LIMIT ?3)",
+        "DELETE FROM codex_compaction_markers WHERE rowid IN (
+            SELECT rowid FROM codex_compaction_markers
+            WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM codex_usage_reconciliation_windows WHERE rowid IN (
+            SELECT rowid FROM codex_usage_reconciliation_windows
+            WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
+        "DELETE FROM codex_usage_event_holds WHERE rowid IN (
+            SELECT rowid FROM codex_usage_event_holds
+            WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
+            ORDER BY ledger_epoch,rowid LIMIT ?3)",
         "DELETE FROM codex_usage_event_occurrences WHERE rowid IN (
             SELECT rowid FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch<>?1 AND ledger_epoch<>?2
             ORDER BY ledger_epoch,rowid LIMIT ?3)",
@@ -1474,7 +4242,25 @@ fn load_source_plan(
         .transpose()?
         .flatten();
     let checkpoint = read_usage_checkpoint(transaction, source_file_id)?;
-    let state = read_usage_source_state(transaction, epoch.working_epoch(), source_file_id)?;
+    let state = match read_usage_source_state(transaction, epoch.working_epoch(), source_file_id) {
+        Ok(state) => state,
+        Err(error) if error.requires_usage_rebuild() => {
+            let build = read_build_plan_state(transaction, epoch.build_epoch, source_file_id)?;
+            return Ok(UsageSourceScanPlan {
+                source_file_id,
+                action: UsagePlanAction::RebuildRequired,
+                start_offset: 0,
+                observed_size: source.observed_size,
+                owning_thread_id: source.thread_id,
+                root_session_id,
+                checkpoint,
+                state: None,
+                open_turn: None,
+                build,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let open_turn = match state.as_ref() {
         Some(state) => read_open_turn(transaction, epoch.working_epoch(), source_file_id, state)?,
         None => None,
@@ -1833,6 +4619,9 @@ fn read_build_plan_state(
                 carry_phase: match carry.as_str() {
                     "none" => UsageCarryPhase::None,
                     "occurrences" => UsageCarryPhase::Occurrences,
+                    "facts" => UsageCarryPhase::Facts,
+                    "markers" => UsageCarryPhase::Markers,
+                    "windows" => UsageCarryPhase::Windows,
                     "turns" => UsageCarryPhase::Turns,
                     "anomalies" => UsageCarryPhase::Anomalies,
                     "finalize" => UsageCarryPhase::Finalize,
@@ -1930,6 +4719,12 @@ fn local_replay_safe(
         "SELECT
             (SELECT count(*) FROM codex_usage_event_occurrences
              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2)
+          + (SELECT count(*) FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2)
+          + (SELECT count(*) FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2)
+          + (SELECT count(*) FROM codex_usage_event_holds
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2)
           + (SELECT count(*) FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2)
@@ -1977,12 +4772,17 @@ fn begin_carry_eligible(
     let Some(active_state) = active_state else {
         return Ok(false);
     };
-    let active_fingerprint = crate::codex::storage::rebuild::active_state_fingerprint(
+    let active_fingerprint = match crate::codex::storage::rebuild::active_state_fingerprint(
         transaction,
         epoch.active_epoch,
         source_file_id,
-    )
-    .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+    ) {
+        Ok(fingerprint) => fingerprint,
+        Err(crate::codex::storage::rebuild::RebuildError::Invalid(
+            "usage reconciliation carry version requires rebuild",
+        )) => return Ok(false),
+        Err(error) => return Err(rebuild_storage_error(error)),
+    };
     if active_fingerprint != build.active_state_fingerprint {
         return Ok(false);
     }
@@ -2051,7 +4851,7 @@ fn verify_carry_db_proof(
         epoch.active_epoch,
         source_file_id,
     )
-    .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+    .map_err(rebuild_storage_error)?;
     if fingerprint != build.active_state_fingerprint
         || active_state.resolved_through_offset != build.active_committed_offset
         || active_state.file_generation != build.expected_file_generation
@@ -2098,14 +4898,19 @@ fn carry_occurrence_event_ids(
     transaction: &Connection,
     active_epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
 ) -> StorageResult<Vec<String>> {
     let mut statement = transaction.prepare(
         "SELECT DISTINCT event_id FROM codex_usage_event_occurrences
          WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3
          ORDER BY event_id",
     )?;
     statement
-        .query_map(params![active_epoch, source_file_id], |row| row.get(0))?
+        .query_map(
+            params![active_epoch, source_file_id, file_generation],
+            |row| row.get(0),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }
@@ -2117,25 +4922,32 @@ fn carry_occurrence_page(
     source_file_id: i64,
     now_ms: i64,
 ) -> StorageResult<()> {
-    let after: Option<i64> = transaction.query_row(
-        "SELECT carry_after_start_offset FROM codex_usage_build_sources
+    let (generation, after): (i64, Option<i64>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_start_offset FROM codex_usage_build_sources
          WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='occurrences'",
         params![build_epoch, source_file_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let mut statement = transaction.prepare(
         "SELECT source_start_offset FROM (
              SELECT source_start_offset FROM codex_usage_event_occurrences
               WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                AND file_generation=?3
              UNION
              SELECT source_start_offset FROM codex_skill_usage_events
-              WHERE ledger_epoch=?1 AND source_file_id=?2
-         ) WHERE (?3 IS NULL OR source_start_offset>?3)
-         ORDER BY source_start_offset LIMIT ?4",
+              WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3
+         ) WHERE (?4 IS NULL OR source_start_offset>?4)
+         ORDER BY source_start_offset LIMIT ?5",
     )?;
     let rows = statement
         .query_map(
-            params![active_epoch, source_file_id, after, CARRY_PAGE_ROWS + 1],
+            params![
+                active_epoch,
+                source_file_id,
+                generation,
+                after,
+                CARRY_PAGE_ROWS + 1
+            ],
             |row| row.get::<_, i64>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2145,8 +4957,9 @@ fn carry_occurrence_page(
         let event_id: Option<String> = transaction
             .query_row(
                 "SELECT event_id FROM codex_usage_event_occurrences
-                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2 AND source_start_offset=?3",
-                params![active_epoch, source_file_id, start],
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                   AND file_generation=?3 AND source_start_offset=?4",
+                params![active_epoch, source_file_id, generation, start],
                 |row| row.get(0),
             )
             .optional()?;
@@ -2156,6 +4969,7 @@ fn carry_occurrence_page(
                 active_epoch,
                 build_epoch,
                 source_file_id,
+                generation,
                 *start,
             )?;
         }
@@ -2164,6 +4978,7 @@ fn carry_occurrence_page(
             active_epoch,
             build_epoch,
             source_file_id,
+            generation,
             *start,
         )?;
     }
@@ -2171,10 +4986,13 @@ fn carry_occurrence_page(
     let (next_phase, next_cursor) = if has_more {
         ("occurrences", next_after)
     } else {
-        ("turns", None)
+        ("facts", None)
     };
     let changed = transaction.execute(
-        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_start_offset=?2,updated_at_ms=?3
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_start_offset=?2,
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,carry_after_turn_key=NULL,
+                carry_after_anomaly_id=NULL,updated_at_ms=?3
          WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='occurrences'
            AND carry_after_start_offset IS ?6",
         params![
@@ -2199,32 +5017,416 @@ fn carry_occurrence(
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
     start_offset: i64,
 ) -> StorageResult<()> {
     transaction.execute(
         "INSERT INTO codex_usage_event_occurrences(
             source,ledger_epoch,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms)
          SELECT 'codex',?1,source_file_id,file_generation,source_start_offset,source_end_offset,event_id,created_at_ms
-         FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND source_start_offset=?4
+         FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
+           AND file_generation=?4 AND source_start_offset=?5
            AND NOT EXISTS(SELECT 1 FROM codex_usage_event_occurrences
                           WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3
-                            AND file_generation=codex_usage_event_occurrences.file_generation
-                            AND source_start_offset=?4)",
-        params![build_epoch, active_epoch, source_file_id, start_offset],
+                            AND file_generation=?4 AND source_start_offset=?5)",
+        params![build_epoch, active_epoch, source_file_id, file_generation, start_offset],
     )?;
     let equal: i64 = transaction.query_row(
         "SELECT count(*) FROM codex_usage_event_occurrences a
          JOIN codex_usage_event_occurrences b ON b.source='codex' AND b.ledger_epoch=?2
            AND b.source_file_id=a.source_file_id AND b.file_generation=a.file_generation
            AND b.source_start_offset=a.source_start_offset
-         WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.source_file_id=?3 AND a.source_start_offset=?4
+         WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.source_file_id=?3
+           AND a.file_generation=?5 AND a.source_start_offset=?4
            AND b.source_end_offset=a.source_end_offset AND b.event_id=a.event_id",
-        params![active_epoch, build_epoch, source_file_id, start_offset],
+        params![
+            active_epoch,
+            build_epoch,
+            source_file_id,
+            start_offset,
+            file_generation
+        ],
         |row| row.get(0),
     )?;
     if equal != 1 {
         return Err(StorageError::usage_conflict(
             "usage carry occurrence conflict",
+        ));
+    }
+    Ok(())
+}
+
+fn carry_fact_page_event_ids(
+    transaction: &Connection,
+    active_epoch: i64,
+    build_epoch: i64,
+    source_file_id: i64,
+) -> StorageResult<(Option<String>, Vec<String>, bool)> {
+    let (generation, after): (i64, Option<String>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_fact_event_id FROM codex_usage_build_sources
+         WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='facts'",
+        params![build_epoch, source_file_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut statement = transaction.prepare(
+        "SELECT DISTINCT f.event_id FROM codex_usage_event_facts f
+         WHERE f.source='codex' AND f.ledger_epoch=?1 AND (?3 IS NULL OR f.event_id>?3)
+           AND (EXISTS(
+                SELECT 1 FROM codex_usage_event_occurrences o
+                WHERE o.source=f.source AND o.ledger_epoch=f.ledger_epoch
+                  AND o.source_file_id=?2 AND o.file_generation=?4
+                  AND o.event_id=f.event_id)
+             OR EXISTS(
+                SELECT 1 FROM codex_compaction_markers m
+                WHERE m.source=f.source AND m.ledger_epoch=f.ledger_epoch
+                  AND m.source_file_id=?2 AND m.file_generation=?4
+                  AND m.resolved_event_id=f.event_id))
+         ORDER BY f.event_id LIMIT ?5",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                active_epoch,
+                source_file_id,
+                after,
+                generation,
+                CARRY_PAGE_ROWS + 1
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = rows.len() > CARRY_PAGE_ROWS as usize;
+    let event_ids = rows
+        .into_iter()
+        .take(CARRY_PAGE_ROWS as usize)
+        .collect::<Vec<_>>();
+    Ok((after, event_ids, has_more))
+}
+
+fn carry_fact_page(
+    transaction: &Connection,
+    active_epoch: i64,
+    build_epoch: i64,
+    source_file_id: i64,
+    event_ids: &[String],
+    has_more: bool,
+    after: Option<String>,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let generation: i64 = transaction.query_row(
+        "SELECT expected_file_generation FROM codex_usage_build_sources
+         WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='facts'",
+        params![build_epoch, source_file_id],
+        |row| row.get(0),
+    )?;
+    for event_id in event_ids {
+        let canonical_exists: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_events
+             WHERE source='codex' AND source_epoch=?1 AND event_id=?2)",
+            params![build_epoch, event_id],
+            |row| row.get(0),
+        )?;
+        if canonical_exists != 1 {
+            return Err(StorageError::usage_conflict(
+                "carried fact canonical event is missing",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO codex_usage_event_holds(
+                source,ledger_epoch,source_file_id,file_generation,event_id,hold_reason)
+             VALUES ('codex',?1,?2,?3,?4,'carry')
+             ON CONFLICT(source,ledger_epoch,source_file_id,file_generation,event_id)
+             DO UPDATE SET hold_reason='carry'",
+            params![build_epoch, source_file_id, generation, event_id],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO codex_usage_event_facts(
+                source,ledger_epoch,event_id,owning_thread_id,response_id,evidence_kind,operation)
+             SELECT source,?1,event_id,owning_thread_id,response_id,evidence_kind,operation
+             FROM codex_usage_event_facts
+             WHERE source='codex' AND ledger_epoch=?2 AND event_id=?3",
+            params![build_epoch, active_epoch, event_id],
+        )?;
+        transaction.execute(
+            "UPDATE codex_usage_event_facts AS build_fact
+             SET operation='compaction'
+             WHERE build_fact.source='codex' AND build_fact.ledger_epoch=?1
+               AND build_fact.event_id=?3 AND build_fact.operation='response'
+               AND EXISTS (
+                 SELECT 1 FROM codex_usage_event_facts active_fact
+                 WHERE active_fact.source='codex' AND active_fact.ledger_epoch=?2
+                   AND active_fact.event_id=?3 AND active_fact.operation='compaction'
+                   AND active_fact.owning_thread_id=build_fact.owning_thread_id
+                   AND active_fact.response_id IS build_fact.response_id
+                   AND active_fact.evidence_kind=build_fact.evidence_kind
+               )",
+            params![build_epoch, active_epoch, event_id],
+        )?;
+        let identical: i64 = transaction.query_row(
+            "SELECT count(*) FROM codex_usage_event_facts a
+             JOIN codex_usage_event_facts b
+               ON b.source=a.source AND b.ledger_epoch=?2 AND b.event_id=a.event_id
+             WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.event_id=?3
+               AND b.owning_thread_id=a.owning_thread_id
+               AND b.response_id IS a.response_id AND b.evidence_kind=a.evidence_kind
+               AND (b.operation=a.operation
+                    OR (a.operation='response' AND b.operation='compaction'))",
+            params![active_epoch, build_epoch, event_id],
+            |row| row.get(0),
+        )?;
+        if identical != 1 {
+            return Err(StorageError::usage_conflict("usage carry fact conflict"));
+        }
+    }
+    let next_after = event_ids.last().cloned().or(after.clone());
+    let (next_phase, next_cursor) = if has_more {
+        ("facts", next_after)
+    } else {
+        ("markers", None)
+    };
+    let changed = transaction.execute(
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,
+                carry_after_start_offset=NULL,carry_after_fact_event_id=?2,
+                carry_after_marker_start_offset=NULL,carry_after_window_start_offset=NULL,
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?3
+         WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='facts'
+           AND carry_after_fact_event_id IS ?6",
+        params![
+            next_phase,
+            next_cursor,
+            now_ms,
+            build_epoch,
+            source_file_id,
+            after
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "usage carry fact cursor CAS failed",
+        ));
+    }
+    Ok(())
+}
+
+fn carry_marker_page(
+    transaction: &Connection,
+    active_epoch: i64,
+    build_epoch: i64,
+    source_file_id: i64,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let (generation, after): (i64, Option<i64>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_marker_start_offset
+         FROM codex_usage_build_sources
+         WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='markers'",
+        params![build_epoch, source_file_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut statement = transaction.prepare(
+        "SELECT source_start_offset FROM codex_compaction_markers
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3 AND (?4 IS NULL OR source_start_offset>?4)
+         ORDER BY source_start_offset LIMIT ?5",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                active_epoch,
+                source_file_id,
+                generation,
+                after,
+                CARRY_PAGE_ROWS + 1
+            ],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = rows.len() > CARRY_PAGE_ROWS as usize;
+    let offsets = rows
+        .into_iter()
+        .take(CARRY_PAGE_ROWS as usize)
+        .collect::<Vec<_>>();
+    for offset in &offsets {
+        transaction.execute(
+            "INSERT OR IGNORE INTO codex_compaction_markers(
+                source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,root_session_id,occurred_at_ms,model,
+                reasoning_effort,response_id,resolved_event_id,unknown_reason)
+             SELECT source,?1,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,root_session_id,occurred_at_ms,model,
+                reasoning_effort,response_id,resolved_event_id,unknown_reason
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?4 AND source_start_offset=?5",
+            params![
+                build_epoch,
+                active_epoch,
+                source_file_id,
+                generation,
+                offset
+            ],
+        )?;
+        let identical: i64 = transaction.query_row(
+            "SELECT count(*) FROM codex_compaction_markers a
+             JOIN codex_compaction_markers b
+               ON b.source=a.source AND b.ledger_epoch=?2
+              AND b.source_file_id=a.source_file_id AND b.file_generation=a.file_generation
+              AND b.source_start_offset=a.source_start_offset
+             WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.source_file_id=?3
+               AND a.file_generation=?4 AND a.source_start_offset=?5
+               AND b.source_end_offset=a.source_end_offset
+               AND b.owning_thread_id=a.owning_thread_id AND b.root_session_id=a.root_session_id
+               AND b.occurred_at_ms IS a.occurred_at_ms AND b.model IS a.model
+               AND b.reasoning_effort IS a.reasoning_effort AND b.response_id IS a.response_id
+               AND b.resolved_event_id IS a.resolved_event_id
+               AND b.unknown_reason IS a.unknown_reason",
+            params![
+                active_epoch,
+                build_epoch,
+                source_file_id,
+                generation,
+                offset
+            ],
+            |row| row.get(0),
+        )?;
+        if identical != 1 {
+            return Err(StorageError::usage_conflict("usage carry marker conflict"));
+        }
+    }
+    let next_after = offsets.last().copied().or(after);
+    let (next_phase, next_cursor) = if has_more {
+        ("markers", next_after)
+    } else {
+        ("windows", None)
+    };
+    let changed = transaction.execute(
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,
+                carry_after_start_offset=NULL,carry_after_fact_event_id=NULL,
+                carry_after_marker_start_offset=?2,carry_after_window_start_offset=NULL,
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?3
+         WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='markers'
+           AND carry_after_marker_start_offset IS ?6",
+        params![
+            next_phase,
+            next_cursor,
+            now_ms,
+            build_epoch,
+            source_file_id,
+            after
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "usage carry marker cursor CAS failed",
+        ));
+    }
+    Ok(())
+}
+
+fn carry_window_page(
+    transaction: &Connection,
+    active_epoch: i64,
+    build_epoch: i64,
+    source_file_id: i64,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let (generation, after): (i64, Option<i64>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_window_start_offset
+         FROM codex_usage_build_sources
+         WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='windows'",
+        params![build_epoch, source_file_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut statement = transaction.prepare(
+        "SELECT source_start_offset,state_json FROM codex_usage_reconciliation_windows
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3 AND (?4 IS NULL OR source_start_offset>?4)
+         ORDER BY source_start_offset LIMIT ?5",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                active_epoch,
+                source_file_id,
+                generation,
+                after,
+                CARRY_PAGE_ROWS + 1
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = rows.len() > CARRY_PAGE_ROWS as usize;
+    let windows = rows
+        .into_iter()
+        .take(CARRY_PAGE_ROWS as usize)
+        .collect::<Vec<_>>();
+    for (offset, state_json) in &windows {
+        canonical_window_state(state_json)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO codex_usage_reconciliation_windows(
+                source,ledger_epoch,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,turn_key,state_json)
+             SELECT source,?1,source_file_id,file_generation,source_start_offset,
+                source_end_offset,owning_thread_id,turn_key,state_json
+             FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?4 AND source_start_offset=?5",
+            params![
+                build_epoch,
+                active_epoch,
+                source_file_id,
+                generation,
+                offset
+            ],
+        )?;
+        let identical: i64 = transaction.query_row(
+            "SELECT count(*) FROM codex_usage_reconciliation_windows a
+             JOIN codex_usage_reconciliation_windows b
+               ON b.source=a.source AND b.ledger_epoch=?2
+              AND b.source_file_id=a.source_file_id AND b.file_generation=a.file_generation
+              AND b.source_start_offset=a.source_start_offset
+             WHERE a.source='codex' AND a.ledger_epoch=?1 AND a.source_file_id=?3
+               AND a.file_generation=?4 AND a.source_start_offset=?5
+               AND b.source_end_offset=a.source_end_offset
+               AND b.owning_thread_id=a.owning_thread_id AND b.turn_key IS a.turn_key
+               AND b.state_json=a.state_json",
+            params![
+                active_epoch,
+                build_epoch,
+                source_file_id,
+                generation,
+                offset
+            ],
+            |row| row.get(0),
+        )?;
+        if identical != 1 {
+            return Err(StorageError::usage_conflict("usage carry window conflict"));
+        }
+    }
+    let next_after = windows.last().map(|(offset, _)| *offset).or(after);
+    let (next_phase, next_cursor) = if has_more {
+        ("windows", next_after)
+    } else {
+        ("turns", None)
+    };
+    let changed = transaction.execute(
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,
+                carry_after_start_offset=NULL,carry_after_fact_event_id=NULL,
+                carry_after_marker_start_offset=NULL,carry_after_window_start_offset=?2,
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?3
+         WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='windows'
+           AND carry_after_window_start_offset IS ?6",
+        params![
+            next_phase,
+            next_cursor,
+            now_ms,
+            build_epoch,
+            source_file_id,
+            after
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::invalid_state(
+            "usage carry window cursor CAS failed",
         ));
     }
     Ok(())
@@ -2237,19 +5439,26 @@ fn carry_turn_page(
     source_file_id: i64,
     now_ms: i64,
 ) -> StorageResult<()> {
-    let after: Option<String> = transaction.query_row(
-        "SELECT carry_after_turn_key FROM codex_usage_build_sources
+    let (generation, after): (i64, Option<String>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_turn_key FROM codex_usage_build_sources
          WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='turns'",
         params![build_epoch, source_file_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let mut statement = transaction.prepare(
         "SELECT turn_key FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2
-           AND (?3 IS NULL OR turn_key>?3) ORDER BY turn_key LIMIT ?4",
+           AND file_generation=?3 AND (?4 IS NULL OR turn_key>?4)
+         ORDER BY turn_key LIMIT ?5",
     )?;
     let rows = statement
         .query_map(
-            params![active_epoch, source_file_id, after, CARRY_PAGE_ROWS + 1],
+            params![
+                active_epoch,
+                source_file_id,
+                generation,
+                after,
+                CARRY_PAGE_ROWS + 1
+            ],
             |row| row.get::<_, String>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2261,6 +5470,7 @@ fn carry_turn_page(
             active_epoch,
             build_epoch,
             source_file_id,
+            generation,
             turn_key,
         )?;
     }
@@ -2271,7 +5481,10 @@ fn carry_turn_page(
         ("anomalies", None)
     };
     let changed = transaction.execute(
-        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_turn_key=?2,updated_at_ms=?3
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_turn_key=?2,
+                carry_after_start_offset=NULL,carry_after_fact_event_id=NULL,
+                carry_after_marker_start_offset=NULL,carry_after_window_start_offset=NULL,
+                carry_after_anomaly_id=NULL,updated_at_ms=?3
          WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='turns'
            AND carry_after_turn_key IS ?6",
         params![
@@ -2296,12 +5509,14 @@ fn carry_turn(
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
     turn_key: &str,
 ) -> StorageResult<()> {
     let build_exists: bool = transaction
         .query_row(
-            "SELECT 1 FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2 AND turn_key=?3",
-            params![build_epoch, source_file_id, turn_key],
+            "SELECT 1 FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND turn_key=?4",
+            params![build_epoch, source_file_id, file_generation, turn_key],
             |_| Ok(()),
         )
         .optional()?
@@ -2311,7 +5526,8 @@ fn carry_turn(
             "SELECT count(*) FROM codex_turns a JOIN codex_turns b
                ON b.ledger_epoch=?2 AND b.source_file_id=a.source_file_id
               AND b.file_generation=a.file_generation AND b.turn_key=a.turn_key
-             WHERE a.ledger_epoch=?1 AND a.source_file_id=?3 AND a.turn_key=?4
+             WHERE a.ledger_epoch=?1 AND a.source_file_id=?3
+               AND a.file_generation=?5 AND a.turn_key=?4
                AND b.thread_id=a.thread_id AND b.raw_turn_id IS a.raw_turn_id
                AND b.started_at_ms IS a.started_at_ms AND b.start_offset=a.start_offset
                AND b.start_total_input_tokens IS a.start_total_input_tokens
@@ -2338,7 +5554,7 @@ fn carry_turn(
                         AND b.single_reasoning_effort=a.single_reasoning_effort)
                      OR a.reasoning_effort_state='mixed'))
                     OR (b.reasoning_effort_state='mixed' AND a.reasoning_effort_state='mixed'))",
-            params![active_epoch, build_epoch, source_file_id, turn_key],
+            params![active_epoch, build_epoch, source_file_id, turn_key, file_generation],
             |row| row.get(0),
         )?;
         if compatible != 1 {
@@ -2347,8 +5563,9 @@ fn carry_turn(
             ));
         }
         transaction.execute(
-            "DELETE FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2 AND turn_key=?3",
-            params![build_epoch, source_file_id, turn_key],
+            "DELETE FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND turn_key=?4",
+            params![build_epoch, source_file_id, file_generation, turn_key],
         )?;
     }
     let changed = transaction.execute(
@@ -2365,8 +5582,9 @@ fn carry_turn(
             reasoning_effort_state,single_reasoning_effort,unresolved_reasoning_effort_seen,compensation_allowed,
             block_start_missing,block_time_missing,block_reset,block_ownership_gap,block_parser_gap,
             block_required_invalid,block_model_unresolved,quality_status,state_through_offset,updated_at_ms
-         FROM codex_turns WHERE ledger_epoch=?2 AND source_file_id=?3 AND turn_key=?4",
-        params![build_epoch, active_epoch, source_file_id, turn_key],
+         FROM codex_turns WHERE ledger_epoch=?2 AND source_file_id=?3
+           AND file_generation=?4 AND turn_key=?5",
+        params![build_epoch, active_epoch, source_file_id, file_generation, turn_key],
     )?;
     if changed != 1 {
         return Err(StorageError::invalid_state(
@@ -2383,19 +5601,26 @@ fn carry_anomaly_page(
     source_file_id: i64,
     now_ms: i64,
 ) -> StorageResult<()> {
-    let after: Option<String> = transaction.query_row(
-        "SELECT carry_after_anomaly_id FROM codex_usage_build_sources
+    let (generation, after): (i64, Option<String>) = transaction.query_row(
+        "SELECT expected_file_generation,carry_after_anomaly_id FROM codex_usage_build_sources
          WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='anomalies'",
         params![build_epoch, source_file_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let mut statement = transaction.prepare(
         "SELECT anomaly_id FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2
-           AND (?3 IS NULL OR anomaly_id>?3) ORDER BY anomaly_id LIMIT ?4",
+           AND file_generation=?3 AND (?4 IS NULL OR anomaly_id>?4)
+         ORDER BY anomaly_id LIMIT ?5",
     )?;
     let rows = statement
         .query_map(
-            params![active_epoch, source_file_id, after, CARRY_PAGE_ROWS + 1],
+            params![
+                active_epoch,
+                source_file_id,
+                generation,
+                after,
+                CARRY_PAGE_ROWS + 1
+            ],
             |row| row.get::<_, String>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2407,6 +5632,7 @@ fn carry_anomaly_page(
             active_epoch,
             build_epoch,
             source_file_id,
+            generation,
             anomaly_id,
         )?;
     }
@@ -2417,7 +5643,10 @@ fn carry_anomaly_page(
         ("finalize", None)
     };
     let changed = transaction.execute(
-        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_anomaly_id=?2,updated_at_ms=?3
+        "UPDATE codex_usage_build_sources SET carry_phase=?1,carry_after_anomaly_id=?2,
+                carry_after_start_offset=NULL,carry_after_fact_event_id=NULL,
+                carry_after_marker_start_offset=NULL,carry_after_window_start_offset=NULL,
+                carry_after_turn_key=NULL,updated_at_ms=?3
          WHERE build_epoch=?4 AND source_file_id=?5 AND carry_phase='anomalies'
            AND carry_after_anomaly_id IS ?6",
         params![
@@ -2442,6 +5671,7 @@ fn carry_anomaly(
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
     anomaly_id: &str,
 ) -> StorageResult<()> {
     transaction.execute(
@@ -2450,19 +5680,27 @@ fn carry_anomaly(
             file_generation,source_start_offset,anomaly_type,severity,details_json,resolved)
          SELECT ?1,anomaly_id,detected_at_ms,occurred_at_ms,thread_id,source_file_id,
             file_generation,source_start_offset,anomaly_type,severity,details_json,resolved
-         FROM codex_ingest_anomalies WHERE ledger_epoch=?2 AND source_file_id=?3 AND anomaly_id=?4
+         FROM codex_ingest_anomalies WHERE ledger_epoch=?2 AND source_file_id=?3
+           AND file_generation=?5 AND anomaly_id=?4
            AND NOT EXISTS(SELECT 1 FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND anomaly_id=?4)",
-        params![build_epoch, active_epoch, source_file_id, anomaly_id],
+        params![build_epoch, active_epoch, source_file_id, anomaly_id, file_generation],
     )?;
     let equal: i64 = transaction.query_row(
         "SELECT count(*) FROM codex_ingest_anomalies a JOIN codex_ingest_anomalies b
            ON b.ledger_epoch=?2 AND b.anomaly_id=a.anomaly_id
          WHERE a.ledger_epoch=?1 AND a.source_file_id=?3 AND a.anomaly_id=?4
+           AND a.file_generation=?5 AND b.file_generation=?5
            AND b.occurred_at_ms IS a.occurred_at_ms AND b.thread_id IS a.thread_id
            AND b.source_file_id IS a.source_file_id AND b.file_generation IS a.file_generation
            AND b.source_start_offset IS a.source_start_offset AND b.anomaly_type=a.anomaly_type
            AND b.severity=a.severity AND b.details_json=a.details_json AND b.resolved=a.resolved",
-        params![active_epoch, build_epoch, source_file_id, anomaly_id],
+        params![
+            active_epoch,
+            build_epoch,
+            source_file_id,
+            anomaly_id,
+            file_generation
+        ],
         |row| row.get(0),
     )?;
     if equal != 1 {
@@ -2575,7 +5813,9 @@ fn finalize_carry(
         "UPDATE codex_usage_build_sources SET completion_status=?1,completion_error_code=?2,
                 completed_generation=?3,completed_through_offset=?4,
                 carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?5
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,carry_after_turn_key=NULL,
+                carry_after_anomaly_id=NULL,updated_at_ms=?5
          WHERE build_epoch=?6 AND source_file_id=?7 AND carry_phase='finalize'",
         params![
             completion,
@@ -2592,6 +5832,16 @@ fn finalize_carry(
             "usage carry finalize manifest CAS failed",
         ));
     }
+    transaction.execute(
+        "DELETE FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3 AND hold_reason='carry'",
+        params![
+            build.build_epoch,
+            source_file_id,
+            build.expected_file_generation
+        ],
+    )?;
     Ok(outcome)
 }
 
@@ -2601,22 +5851,28 @@ fn verify_carry_sets(
     build_epoch: i64,
     source_file_id: i64,
 ) -> StorageResult<()> {
+    let generation: i64 = transaction.query_row(
+        "SELECT expected_file_generation FROM codex_usage_build_sources
+         WHERE build_epoch=?1 AND source_file_id=?2 AND carry_phase='finalize'",
+        params![build_epoch, source_file_id],
+        |row| row.get(0),
+    )?;
     verify_carry_canonical_events(transaction, build_epoch)?;
     let occurrence_diff: i64 = transaction.query_row(
         "SELECT
           (SELECT count(*) FROM (
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM codex_usage_event_occurrences
-              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3
+              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM codex_usage_event_occurrences
-              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3))
+              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4))
         + (SELECT count(*) FROM (
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM codex_usage_event_occurrences
-              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3
+              WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,event_id FROM codex_usage_event_occurrences
-              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3))",
-        params![active_epoch, build_epoch, source_file_id],
+              WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4))",
+        params![active_epoch, build_epoch, source_file_id, generation],
         |row| row.get(0),
     )?;
     if occurrence_diff != 0 {
@@ -2630,24 +5886,176 @@ fn verify_carry_sets(
              SELECT file_generation,source_start_offset,source_end_offset,occurred_at_ms,
                     thread_id,root_session_id,model,skill_name
              FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3
+               AND file_generation=?4
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,occurred_at_ms,
                     thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3))
+             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?4))
         + (SELECT count(*) FROM (
              SELECT file_generation,source_start_offset,source_end_offset,occurred_at_ms,
                     thread_id,root_session_id,model,skill_name
              FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?4
              EXCEPT
              SELECT file_generation,source_start_offset,source_end_offset,occurred_at_ms,
                     thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3))",
-        params![active_epoch, build_epoch, source_file_id],
+             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3
+               AND file_generation=?4))",
+        params![active_epoch, build_epoch, source_file_id, generation],
         |row| row.get(0),
     )?;
     if skill_diff != 0 {
         return Err(StorageError::usage_conflict(
             "usage carry Skill set mismatch",
+        ));
+    }
+    let marker_diff: i64 = transaction.query_row(
+        "SELECT
+          (SELECT count(*) FROM (
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,
+                    response_id,resolved_event_id,unknown_reason
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4
+             EXCEPT
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,
+                    response_id,resolved_event_id,unknown_reason
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4))
+        + (SELECT count(*) FROM (
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,
+                    response_id,resolved_event_id,unknown_reason
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4
+             EXCEPT
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,root_session_id,occurred_at_ms,model,reasoning_effort,
+                    response_id,resolved_event_id,unknown_reason
+             FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4))",
+        params![active_epoch, build_epoch, source_file_id, generation],
+        |row| row.get(0),
+    )?;
+    if marker_diff != 0 {
+        return Err(StorageError::usage_conflict(
+            "usage carry Compaction marker set mismatch",
+        ));
+    }
+    let window_diff: i64 = transaction.query_row(
+        "SELECT
+          (SELECT count(*) FROM (
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,turn_key,state_json
+             FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4
+             EXCEPT
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,turn_key,state_json
+             FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4))
+        + (SELECT count(*) FROM (
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,turn_key,state_json
+             FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?2 AND source_file_id=?3 AND file_generation=?4
+             EXCEPT
+             SELECT source,file_generation,source_start_offset,source_end_offset,
+                    owning_thread_id,turn_key,state_json
+             FROM codex_usage_reconciliation_windows
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?3 AND file_generation=?4))",
+        params![active_epoch, build_epoch, source_file_id, generation],
+        |row| row.get(0),
+    )?;
+    if window_diff != 0 {
+        return Err(StorageError::usage_conflict(
+            "usage carry reconciliation window set mismatch",
+        ));
+    }
+    let fact_diff: i64 = transaction.query_row(
+        "SELECT
+          (SELECT count(*) FROM codex_usage_event_facts a
+           WHERE a.source='codex' AND a.ledger_epoch=?1
+             AND (EXISTS(
+                   SELECT 1 FROM codex_usage_event_occurrences o
+                   WHERE o.source=a.source AND o.ledger_epoch=a.ledger_epoch
+                     AND o.source_file_id=?3 AND o.file_generation=?4 AND o.event_id=a.event_id)
+               OR EXISTS(
+                   SELECT 1 FROM codex_compaction_markers m
+                   WHERE m.source=a.source AND m.ledger_epoch=a.ledger_epoch
+                     AND m.source_file_id=?3 AND m.file_generation=?4
+                     AND m.resolved_event_id=a.event_id))
+             AND NOT EXISTS (
+               SELECT 1 FROM codex_usage_event_facts b
+               WHERE b.source=a.source AND b.ledger_epoch=?2 AND b.event_id=a.event_id
+                 AND b.owning_thread_id=a.owning_thread_id
+                 AND b.response_id IS a.response_id AND b.evidence_kind=a.evidence_kind
+                 AND (a.operation='response' OR b.operation='compaction')))
+        + (SELECT count(*) FROM codex_usage_event_facts b
+           WHERE b.source='codex' AND b.ledger_epoch=?2
+             AND (EXISTS(
+                   SELECT 1 FROM codex_usage_event_occurrences o
+                   WHERE o.source=b.source AND o.ledger_epoch=b.ledger_epoch
+                     AND o.source_file_id=?3 AND o.file_generation=?4 AND o.event_id=b.event_id)
+               OR EXISTS(
+                   SELECT 1 FROM codex_compaction_markers m
+                   WHERE m.source=b.source AND m.ledger_epoch=b.ledger_epoch
+                     AND m.source_file_id=?3 AND m.file_generation=?4
+                     AND m.resolved_event_id=b.event_id))
+             AND NOT EXISTS (
+               SELECT 1 FROM codex_usage_event_facts a
+               WHERE a.source=b.source AND a.ledger_epoch=?1 AND a.event_id=b.event_id
+                 AND a.owning_thread_id=b.owning_thread_id
+                 AND a.response_id IS b.response_id AND a.evidence_kind=b.evidence_kind
+                 AND (a.operation='response' OR b.operation='compaction')))",
+        params![active_epoch, build_epoch, source_file_id, generation],
+        |row| row.get(0),
+    )?;
+    if fact_diff != 0 {
+        return Err(StorageError::usage_conflict(
+            "usage carry fact set mismatch",
+        ));
+    }
+    let hold_diff: i64 = transaction.query_row(
+        "SELECT
+          (SELECT count(*) FROM codex_usage_event_facts f
+           WHERE f.source='codex' AND f.ledger_epoch=?1
+             AND (EXISTS (
+                   SELECT 1 FROM codex_usage_event_occurrences o
+                   WHERE o.source=f.source AND o.ledger_epoch=f.ledger_epoch
+                     AND o.source_file_id=?3 AND o.file_generation=?4 AND o.event_id=f.event_id)
+               OR EXISTS (
+                   SELECT 1 FROM codex_compaction_markers m
+                   WHERE m.source=f.source AND m.ledger_epoch=f.ledger_epoch
+                     AND m.source_file_id=?3 AND m.file_generation=?4
+                     AND m.resolved_event_id=f.event_id))
+             AND NOT EXISTS (
+                   SELECT 1 FROM codex_usage_event_holds h
+                   WHERE h.source='codex' AND h.ledger_epoch=?2 AND h.source_file_id=?3
+                     AND h.file_generation=?4 AND h.event_id=f.event_id AND h.hold_reason='carry'))
+        + (SELECT count(*) FROM codex_usage_event_holds h
+           WHERE h.source='codex' AND h.ledger_epoch=?2 AND h.source_file_id=?3
+             AND h.file_generation=?4 AND h.hold_reason='carry'
+             AND NOT EXISTS (
+               SELECT 1 FROM codex_usage_event_facts f
+               WHERE f.source=h.source AND f.ledger_epoch=?1 AND f.event_id=h.event_id
+                 AND (EXISTS (
+                       SELECT 1 FROM codex_usage_event_occurrences o
+                       WHERE o.source=f.source AND o.ledger_epoch=f.ledger_epoch
+                         AND o.source_file_id=?3 AND o.file_generation=?4 AND o.event_id=f.event_id)
+                   OR EXISTS (
+                       SELECT 1 FROM codex_compaction_markers m
+                       WHERE m.source=f.source AND m.ledger_epoch=f.ledger_epoch
+                         AND m.source_file_id=?3 AND m.file_generation=?4
+                         AND m.resolved_event_id=f.event_id))))",
+        params![active_epoch, build_epoch, source_file_id, generation],
+        |row| row.get(0),
+    )?;
+    if hold_diff != 0 {
+        return Err(StorageError::usage_conflict(
+            "usage carry hold set mismatch",
         ));
     }
     // Compare complete active/build rows through deterministic fingerprints in
@@ -2657,6 +6065,7 @@ fn verify_carry_sets(
         "codex_turns",
         active_epoch,
         source_file_id,
+        generation,
         &["ledger_epoch", "updated_at_ms"],
     )?;
     let build_codex_turns = carry_table_fingerprint(
@@ -2664,6 +6073,7 @@ fn verify_carry_sets(
         "codex_turns",
         build_epoch,
         source_file_id,
+        generation,
         &["ledger_epoch", "updated_at_ms"],
     )?;
     if active_codex_turns != build_codex_turns {
@@ -2676,6 +6086,7 @@ fn verify_carry_sets(
         "codex_ingest_anomalies",
         active_epoch,
         source_file_id,
+        generation,
         &["ledger_epoch", "detected_at_ms"],
     )?;
     let build_anomalies = carry_table_fingerprint(
@@ -2683,6 +6094,7 @@ fn verify_carry_sets(
         "codex_ingest_anomalies",
         build_epoch,
         source_file_id,
+        generation,
         &["ledger_epoch", "detected_at_ms"],
     )?;
     if active_anomalies != build_anomalies {
@@ -2703,6 +6115,14 @@ fn verify_carry_canonical_events(transaction: &Connection, build_epoch: i64) -> 
                    SELECT 1 FROM codex_usage_event_occurrences occurrence
                    WHERE occurrence.source='codex' AND occurrence.ledger_epoch=?1
                      AND occurrence.event_id=build.event_id
+               ) AND NOT EXISTS (
+                   SELECT 1 FROM codex_compaction_markers marker
+                   WHERE marker.source='codex' AND marker.ledger_epoch=?1
+                     AND marker.resolved_event_id=build.event_id
+               ) AND NOT EXISTS (
+                   SELECT 1 FROM codex_usage_event_holds hold
+                   WHERE hold.source='codex' AND hold.ledger_epoch=?1
+                     AND hold.event_id=build.event_id
                )
              ORDER BY build.event_id
              LIMIT 1",
@@ -2723,6 +6143,7 @@ fn carry_table_fingerprint(
     table: &str,
     epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
     excluded: &[&str],
 ) -> StorageResult<(i64, Vec<u8>)> {
     if !matches!(table, "codex_turns" | "codex_ingest_anomalies") {
@@ -2750,11 +6171,12 @@ fn carry_table_fingerprint(
         "anomaly_id"
     };
     let sql = format!(
-        "SELECT {select} FROM {table} WHERE ledger_epoch=?1 AND source_file_id=?2 ORDER BY {order}"
+        "SELECT {select} FROM {table} WHERE ledger_epoch=?1 AND source_file_id=?2
+         AND file_generation=?3 ORDER BY {order}"
     );
     let mut statement = transaction.prepare(&sql)?;
     let rows = statement
-        .query_map(params![epoch, source_file_id], |row| {
+        .query_map(params![epoch, source_file_id, file_generation], |row| {
             row.get::<_, String>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2800,7 +6222,7 @@ fn read_usage_source_state(
     epoch: i64,
     source_file_id: i64,
 ) -> StorageResult<Option<UsageSourceStateWrite>> {
-    transaction
+    let mut state = transaction
         .query_row(
             "SELECT file_generation,device_id,inode,usage_parser_version,
                 canonical_algorithm_version,resolved_through_offset,observed_raw_size,
@@ -2809,7 +6231,8 @@ fn read_usage_source_state(
                 previous_total_cache_write_tokens,previous_total_output_tokens,
                 previous_total_reasoning_tokens,previous_total_total_tokens,previous_total_fingerprint,
                 previous_total_offset,chain_state,chain_block_reason,active_turn_key,
-                active_model,active_model_offset,active_reasoning_effort,active_reasoning_effort_offset,updated_at_ms
+                active_model,active_model_offset,active_reasoning_effort,active_reasoning_effort_offset,
+                updated_at_ms,reconciliation_state_json
              FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
             params![epoch, source_file_id],
             |row| {
@@ -2865,12 +6288,18 @@ fn read_usage_source_state(
                     active_model_offset: row.get(24)?,
                     active_reasoning_effort: row.get(25)?,
                     active_reasoning_effort_offset: row.get(26)?,
+                    reconciliation_state_json: row.get(28)?,
                     updated_at_ms: row.get(27)?,
                 })
             },
         )
         .optional()
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    if let Some(state) = &mut state {
+        state.reconciliation_state_json =
+            canonical_reconciliation_state(&state.reconciliation_state_json)?;
+    }
+    Ok(state)
 }
 
 fn read_open_turn(
@@ -3018,7 +6447,7 @@ fn validate_batch(batch: &UsageCommitBatch) -> StorageResult<()> {
     let mut ids = HashSet::new();
     let mut adapter_bytes = 0i64;
     let mut adapter_lines = 0i64;
-    let mut candidates = 0i64;
+    let mut write_units = 0i64;
     for source in &batch.sources {
         if !ids.insert(source.source_file_id) {
             return Err(StorageError::invalid_state("duplicate usage source commit"));
@@ -3030,24 +6459,21 @@ fn validate_batch(batch: &UsageCommitBatch) -> StorageResult<()> {
         adapter_lines = adapter_lines
             .checked_add(source.complete_line_count - source.replayed_prefix_lines)
             .ok_or_else(|| StorageError::invalid_state("usage group line count overflow"))?;
-        candidates = candidates
-            .checked_add(source.candidate_count)
-            .ok_or_else(|| StorageError::invalid_state("usage group candidate count overflow"))?;
+        write_units = write_units
+            .checked_add(source.write_unit_count)
+            .ok_or_else(|| StorageError::invalid_state("usage group write-unit count overflow"))?;
     }
     let ordinary = adapter_bytes <= MAX_USAGE_BATCH_BYTES as i64
         && adapter_lines <= MAX_USAGE_BATCH_LINES as i64
-        && candidates <= MAX_USAGE_BATCH_CANDIDATES as i64;
+        && write_units <= MAX_USAGE_BATCH_WRITE_UNITS as i64;
     let exclusive_progress = batch.sources.len() == 1 && {
         let source = &batch.sources[0];
         let source_adapter_bytes = source.source_bytes_consumed - source.replayed_prefix_bytes;
         let source_adapter_lines = source.complete_line_count - source.replayed_prefix_lines;
         (source_adapter_lines == 1
             && source_adapter_bytes <= MAX_LEGAL_LINE_BYTES as i64
-            && source.candidate_count <= MAX_USAGE_BATCH_CANDIDATES as i64)
-            || (source_adapter_lines == 1
-                && source_adapter_bytes > MAX_LEGAL_LINE_BYTES as i64
-                && source.candidate_count == 0
-                && source.events.is_empty())
+            && source.write_unit_count <= MAX_USAGE_BATCH_WRITE_UNITS as i64)
+            || oversized_exclusive_progress(batch, source)
     };
     if !(ordinary || exclusive_progress) {
         return Err(StorageError::invalid_state(
@@ -3057,10 +6483,74 @@ fn validate_batch(batch: &UsageCommitBatch) -> StorageResult<()> {
     Ok(())
 }
 
+fn oversized_exclusive_progress(batch: &UsageCommitBatch, source: &UsageSourceCommit) -> bool {
+    let Some(adapter_bytes) = source
+        .source_bytes_consumed
+        .checked_sub(source.replayed_prefix_bytes)
+    else {
+        return false;
+    };
+    let Some(adapter_lines) = source
+        .complete_line_count
+        .checked_sub(source.replayed_prefix_lines)
+    else {
+        return false;
+    };
+    if adapter_lines != 1 || adapter_bytes <= MAX_LEGAL_LINE_BYTES as i64 {
+        return false;
+    }
+
+    let patch = &source.patch;
+    let no_other_writes = patch.events.is_empty()
+        && patch.occurrences.is_empty()
+        && patch.facts.is_empty()
+        && patch.marker_upserts.is_empty()
+        && patch.window_upserts.is_empty()
+        && patch.hold_upserts.is_empty()
+        && patch.turn_rewrites.is_empty()
+        && patch.delete_event_ids.is_empty()
+        && patch.delete_markers.is_empty()
+        && patch.delete_windows.is_empty()
+        && patch.delete_holds.is_empty();
+    if !no_other_writes {
+        return false;
+    }
+
+    match patch.turn_upserts.as_slice() {
+        [] => source.write_unit_count == 0,
+        [turn] if source.write_unit_count == 1 => {
+            source.updated_state.chain_state
+                == UsageChainState::Interrupted(UsageGapReason::Oversized)
+                && turn.source_file_id == source.source_file_id
+                && turn.file_generation == source.expected_file_generation
+                && turn.thread_id == batch.thread_id
+                && turn.status == UsageTurnStatus::Open
+                && turn.ended_at_ms.is_none()
+                && turn.end_offset.is_none()
+                && turn.blocks.parser_gap
+                && turn.quality_status == "partial"
+                && turn.state_through_offset == source.last_complete_offset
+                && source
+                    .expected_state
+                    .as_ref()
+                    .is_some_and(|state| {
+                        state.file_generation == source.expected_file_generation
+                            && state.resolved_through_offset == source.batch_start_offset
+                            && state.active_turn_key.as_deref() == Some(turn.turn_key.as_str())
+                    })
+                && source.updated_state.active_turn_key.as_deref()
+                    == Some(turn.turn_key.as_str())
+                && source.updated_state.resolved_through_offset == source.last_complete_offset
+        }
+        _ => false,
+    }
+}
+
 fn validate_source_payload(
     batch: &UsageCommitBatch,
     source: &UsageSourceCommit,
 ) -> StorageResult<()> {
+    let counts = patch_counts(&source.patch)?;
     if source.source_file_id <= 0
         || source.expected_file_generation <= 0
         || source.batch_start_offset < 0
@@ -3070,9 +6560,10 @@ fn validate_source_payload(
         || source.source_bytes_consumed != source.last_complete_offset - source.batch_start_offset
         || source.complete_line_count < source.replayed_prefix_lines
         || source.source_bytes_consumed < source.replayed_prefix_bytes
-        || source.candidate_count < 0
-        || source.candidate_count as usize != source.occurrences.len()
-        || source.events.len() != source.occurrences.len()
+        || source.canonical_event_count != counts.0
+        || source.occurrence_count != counts.1
+        || source.evidence_write_count != counts.2
+        || source.write_unit_count != counts.3
         || source.committed_at_ms < 0
         || source.expected_checkpoint.parser_version != batch.usage_parser_version
         || (source.expected_checkpoint.committed_offset == 0)
@@ -3091,14 +6582,11 @@ fn validate_source_payload(
     let adapter_lines = source.complete_line_count - source.replayed_prefix_lines;
     let ordinary = adapter_bytes <= MAX_USAGE_BATCH_BYTES as i64
         && adapter_lines <= MAX_USAGE_BATCH_LINES as i64
-        && source.candidate_count <= MAX_USAGE_BATCH_CANDIDATES as i64;
+        && source.write_unit_count <= MAX_USAGE_BATCH_WRITE_UNITS as i64;
     let legal_single = adapter_lines == 1
         && adapter_bytes <= MAX_LEGAL_LINE_BYTES as i64
-        && source.candidate_count <= MAX_USAGE_BATCH_CANDIDATES as i64;
-    let oversized_only = adapter_lines == 1
-        && adapter_bytes > MAX_LEGAL_LINE_BYTES as i64
-        && source.candidate_count == 0
-        && source.events.is_empty();
+        && source.write_unit_count <= MAX_USAGE_BATCH_WRITE_UNITS as i64;
+    let oversized_only = oversized_exclusive_progress(batch, source);
     if !(ordinary || legal_single || oversized_only) {
         return Err(StorageError::invalid_state(
             "usage batch exceeds fixed budget",
@@ -3182,7 +6670,7 @@ fn validate_source_payload(
             return Err(StorageError::invalid_state("invalid Skill usage event"));
         }
     }
-    for (event, occurrence) in source.events.iter().zip(&source.occurrences) {
+    for event in &source.patch.events {
         event
             .usage
             .validate()
@@ -3190,15 +6678,347 @@ fn validate_source_payload(
         if !valid_hash_id(&event.event_id)
             || event.thread_id != batch.thread_id
             || event.root_session_id != batch.root_session_id
-            || occurrence.source_file_id != source.source_file_id
-            || occurrence.file_generation != source.expected_file_generation
-            || occurrence.event_id != event.event_id
-            || occurrence.source_start_offset < source.batch_start_offset
-            || occurrence.source_end_offset > source.last_complete_offset
+        {
+            return Err(StorageError::invalid_state("invalid canonical usage event"));
+        }
+    }
+    for occurrence in &source.patch.occurrences {
+        if occurrence.source_file_id <= 0
+            || occurrence.file_generation <= 0
+            || occurrence.source_start_offset < 0
             || occurrence.source_end_offset <= occurrence.source_start_offset
+            || !valid_hash_id(&occurrence.event_id)
         {
             return Err(StorageError::invalid_state(
                 "invalid usage event occurrence",
+            ));
+        }
+    }
+    validate_patch_keys(&source.patch)?;
+    canonical_reconciliation_state(&source.updated_state.reconciliation_state_json)?;
+    if source.reconciliation_expected_fingerprint.len() != 32 {
+        return Err(StorageError::invalid_state(
+            "invalid reconciliation context proof",
+        ));
+    }
+    Ok(())
+}
+
+fn patch_counts(patch: &ReconciliationPatchWrite) -> StorageResult<(i64, i64, i64, i64)> {
+    let count = |length: usize| {
+        i64::try_from(length)
+            .map_err(|_| StorageError::invalid_state("usage patch count exceeds SQLite INTEGER"))
+    };
+    let canonical = count(patch.events.len())?;
+    let occurrences = count(patch.occurrences.len())?;
+    let evidence = [
+        patch.facts.len(),
+        patch.marker_upserts.len(),
+        patch.window_upserts.len(),
+        patch.hold_upserts.len(),
+        patch.turn_upserts.len(),
+        patch.turn_rewrites.len(),
+    ]
+    .into_iter()
+    .try_fold(0_i64, |total, value| {
+        total
+            .checked_add(count(value)?)
+            .ok_or_else(|| StorageError::invalid_state("usage patch count overflow"))
+    })?;
+    let deletions = [
+        patch.delete_event_ids.len(),
+        patch.delete_markers.len(),
+        patch.delete_windows.len(),
+        patch.delete_holds.len(),
+    ]
+    .into_iter()
+    .try_fold(0_i64, |total, value| {
+        total
+            .checked_add(count(value)?)
+            .ok_or_else(|| StorageError::invalid_state("usage patch count overflow"))
+    })?;
+    let units = canonical
+        .checked_add(occurrences)
+        .and_then(|total| total.checked_add(evidence))
+        .and_then(|total| total.checked_add(deletions))
+        .ok_or_else(|| StorageError::invalid_state("usage patch count overflow"))?;
+    Ok((canonical, occurrences, evidence, units))
+}
+
+fn validate_patch_keys(patch: &ReconciliationPatchWrite) -> StorageResult<()> {
+    let unique = |values: &mut Vec<String>| {
+        values.sort();
+        values.dedup();
+    };
+    let mut event_ids = patch
+        .events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect::<Vec<_>>();
+    if event_ids.iter().any(|id| !valid_hash_id(id)) {
+        return Err(StorageError::invalid_state("invalid canonical event ID"));
+    }
+    let original = event_ids.len();
+    unique(&mut event_ids);
+    if event_ids.len() != original {
+        return Err(StorageError::invalid_state(
+            "duplicate canonical event write",
+        ));
+    }
+    let mut delete_ids = patch.delete_event_ids.clone();
+    let original = delete_ids.len();
+    unique(&mut delete_ids);
+    if delete_ids.len() != original || delete_ids.iter().any(|id| !valid_hash_id(id)) {
+        return Err(StorageError::invalid_state(
+            "invalid canonical event deletion",
+        ));
+    }
+
+    let occurrence_keys = patch
+        .occurrences
+        .iter()
+        .map(|row| {
+            (
+                row.source_file_id,
+                row.file_generation,
+                row.source_start_offset,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if occurrence_keys.len() != patch.occurrences.len() {
+        return Err(StorageError::invalid_state(
+            "duplicate occurrence patch key",
+        ));
+    }
+    let fact_ids = patch
+        .facts
+        .iter()
+        .map(|fact| fact.event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if fact_ids.len() != patch.facts.len() {
+        return Err(StorageError::invalid_state(
+            "duplicate usage fact patch key",
+        ));
+    }
+    for fact in &patch.facts {
+        if !valid_hash_id(&fact.event_id)
+            || fact.owning_thread_id.is_empty()
+            || fact.response_id.as_ref().is_some_and(String::is_empty)
+            || (fact.evidence_kind == EvidenceKind::Legacy
+                && (fact.response_id.is_some() || fact.operation == CodexOperation::Compaction))
+            || (fact.evidence_kind == EvidenceKind::Explicit && fact.response_id.is_none())
+        {
+            return Err(StorageError::invalid_state("invalid usage event fact"));
+        }
+    }
+    let marker_keys = patch
+        .marker_upserts
+        .iter()
+        .map(|row| {
+            (
+                row.source_file_id,
+                row.file_generation,
+                row.source_start_offset,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if marker_keys.len() != patch.marker_upserts.len()
+        || patch.marker_upserts.iter().any(|marker| {
+            marker.source_file_id <= 0
+                || marker.file_generation <= 0
+                || marker.source_start_offset < 0
+                || marker.source_end_offset <= marker.source_start_offset
+                || marker.owning_thread_id.is_empty()
+                || marker.root_session_id.is_empty()
+                || marker.model.as_ref().is_some_and(String::is_empty)
+                || marker.response_id.as_ref().is_some_and(String::is_empty)
+                || marker
+                    .resolved_event_id
+                    .as_ref()
+                    .is_some_and(|id| !valid_hash_id(id))
+        })
+    {
+        return Err(StorageError::invalid_state(
+            "invalid Compaction marker patch",
+        ));
+    }
+    let window_keys = patch
+        .window_upserts
+        .iter()
+        .map(|row| {
+            (
+                row.source_file_id,
+                row.file_generation,
+                row.source_start_offset,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if window_keys.len() != patch.window_upserts.len() {
+        return Err(StorageError::invalid_state(
+            "duplicate reconciliation window patch key",
+        ));
+    }
+    for window in &patch.window_upserts {
+        if window.source_file_id <= 0
+            || window.file_generation <= 0
+            || window.source_start_offset < 0
+            || window.source_end_offset <= window.source_start_offset
+            || window.owning_thread_id.is_empty()
+        {
+            return Err(StorageError::invalid_state(
+                "invalid reconciliation window patch",
+            ));
+        }
+        canonical_window_state(&window.state_json)?;
+    }
+    let hold_keys = patch
+        .hold_upserts
+        .iter()
+        .map(|row| {
+            (
+                row.source_file_id,
+                row.file_generation,
+                row.event_id.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if hold_keys.len() != patch.hold_upserts.len()
+        || patch.hold_upserts.iter().any(|hold| {
+            hold.source_file_id <= 0 || hold.file_generation <= 0 || !valid_hash_id(&hold.event_id)
+        })
+    {
+        return Err(StorageError::invalid_state("invalid usage hold patch"));
+    }
+    validate_unique_private_keys(&patch.delete_markers, "marker deletion")?;
+    validate_unique_private_keys(&patch.delete_windows, "window deletion")?;
+    if patch.delete_holds.iter().collect::<BTreeSet<_>>().len() != patch.delete_holds.len()
+        || patch
+            .delete_holds
+            .iter()
+            .any(|(source_id, generation, event_id)| {
+                *source_id <= 0 || *generation <= 0 || !valid_hash_id(event_id)
+            })
+    {
+        return Err(StorageError::invalid_state("invalid usage hold deletion"));
+    }
+    let turn_keys = patch
+        .turn_upserts
+        .iter()
+        .chain(
+            patch
+                .turn_rewrites
+                .iter()
+                .map(|rewrite| &rewrite.replacement),
+        )
+        .map(|turn| {
+            (
+                turn.source_file_id,
+                turn.file_generation,
+                turn.turn_key.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let total_turn_writes = patch.turn_upserts.len() + patch.turn_rewrites.len();
+    if turn_keys.len() != total_turn_writes {
+        return Err(StorageError::invalid_state("duplicate Turn patch key"));
+    }
+    for turn in patch.turn_upserts.iter().chain(
+        patch
+            .turn_rewrites
+            .iter()
+            .flat_map(|rewrite| [&rewrite.expected, &rewrite.replacement]),
+    ) {
+        validate_turn_write(turn)?;
+    }
+    for rewrite in &patch.turn_rewrites {
+        if turn_primary_key(&rewrite.expected) != turn_primary_key(&rewrite.replacement)
+            || rewrite.expected.thread_id != rewrite.replacement.thread_id
+        {
+            return Err(StorageError::invalid_state("Turn rewrite key changed"));
+        }
+        let mut replacement_with_expected_derived_fields = rewrite.replacement.clone();
+        replacement_with_expected_derived_fields.accounted = rewrite.expected.accounted.clone();
+        replacement_with_expected_derived_fields.accounted_candidate_count =
+            rewrite.expected.accounted_candidate_count;
+        replacement_with_expected_derived_fields.quality_status = rewrite.expected.quality_status;
+        replacement_with_expected_derived_fields.updated_at_ms = rewrite.expected.updated_at_ms;
+        if replacement_with_expected_derived_fields != rewrite.expected {
+            return Err(StorageError::invalid_state(
+                "Turn rewrite changed historical state",
+            ));
+        }
+    }
+    if patch.delete_markers.iter().any(|key| {
+        marker_keys.contains(&(
+            key.source_file_id,
+            key.file_generation,
+            key.source_start_offset,
+        ))
+    }) || patch.delete_windows.iter().any(|key| {
+        window_keys.contains(&(
+            key.source_file_id,
+            key.file_generation,
+            key.source_start_offset,
+        ))
+    }) || patch
+        .delete_holds
+        .iter()
+        .any(|(source_id, generation, event_id)| {
+            hold_keys.contains(&(*source_id, *generation, event_id.as_str()))
+        })
+    {
+        return Err(StorageError::invalid_state(
+            "patch contains conflicting delete and upsert",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_unique_private_keys(keys: &[UsagePrivateRowKey], name: &str) -> StorageResult<()> {
+    if keys.iter().any(|key| {
+        key.source_file_id <= 0 || key.file_generation <= 0 || key.source_start_offset < 0
+    }) || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
+    {
+        return Err(StorageError::invalid_state(format!("invalid {name}")));
+    }
+    Ok(())
+}
+
+fn turn_primary_key(turn: &UsageTurnWrite) -> (i64, i64, &str) {
+    (turn.source_file_id, turn.file_generation, &turn.turn_key)
+}
+
+fn validate_turn_write(turn: &UsageTurnWrite) -> StorageResult<()> {
+    if turn.source_file_id <= 0
+        || turn.file_generation <= 0
+        || turn.thread_id.is_empty()
+        || turn.turn_key.is_empty()
+        || turn.start_offset < 0
+        || turn.end_offset.is_some_and(|end| end <= turn.start_offset)
+        || turn.ended_at_ms.is_some_and(|time| time < 0)
+        || turn.started_at_ms.is_some_and(|time| time < 0)
+        || turn.state_through_offset < 0
+        || turn.updated_at_ms < 0
+        || !matches!(turn.quality_status, "complete" | "partial" | "conflict")
+    {
+        return Err(StorageError::invalid_state("invalid Turn write"));
+    }
+    for snapshot in [
+        turn.start_total.as_ref(),
+        turn.last_total.as_ref(),
+        Some(&turn.accounted),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        snapshot
+            .vector
+            .validate()
+            .map_err(|error| StorageError::invalid_state(error.to_string()))?;
+        if snapshot.fingerprint != crate::codex::normalization::usage_fingerprint(&snapshot.vector)
+        {
+            return Err(StorageError::invalid_state(
+                "Turn usage fingerprint mismatch",
             ));
         }
     }
@@ -3296,6 +7116,133 @@ fn validate_source_preconditions(
     Ok(())
 }
 
+fn validate_reconciliation_context(
+    transaction: &Connection,
+    batch: &UsageCommitBatch,
+    source: &UsageSourceCommit,
+) -> StorageResult<()> {
+    let context = crate::codex::ingestion::usage_processor::UsageContext {
+        source_file_id: source.source_file_id,
+        file_generation: source.expected_file_generation,
+        owning_thread_id: batch.thread_id.clone(),
+        root_session_id: batch.root_session_id.clone(),
+    };
+    let basic_proof = UsageReconciliationBasicProof {
+        device_id: source.updated_state.device_id,
+        inode: source.updated_state.inode,
+        observed_raw_size: source.fixed_observed_raw_size,
+        expected_checkpoint: (!source.expected_checkpoint_missing)
+            .then(|| source.expected_checkpoint.clone()),
+        expected_state: source.expected_state.clone(),
+    };
+    let frozen = read_reconciliation_context(
+        transaction,
+        batch.ledger_epoch,
+        context,
+        source.reconciliation_request.clone(),
+        &basic_proof,
+    )?;
+    if frozen.context.expected_fingerprint != source.reconciliation_expected_fingerprint {
+        return Err(StorageError::usage_conflict(
+            "Codex reconciliation context changed during processing",
+        ));
+    }
+    let known_dependency_occurrences = frozen
+        .context
+        .affected_turns
+        .values()
+        .flat_map(|affected| affected.compensation_occurrences.iter())
+        .chain(frozen.window_proposals.values().flat_map(|proposals| {
+            proposals
+                .iter()
+                .flat_map(|proposal| proposal.occurrences.iter())
+        }))
+        .chain(frozen.response_occurrences.values().flatten())
+        .map(|occurrence| {
+            (
+                occurrence.source_file_id,
+                occurrence.file_generation,
+                occurrence.source_start_offset,
+                occurrence.source_end_offset,
+                occurrence.event_id.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let rewritten_turns = source
+        .patch
+        .turn_rewrites
+        .iter()
+        .map(|rewrite| {
+            (
+                rewrite.expected.source_file_id,
+                rewrite.expected.file_generation,
+                rewrite.expected.turn_key.clone(),
+                rewrite.expected.thread_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let retargetable_compensation_ranges = frozen
+        .context
+        .affected_turns
+        .values()
+        .filter(|affected| {
+            rewritten_turns.contains(&(
+                affected.snapshot.key.source_file_id,
+                affected.snapshot.key.file_generation,
+                affected.snapshot.key.turn_key.clone(),
+                affected.snapshot.owning_thread_id.clone(),
+            )) && source.patch.events.iter().any(|event| {
+                event.kind == EventKind::TurnCompensation
+                    && event.thread_id == affected.snapshot.owning_thread_id
+                    && event.turn_key.as_deref() == Some(affected.snapshot.key.turn_key.as_str())
+            })
+        })
+        .flat_map(|affected| affected.compensation_occurrences.iter())
+        .map(|occurrence| {
+            (
+                occurrence.source_file_id,
+                occurrence.file_generation,
+                occurrence.source_start_offset,
+                occurrence.source_end_offset,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for occurrence in &source.patch.occurrences {
+        let range = (
+            occurrence.source_file_id,
+            occurrence.file_generation,
+            occurrence.source_start_offset as u64,
+            occurrence.source_end_offset as u64,
+        );
+        let retargeted_compensation = retargetable_compensation_ranges.contains(&range);
+        if occurrence.source_file_id == source.source_file_id
+            && occurrence.file_generation == source.expected_file_generation
+        {
+            if occurrence.source_start_offset < source.batch_start_offset
+                || occurrence.source_end_offset > source.last_complete_offset
+            {
+                if !retargeted_compensation {
+                    return Err(StorageError::invalid_state(
+                        "current-source occurrence falls outside the committed chunk",
+                    ));
+                }
+            }
+        } else if !known_dependency_occurrences.contains(&(
+            occurrence.source_file_id,
+            occurrence.file_generation,
+            occurrence.source_start_offset as u64,
+            occurrence.source_end_offset as u64,
+            occurrence.event_id.as_str(),
+        )) && !retargeted_compensation
+        {
+            return Err(StorageError::usage_conflict(
+                "cross-source occurrence is absent from frozen reconciliation dependencies",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn prepare_local_replay(
     transaction: &Connection,
     batch: &UsageCommitBatch,
@@ -3314,6 +7261,9 @@ fn prepare_local_replay(
         let facts: i64 = transaction.query_row(
             "SELECT
                 (SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2) +
+                (SELECT count(*) FROM codex_compaction_markers WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2) +
+                (SELECT count(*) FROM codex_usage_reconciliation_windows WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2) +
+                (SELECT count(*) FROM codex_usage_event_holds WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2) +
                 (SELECT count(*) FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2) +
@@ -3348,24 +7298,85 @@ fn prepare_local_replay(
     }
 
     transaction.execute(
-        "DELETE FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2",
-        params![batch.ledger_epoch, source.source_file_id],
+        "INSERT OR IGNORE INTO codex_usage_event_holds(
+            source,ledger_epoch,source_file_id,file_generation,event_id,hold_reason)
+         SELECT 'codex',?1,?2,?3,event_id,'replay' FROM (
+             SELECT event_id FROM codex_usage_event_occurrences
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3
+             UNION
+             SELECT resolved_event_id AS event_id FROM codex_compaction_markers
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND resolved_event_id IS NOT NULL
+         )",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
     )?;
     transaction.execute(
-        "DELETE FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2",
-        params![batch.ledger_epoch, source.source_file_id],
+        "DELETE FROM codex_compaction_markers WHERE source='codex' AND ledger_epoch=?1
+           AND source_file_id=?2 AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
     )?;
     transaction.execute(
-        "DELETE FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2",
-        params![batch.ledger_epoch, source.source_file_id],
+        "DELETE FROM codex_usage_reconciliation_windows WHERE source='codex' AND ledger_epoch=?1
+           AND source_file_id=?2 AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
     )?;
     transaction.execute(
-        "DELETE FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2",
-        params![batch.ledger_epoch, source.source_file_id],
+        "DELETE FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?1
+           AND source_file_id=?2 AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
     )?;
     transaction.execute(
-        "DELETE FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
-        params![batch.ledger_epoch, source.source_file_id],
+        "DELETE FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_turns WHERE ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2
+           AND file_generation=?3",
+        params![
+            batch.ledger_epoch,
+            source.source_file_id,
+            source.expected_file_generation
+        ],
     )?;
     // Keep canonical rows until replay candidates have been compared. This is
     // required so a deterministic event ID with a different payload remains a
@@ -3381,12 +7392,18 @@ fn capture_affected_canonical_visibility(
 ) -> StorageResult<HashSet<String>> {
     let mut ids = HashSet::new();
     for source in &batch.sources {
-        for event in &source.events {
+        for event in &source.patch.events {
             ids.insert(event.event_id.clone());
         }
+        ids.extend(source.patch.delete_event_ids.iter().cloned());
         if source.local_replay {
             let mut statement = transaction.prepare(
                 "SELECT event_id FROM codex_usage_event_occurrences
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                 UNION SELECT resolved_event_id FROM codex_compaction_markers
+                 WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+                   AND resolved_event_id IS NOT NULL
+                 UNION SELECT event_id FROM codex_usage_event_holds
                  WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2",
             )?;
             for row in statement
@@ -3448,12 +7465,23 @@ fn local_replay_orphan_ids(
          WHERE source='codex' AND source_epoch=?1 AND NOT EXISTS (
              SELECT 1 FROM codex_usage_event_occurrences o
              WHERE o.source='codex' AND o.ledger_epoch=?1 AND o.event_id=usage_events.event_id
+         ) AND NOT EXISTS (
+             SELECT 1 FROM codex_compaction_markers m
+             WHERE m.source='codex' AND m.ledger_epoch=?1
+               AND m.resolved_event_id=usage_events.event_id
+         ) AND NOT EXISTS (
+             SELECT 1 FROM codex_usage_event_holds h
+             WHERE h.source='codex' AND h.ledger_epoch=?1
+               AND h.event_id=usage_events.event_id
          )",
     )?;
-    statement
+    let ids = statement
         .query_map([ledger_epoch], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+        .map_err(StorageError::from)?;
+    drop(statement);
+    strip_orphan_window_references(transaction, ledger_epoch, &ids)?;
+    Ok(ids)
 }
 
 fn write_or_compare_skill_event(
@@ -3590,6 +7618,7 @@ fn carry_skill_events_at_offset(
     active_epoch: i64,
     build_epoch: i64,
     source_file_id: i64,
+    file_generation: i64,
     start_offset: i64,
 ) -> StorageResult<()> {
     transaction.execute(
@@ -3599,29 +7628,40 @@ fn carry_skill_events_at_offset(
          SELECT ?1,source_file_id,file_generation,source_start_offset,source_end_offset,
             occurred_at_ms,thread_id,root_session_id,model,skill_name,created_at_ms
          FROM codex_skill_usage_events a
-         WHERE a.ledger_epoch=?2 AND a.source_file_id=?3 AND a.source_start_offset=?4
+         WHERE a.ledger_epoch=?2 AND a.source_file_id=?3 AND a.file_generation=?4
+           AND a.source_start_offset=?5
            AND NOT EXISTS(
              SELECT 1 FROM codex_skill_usage_events b
              WHERE b.ledger_epoch=?1 AND b.source_file_id=a.source_file_id
                AND b.file_generation=a.file_generation
                AND b.source_start_offset=a.source_start_offset AND b.skill_name=a.skill_name)",
-        params![build_epoch, active_epoch, source_file_id, start_offset],
+        params![
+            build_epoch,
+            active_epoch,
+            source_file_id,
+            file_generation,
+            start_offset
+        ],
     )?;
     let diff: i64 = transaction.query_row(
         "SELECT
           (SELECT count(*) FROM (
              SELECT file_generation,source_end_offset,occurred_at_ms,thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3 AND source_start_offset=?4
+             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3
+               AND file_generation=?5 AND source_start_offset=?4
              EXCEPT
              SELECT file_generation,source_end_offset,occurred_at_ms,thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3 AND source_start_offset=?4))
+             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?5 AND source_start_offset=?4))
         + (SELECT count(*) FROM (
              SELECT file_generation,source_end_offset,occurred_at_ms,thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3 AND source_start_offset=?4
+             FROM codex_skill_usage_events WHERE ledger_epoch=?2 AND source_file_id=?3
+               AND file_generation=?5 AND source_start_offset=?4
              EXCEPT
              SELECT file_generation,source_end_offset,occurred_at_ms,thread_id,root_session_id,model,skill_name
-             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3 AND source_start_offset=?4))",
-        params![active_epoch, build_epoch, source_file_id, start_offset],
+             FROM codex_skill_usage_events WHERE ledger_epoch=?1 AND source_file_id=?3
+               AND file_generation=?5 AND source_start_offset=?4))",
+        params![active_epoch, build_epoch, source_file_id, start_offset, file_generation],
         |row| row.get(0),
     )?;
     if diff != 0 {
@@ -3637,7 +7677,17 @@ fn write_or_compare_occurrence(
     epoch: i64,
     source: &UsageSourceCommit,
     occurrence: &UsageOccurrenceWrite,
+    explicitly_deleted_event_ids: &BTreeSet<String>,
 ) -> StorageResult<()> {
+    if occurrence.source_file_id <= 0
+        || occurrence.file_generation <= 0
+        || occurrence.source_start_offset < 0
+        || occurrence.source_end_offset <= occurrence.source_start_offset
+    {
+        return Err(StorageError::invalid_state(
+            "invalid occurrence physical key",
+        ));
+    }
     let existing: Option<(String, i64)> = transaction
         .query_row(
             "SELECT event_id,source_end_offset FROM codex_usage_event_occurrences
@@ -3645,8 +7695,8 @@ fn write_or_compare_occurrence(
                 AND source_start_offset=?4",
             params![
                 epoch,
-                source.source_file_id,
-                source.expected_file_generation,
+                occurrence.source_file_id,
+                occurrence.file_generation,
                 occurrence.source_start_offset
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -3656,7 +7706,27 @@ fn write_or_compare_occurrence(
         if existing == (occurrence.event_id.clone(), occurrence.source_end_offset) {
             return Ok(());
         }
-        return Err(StorageError::usage_conflict("usage occurrence conflict"));
+        if !explicitly_deleted_event_ids.contains(&existing.0) {
+            return Err(StorageError::usage_conflict(
+                "usage occurrence identity changed without explicit deletion",
+            ));
+        }
+        transaction.execute(
+            "UPDATE codex_usage_event_occurrences
+             SET event_id=?5,source_end_offset=?6,created_at_ms=?7
+             WHERE source='codex' AND ledger_epoch=?1 AND source_file_id=?2
+               AND file_generation=?3 AND source_start_offset=?4",
+            params![
+                epoch,
+                occurrence.source_file_id,
+                occurrence.file_generation,
+                occurrence.source_start_offset,
+                occurrence.event_id,
+                occurrence.source_end_offset,
+                source.committed_at_ms
+            ],
+        )?;
+        return Ok(());
     }
     transaction.execute(
         "INSERT INTO codex_usage_event_occurrences (
@@ -3665,8 +7735,8 @@ fn write_or_compare_occurrence(
          ) VALUES ('codex',?1,?2,?3,?4,?5,?6,?7)",
         params![
             epoch,
-            source.source_file_id,
-            source.expected_file_generation,
+            occurrence.source_file_id,
+            occurrence.file_generation,
             occurrence.source_start_offset,
             occurrence.source_end_offset,
             occurrence.event_id,
@@ -3691,6 +7761,185 @@ fn snapshot_columns(snapshot: Option<&UsageSnapshot>) -> SnapshotColumns {
     }
 }
 
+fn read_usage_turn_write(
+    connection: &Connection,
+    epoch: i64,
+    source_file_id: i64,
+    file_generation: i64,
+    turn_key: &str,
+) -> StorageResult<Option<UsageTurnWrite>> {
+    let row = connection
+        .query_row(
+            "SELECT source_file_id,file_generation,turn_key,thread_id,raw_turn_id,started_at_ms,
+                    ended_at_ms,start_offset,end_offset,status,
+                    start_total_input_tokens,start_total_cached_tokens,start_total_cache_write_tokens,
+                    start_total_output_tokens,start_total_reasoning_tokens,start_total_total_tokens,start_total_fingerprint,
+                    last_total_input_tokens,last_total_cached_tokens,last_total_cache_write_tokens,
+                    last_total_output_tokens,last_total_reasoning_tokens,last_total_total_tokens,last_total_fingerprint,
+                    accounted_input_tokens,accounted_cached_tokens,accounted_cache_write_tokens,
+                    accounted_output_tokens,accounted_reasoning_tokens,accounted_total_tokens,accounted_fingerprint,
+                    accounted_candidate_count,model_state,single_model,unresolved_model_seen,
+                    reasoning_effort_state,single_reasoning_effort,unresolved_reasoning_effort_seen,
+                    compensation_allowed,block_start_missing,block_time_missing,block_reset,
+                    block_ownership_gap,block_parser_gap,block_required_invalid,block_model_unresolved,
+                    quality_status,state_through_offset,updated_at_ms
+             FROM codex_turns
+             WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3 AND turn_key=?4",
+            params![epoch,source_file_id,file_generation,turn_key],
+            |row| {
+                Ok((
+                    read_persisted_turn_snapshot(row)?,
+                    row.get::<_, i64>(48)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(snapshot, updated_at_ms)| usage_turn_write_from_snapshot(snapshot, updated_at_ms))
+        .transpose()
+}
+
+fn usage_turn_write_from_snapshot(
+    snapshot: crate::codex::ingestion::usage_processor::PersistedTurnSnapshot,
+    updated_at_ms: i64,
+) -> StorageResult<UsageTurnWrite> {
+    use crate::codex::ingestion::usage_processor::{
+        PersistedTurnStatus, TurnModelState, TurnReasoningEffortState,
+    };
+
+    let model_state = match snapshot.state.model_state {
+        TurnModelState::None => UsageTurnModelState::None,
+        TurnModelState::Single(model) => UsageTurnModelState::Single(model),
+        TurnModelState::Mixed => UsageTurnModelState::Mixed,
+    };
+    let reasoning_effort_state = match snapshot.state.reasoning_effort_state {
+        TurnReasoningEffortState::None => UsageTurnReasoningEffortState::None,
+        TurnReasoningEffortState::Single(effort) => UsageTurnReasoningEffortState::Single(effort),
+        TurnReasoningEffortState::Mixed => UsageTurnReasoningEffortState::Mixed,
+    };
+    let usage_snapshot = |value: &NormalizedTokenUsage| UsageSnapshot {
+        vector: value.clone(),
+        fingerprint: crate::codex::normalization::usage_fingerprint(value).to_vec(),
+    };
+    Ok(UsageTurnWrite {
+        source_file_id: snapshot.key.source_file_id,
+        file_generation: snapshot.key.file_generation,
+        thread_id: snapshot.owning_thread_id,
+        turn_key: snapshot.state.turn_key,
+        raw_turn_id: snapshot.state.raw_turn_id,
+        started_at_ms: snapshot.state.started_at_ms,
+        ended_at_ms: snapshot.ended_at_ms,
+        start_offset: i64::try_from(snapshot.state.start_offset)
+            .map_err(|_| StorageError::invalid_state("Turn start offset exceeds storage"))?,
+        end_offset: snapshot
+            .end_offset
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StorageError::invalid_state("Turn end offset exceeds storage"))?,
+        status: match snapshot.status {
+            PersistedTurnStatus::Open => UsageTurnStatus::Open,
+            PersistedTurnStatus::Completed => UsageTurnStatus::Completed,
+            PersistedTurnStatus::Aborted => UsageTurnStatus::Aborted,
+            PersistedTurnStatus::Failed => UsageTurnStatus::Failed,
+        },
+        start_total: snapshot.state.start_total.as_ref().map(usage_snapshot),
+        last_total: snapshot.state.last_total.as_ref().map(usage_snapshot),
+        accounted: usage_snapshot(&snapshot.state.accounted),
+        accounted_candidate_count: i64::try_from(snapshot.state.accounted_candidate_count)
+            .map_err(|_| StorageError::invalid_state("Turn candidate count exceeds storage"))?,
+        model_state,
+        reasoning_effort_state,
+        unresolved_reasoning_effort_seen: snapshot.state.unresolved_reasoning_effort_seen,
+        unresolved_model_seen: snapshot.state.unresolved_model_seen,
+        blocks: UsageCompensationBlocks {
+            start_missing: snapshot.state.blocks.start_missing,
+            time_missing: snapshot.state.blocks.time_missing,
+            reset: snapshot.state.blocks.reset,
+            ownership_gap: snapshot.state.blocks.ownership_gap,
+            parser_gap: snapshot.state.blocks.parser_gap,
+            required_invalid: snapshot.state.blocks.required_invalid,
+            model_unresolved: snapshot.state.blocks.model_unresolved,
+        },
+        quality_status: match snapshot.quality_status.as_str() {
+            "complete" => "complete",
+            "partial" => "partial",
+            "conflict" => "conflict",
+            _ => return Err(StorageError::invalid_state("invalid Turn quality status")),
+        },
+        state_through_offset: i64::try_from(snapshot.state_through_offset)
+            .map_err(|_| StorageError::invalid_state("Turn state offset exceeds storage"))?,
+        updated_at_ms,
+    })
+}
+
+fn write_turn_rewrite(
+    transaction: &Connection,
+    ledger_epoch: i64,
+    rewrite: &UsageTurnRewriteWrite,
+) -> StorageResult<()> {
+    let expected = &rewrite.expected;
+    let replacement = &rewrite.replacement;
+    if expected.source_file_id <= 0
+        || expected.file_generation <= 0
+        || expected.thread_id.is_empty()
+        || expected.turn_key.is_empty()
+        || (
+            expected.source_file_id,
+            expected.file_generation,
+            expected.thread_id.as_str(),
+            expected.turn_key.as_str(),
+        ) != (
+            replacement.source_file_id,
+            replacement.file_generation,
+            replacement.thread_id.as_str(),
+            replacement.turn_key.as_str(),
+        )
+    {
+        return Err(StorageError::invalid_state("invalid full Turn rewrite key"));
+    }
+    let Some(current) = read_usage_turn_write(
+        transaction,
+        ledger_epoch,
+        expected.source_file_id,
+        expected.file_generation,
+        &expected.turn_key,
+    )?
+    else {
+        return Err(StorageError::usage_conflict(
+            "Turn rewrite expected row is missing",
+        ));
+    };
+    let mut expected_with_current_timestamp = expected.clone();
+    expected_with_current_timestamp.updated_at_ms = current.updated_at_ms;
+    if current != expected_with_current_timestamp || current.thread_id != expected.thread_id {
+        return Err(StorageError::usage_conflict(
+            "Turn rewrite expected snapshot changed",
+        ));
+    }
+    let deleted = transaction.execute(
+        "DELETE FROM codex_turns
+         WHERE ledger_epoch=?1 AND source_file_id=?2 AND file_generation=?3 AND turn_key=?4",
+        params![
+            ledger_epoch,
+            expected.source_file_id,
+            expected.file_generation,
+            expected.turn_key
+        ],
+    )?;
+    if deleted != 1 {
+        return Err(StorageError::usage_conflict(
+            "Turn rewrite CAS delete failed",
+        ));
+    }
+    write_turn(
+        transaction,
+        ledger_epoch,
+        replacement.source_file_id,
+        replacement.file_generation,
+        &replacement.thread_id,
+        replacement,
+    )
+}
+
 fn write_turn(
     transaction: &Connection,
     ledger_epoch: i64,
@@ -3699,6 +7948,12 @@ fn write_turn(
     thread_id: &str,
     turn: &UsageTurnWrite,
 ) -> StorageResult<()> {
+    if turn.source_file_id != source_file_id
+        || turn.file_generation != file_generation
+        || turn.thread_id != thread_id
+    {
+        return Err(StorageError::invalid_state("Turn write key mismatch"));
+    }
     let start = snapshot_columns(turn.start_total.as_ref());
     let last = snapshot_columns(turn.last_total.as_ref());
     let accounted = snapshot_columns(Some(&turn.accounted));
@@ -3818,7 +8073,7 @@ fn write_turn(
     Ok(())
 }
 
-fn write_anomaly(
+pub(super) fn write_anomaly(
     transaction: &Connection,
     ledger_epoch: i64,
     thread_id: &str,
@@ -3843,11 +8098,16 @@ fn write_anomaly(
         } else {
             "warning".to_owned()
         },
+        anomaly
+            .turn_key
+            .as_ref()
+            .map(|turn_key| serde_json::json!({"turn_key": turn_key}).to_string())
+            .unwrap_or_else(|| "{}".to_owned()),
     );
     let existing: Option<ExistingAnomaly> = transaction
         .query_row(
             "SELECT occurred_at_ms,thread_id,source_file_id,file_generation,
-                    source_start_offset,anomaly_type,severity
+                    source_start_offset,anomaly_type,severity,details_json
                  FROM codex_ingest_anomalies WHERE ledger_epoch=?1 AND anomaly_id=?2",
             params![ledger_epoch, anomaly.anomaly_id],
             |row| {
@@ -3859,12 +8119,22 @@ fn write_anomaly(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
         .optional()?;
     if let Some(existing) = existing {
-        if existing == expected {
+        let existing_kind = UsageAnomalyKind::parse(&existing.5)?;
+        if existing.0 == expected.0
+            && existing.1 == expected.1
+            && existing.2 == expected.2
+            && existing.3 == expected.3
+            && existing.4 == expected.4
+            && existing_kind == anomaly.kind
+            && existing.6 == expected.6
+            && existing.7 == expected.7
+        {
             return Ok(());
         }
         return Err(StorageError::usage_conflict(
@@ -3875,7 +8145,7 @@ fn write_anomaly(
         "INSERT INTO codex_ingest_anomalies (
             ledger_epoch,anomaly_id,detected_at_ms,occurred_at_ms,thread_id,source_file_id,
             file_generation,source_start_offset,anomaly_type,severity,details_json,resolved
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'{}',0)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0)",
         params![
             ledger_epoch,
             anomaly.anomaly_id,
@@ -3890,7 +8160,8 @@ fn write_anomaly(
                 "error"
             } else {
                 "warning"
-            }
+            },
+            expected.7,
         ],
     )?;
     Ok(())
@@ -3915,6 +8186,8 @@ fn write_source_state_row(
     source_file_id: i64,
     state: &UsageSourceStateWrite,
 ) -> StorageResult<()> {
+    let reconciliation_state_json =
+        canonical_reconciliation_state(&state.reconciliation_state_json)?;
     let previous = snapshot_columns(state.previous_total.as_ref());
     let (chain, reason) = match state.chain_state {
         UsageChainState::Continuous => ("continuous", None),
@@ -3930,9 +8203,9 @@ fn write_source_state_row(
             previous_total_reasoning_tokens,previous_total_total_tokens,
             previous_total_fingerprint,previous_total_offset,chain_state,chain_block_reason,
             active_turn_key,active_model,active_model_offset,active_reasoning_effort,
-            active_reasoning_effort_offset,updated_at_ms
+            active_reasoning_effort_offset,updated_at_ms,reconciliation_state_json
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
-            ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
+            ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)
          ON CONFLICT(ledger_epoch,source_file_id) DO UPDATE SET
             file_generation=excluded.file_generation,device_id=excluded.device_id,inode=excluded.inode,
             usage_parser_version=excluded.usage_parser_version,
@@ -3954,7 +8227,8 @@ fn write_source_state_row(
             active_model=excluded.active_model,active_model_offset=excluded.active_model_offset,
             active_reasoning_effort=excluded.active_reasoning_effort,
             active_reasoning_effort_offset=excluded.active_reasoning_effort_offset,
-            updated_at_ms=excluded.updated_at_ms",
+            updated_at_ms=excluded.updated_at_ms,
+            reconciliation_state_json=excluded.reconciliation_state_json",
         params![
             ledger_epoch,source_file_id,state.file_generation,state.device_id,state.inode,
             state.usage_parser_version,state.canonical_algorithm_version,state.resolved_through_offset,
@@ -3963,10 +8237,30 @@ fn write_source_state_row(
             previous.0,previous.1,previous.2,previous.3,previous.4,previous.5,previous.6,
             state.previous_total_offset,chain,reason,state.active_turn_key,state.active_model,
             state.active_model_offset,state.active_reasoning_effort,state.active_reasoning_effort_offset,
-            state.updated_at_ms
+            state.updated_at_ms,reconciliation_state_json
         ],
     )?;
     Ok(())
+}
+
+fn canonical_reconciliation_state(json: &str) -> StorageResult<String> {
+    use crate::codex::ingestion::usage_processor::{CarryError, ReconciliationCarry};
+
+    let carry = ReconciliationCarry::from_json(json).map_err(|error| match error {
+        CarryError::UnsupportedVersion => {
+            StorageError::usage_conflict("usage reconciliation carry version requires rebuild")
+        }
+        CarryError::Invalid => StorageError::invalid_state("invalid usage reconciliation carry"),
+    })?;
+    let canonical = carry
+        .to_json()
+        .map_err(|_| StorageError::invalid_state("invalid usage reconciliation carry"))?;
+    if canonical != json {
+        return Err(StorageError::invalid_state(
+            "usage reconciliation carry is not canonical",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn write_usage_checkpoint(
@@ -4043,7 +8337,9 @@ fn update_build_progress(
                 completion_status='rebuilt',completion_error_code=NULL,
                 completed_generation=?8,completed_through_offset=?4,
                 carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?7
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,carry_after_turn_key=NULL,
+                carry_after_anomaly_id=NULL,updated_at_ms=?7
              WHERE build_epoch=?1 AND source_file_id=?2 AND target_parser_version=?3
                 AND expected_file_generation=?8 AND required_generation=?8
                 AND observed_raw_size=?9 AND completion_status IN ('pending','blocked')
@@ -4202,6 +8498,11 @@ pub(super) fn reconcile_usage_metadata_change(
             transaction.execute(
                 "UPDATE codex_usage_source_states SET root_session_id=?1
                  WHERE ledger_epoch=?2 AND owning_thread_id=?3",
+                params![next_root, active_epoch, thread_id],
+            )?;
+            transaction.execute(
+                "UPDATE codex_compaction_markers SET root_session_id=?1
+                 WHERE source='codex' AND ledger_epoch=?2 AND owning_thread_id=?3",
                 params![next_root, active_epoch, thread_id],
             )?;
             Ok::<_, StorageError>(())

@@ -253,11 +253,48 @@ pub(super) fn quarantine_thread(
     storage: &CodexStorage<'_>,
     thread_id: &str,
     error_code: &str,
+    diagnostic: Option<super::usage::UsageQuarantineDiagnostic>,
     now_ms: i64,
 ) -> Result<usize, CodexStorageError> {
     let mut tx = storage.begin_write_txn()?;
-    let count = tx.with_private_state(|connection| {
-        rebuild_quarantine_session(connection, thread_id, error_code, now_ms).map_err(rebuild_error)
+    let (count, root_session_id) = tx.with_private_state(|connection| {
+        let root_session_id: Option<String> = connection
+            .query_row(
+                "SELECT owner.root_session_id
+                 FROM threads AS owner
+                 JOIN threads AS root
+                   ON root.thread_id=owner.root_session_id AND root.source=owner.source
+                 WHERE owner.thread_id=?1 AND owner.source='codex'",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(CodexStorageError::from)?;
+        let Some(root_session_id) = root_session_id else {
+            return Err(CodexStorageError::Storage(StorageError::invalid_state(
+                "quarantine thread root relationship is not confirmed",
+            )));
+        };
+        let count = rebuild_quarantine_session(
+            connection,
+            &root_session_id,
+            error_code,
+            diagnostic.as_ref(),
+            now_ms,
+        )
+        .map_err(rebuild_error)?;
+        Ok((count, root_session_id))
+    })?;
+    let build_epoch = tx
+        .usage_epoch_state()?
+        .build_epoch
+        .ok_or_else(|| rebuild_error(RebuildError::Invalid("no usage build to quarantine")))?;
+    // Canonical events become orphans only after all quarantined sources have
+    // lost their physical evidence, so check isolation after this cleanup.
+    delete_orphan_build_events(&mut tx, build_epoch)?;
+    tx.with_private_state(|connection| {
+        verify_quarantined_session_clean(connection, build_epoch, &root_session_id)
+            .map_err(rebuild_error)
     })?;
     tx.commit()?;
     Ok(count)
@@ -323,6 +360,14 @@ pub(crate) fn delete_orphan_build_events(
     tx: &mut super::CodexWriteTxn<'_>,
     build_epoch: i64,
 ) -> Result<usize, CodexStorageError> {
+    delete_orphan_events(tx, build_epoch, crate::source::UsageWriteTarget::Build)
+}
+
+pub(crate) fn delete_orphan_events(
+    tx: &mut super::CodexWriteTxn<'_>,
+    epoch: i64,
+    target: crate::source::UsageWriteTarget,
+) -> Result<usize, CodexStorageError> {
     let ids = tx.with_private_state(|connection| {
         let mut statement = connection.prepare(
             "SELECT event_id FROM usage_events e
@@ -331,17 +376,27 @@ pub(crate) fn delete_orphan_build_events(
                  SELECT 1 FROM codex_usage_event_occurrences o
                  WHERE o.source='codex' AND o.ledger_epoch=e.source_epoch
                    AND o.event_id=e.event_id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM codex_compaction_markers m
+                 WHERE m.source='codex' AND m.ledger_epoch=e.source_epoch
+                   AND m.resolved_event_id=e.event_id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM codex_usage_event_holds h
+                 WHERE h.source='codex' AND h.ledger_epoch=e.source_epoch
+                   AND h.event_id=e.event_id)
              ORDER BY e.rowid",
         )?;
-        statement
-            .query_map([build_epoch], |row| row.get::<_, String>(0))?
+        let ids = statement
+            .query_map([epoch], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
+            .map_err(StorageError::from)?;
+        super::usage::strip_orphan_window_references(connection, epoch, &ids)?;
+        Ok::<_, StorageError>(ids)
     })?;
     if ids.is_empty() {
         return Ok(0);
     }
-    tx.delete_usage_events_no_revision(crate::source::UsageWriteTarget::Build, &ids)
+    tx.delete_usage_events_no_revision(target, &ids)
 }
 
 fn active_quarantine_state_read(
@@ -434,6 +489,15 @@ fn verify_activation_preconditions(
     if unfinished != 0 {
         return Err(RebuildError::Cas("manifest contains unfinished sources"));
     }
+    let holds: i64 = connection.query_row(
+        "SELECT count(*) FROM codex_usage_event_holds
+         WHERE source='codex' AND ledger_epoch=?1",
+        [build_epoch],
+        |row| row.get(0),
+    )?;
+    if holds != 0 {
+        return Err(RebuildError::Cas("usage build contains active event holds"));
+    }
     let member_ids = query_ids(
         connection,
         "SELECT source_file_id FROM codex_usage_build_sources WHERE build_epoch=?1
@@ -463,6 +527,22 @@ fn private_visibility_equal(
     build_epoch: i64,
     build_parser: i64,
 ) -> Result<bool, RebuildError> {
+    let active_compaction = crate::codex::analytics::compaction_visibility_signature(
+        connection,
+        active_epoch,
+        active_parser,
+    )
+    .map_err(|_| RebuildError::Invalid("failed to read Compaction visibility"))?;
+    let build_compaction = crate::codex::analytics::compaction_visibility_signature(
+        connection,
+        build_epoch,
+        build_parser,
+    )
+    .map_err(|_| RebuildError::Invalid("failed to read Compaction visibility"))?;
+    if active_compaction != build_compaction {
+        return Ok(false);
+    }
+
     let active_skills_ready =
         active_epoch > 0 && active_parser >= crate::codex::analytics::SKILL_USAGE_PARSER_VERSION;
     let build_skills_ready =
@@ -737,11 +817,13 @@ pub(crate) fn rebuild_quarantine_session(
     transaction: &Connection,
     root_session_id: &str,
     error_code: &str,
+    diagnostic: Option<&super::usage::UsageQuarantineDiagnostic>,
     now_ms: i64,
 ) -> Result<usize, RebuildError> {
     let (build_epoch, target_parser) = current_build(transaction)?;
     let mut statement = transaction.prepare(
-        "SELECT source_file_id,expected_file_generation,expected_device_id,expected_inode,observed_raw_size
+        "SELECT source_file_id,expected_file_generation,expected_device_id,expected_inode,
+                observed_raw_size,expected_owning_thread_id
          FROM codex_usage_build_sources
          WHERE build_epoch=?1 AND expected_root_session_id=?2
          ORDER BY source_file_id",
@@ -754,12 +836,32 @@ pub(crate) fn rebuild_quarantine_session(
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, u64>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     if members.is_empty() {
         return Err(RebuildError::Cas("session has no build members"));
+    }
+    if let Some(diagnostic) = diagnostic
+        && (!matches!(
+            diagnostic.anomaly.kind,
+            super::usage::UsageAnomalyKind::ReconciliationPatchTooLarge
+                | super::usage::UsageAnomalyKind::ResponseUsageConflict
+                | super::usage::UsageAnomalyKind::ResponseOwnershipMismatch
+                | super::usage::UsageAnomalyKind::CompactionIdentityMismatch
+                | super::usage::UsageAnomalyKind::LegacyCoverageAmbiguous
+        ) || diagnostic.anomaly.source_start_offset.is_none()
+            || !members.iter().any(|member| {
+                member.0 == diagnostic.source_file_id
+                    && member.1 == diagnostic.file_generation
+                    && member.5.as_deref() == Some(diagnostic.owning_thread_id.as_str())
+            }))
+    {
+        return Err(RebuildError::Cas(
+            "quarantine diagnostic source proof changed",
+        ));
     }
 
     let last_activity_at_ms: i64 = transaction.query_row(
@@ -786,15 +888,31 @@ pub(crate) fn rebuild_quarantine_session(
         params![build_epoch, root_session_id],
     )?;
 
-    for (source_file_id, generation, device_id, inode, observed_size) in &members {
+    for (source_file_id, generation, device_id, inode, observed_size, _owning_thread_id) in &members
+    {
         cleanup_build_source(transaction, build_epoch, *source_file_id)?;
         reset_checkpoint(transaction, *source_file_id, target_parser)?;
+        if let Some(diagnostic) = diagnostic
+            && diagnostic.source_file_id == *source_file_id
+        {
+            super::usage::write_anomaly(
+                transaction,
+                build_epoch,
+                &diagnostic.owning_thread_id,
+                *source_file_id,
+                *generation,
+                &diagnostic.anomaly,
+            )
+            .map_err(|_| RebuildError::Invalid("failed to write quarantine usage diagnostic"))?;
+        }
         let changed = transaction.execute(
             "UPDATE codex_usage_build_sources SET
                 completion_status='quarantined',completion_error_code=?1,
                 completed_generation=NULL,completed_through_offset=NULL,
                 carry_from_epoch=NULL,carry_phase='none',carry_after_start_offset=NULL,
-                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,updated_at_ms=?2
+                carry_after_turn_key=NULL,carry_after_anomaly_id=NULL,
+                carry_after_fact_event_id=NULL,carry_after_marker_start_offset=NULL,
+                carry_after_window_start_offset=NULL,updated_at_ms=?2
              WHERE build_epoch=?3 AND source_file_id=?4
                AND expected_root_session_id=?5",
             params![
@@ -826,6 +944,14 @@ pub(crate) fn rebuild_quarantine_session(
         )?;
     }
 
+    Ok(members.len())
+}
+
+fn verify_quarantined_session_clean(
+    transaction: &Connection,
+    build_epoch: i64,
+    root_session_id: &str,
+) -> Result<(), RebuildError> {
     let leaked: i64 = transaction.query_row(
         "SELECT
             (SELECT count(*) FROM usage_events
@@ -841,7 +967,7 @@ pub(crate) fn rebuild_quarantine_session(
             "quarantined session still has build usage rows",
         ));
     }
-    Ok(members.len())
+    Ok(())
 }
 
 pub(crate) fn rebuild_block_source(
@@ -1173,6 +1299,14 @@ pub(crate) fn replace_build_preserving_all_members_tx(
 
         cleanup_build_source(transaction, build_epoch, source_file_id)?;
         transaction.execute(
+            "DELETE FROM codex_usage_session_quarantine
+             WHERE ledger_epoch=?1 AND NOT EXISTS (
+                 SELECT 1 FROM codex_usage_session_quarantine_sources s
+                 WHERE s.ledger_epoch=codex_usage_session_quarantine.ledger_epoch
+                   AND s.root_session_id=codex_usage_session_quarantine.root_session_id)",
+            [build_epoch],
+        )?;
+        transaction.execute(
             "DELETE FROM codex_usage_build_sources WHERE build_epoch=?1 AND source_file_id=?2",
             params![build_epoch, source_file_id],
         )?;
@@ -1254,7 +1388,13 @@ pub(crate) fn replace_build_preserving_all_members_tx(
                     member.active_committed_offset = old.5;
                     member.active_guard_hash = old.6.clone();
                     member.active_state_fingerprint =
-                        active_state_fingerprint(transaction, active_epoch, source_file_id)?;
+                        match active_state_fingerprint(transaction, active_epoch, source_file_id) {
+                            Ok(fingerprint) => fingerprint,
+                            Err(RebuildError::Invalid(
+                                "usage reconciliation carry version requires rebuild",
+                            )) => None,
+                            Err(error) => return Err(error),
+                        };
                 }
             }
             // Raw-tail framing proof is likewise relationship/parser
@@ -1277,6 +1417,18 @@ pub(crate) fn cleanup_build_source(
     source_file_id: i64,
 ) -> Result<(), RebuildError> {
     transaction.execute(
+        "DELETE FROM codex_compaction_markers WHERE ledger_epoch=?1 AND source_file_id=?2",
+        params![build_epoch, source_file_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_reconciliation_windows WHERE ledger_epoch=?1 AND source_file_id=?2",
+        params![build_epoch, source_file_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_event_holds WHERE ledger_epoch=?1 AND source_file_id=?2",
+        params![build_epoch, source_file_id],
+    )?;
+    transaction.execute(
         "DELETE FROM codex_usage_event_occurrences WHERE ledger_epoch=?1 AND source_file_id=?2",
         params![build_epoch, source_file_id],
     )?;
@@ -1294,6 +1446,11 @@ pub(crate) fn cleanup_build_source(
     )?;
     transaction.execute(
         "DELETE FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
+        params![build_epoch, source_file_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM codex_usage_session_quarantine_sources
+         WHERE ledger_epoch=?1 AND source_file_id=?2",
         params![build_epoch, source_file_id],
     )?;
     Ok(())
@@ -1714,43 +1871,85 @@ pub(crate) fn active_state_fingerprint(
                 previous_total_reasoning_tokens,previous_total_total_tokens,
                 previous_total_fingerprint,previous_total_offset,chain_state,chain_block_reason,
                 active_turn_key,active_model,active_model_offset,
-                active_reasoning_effort,active_reasoning_effort_offset
+                active_reasoning_effort,active_reasoning_effort_offset,reconciliation_state_json
          FROM codex_usage_source_states WHERE ledger_epoch=?1 AND source_file_id=?2",
     )?;
     let result = statement
         .query_row(params![active_epoch, source_file_id], |row| {
-            use rusqlite::types::ValueRef;
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"usage-source-state-proof-v2");
-            for index in 0..27 {
-                match row.get_ref(index)? {
-                    ValueRef::Null => {
-                        hasher.update(&[0]);
-                    }
-                    ValueRef::Integer(value) => {
-                        hasher.update(&[1]);
-                        hasher.update(&value.to_be_bytes());
-                    }
-                    ValueRef::Real(value) => {
-                        hasher.update(&[2]);
-                        hasher.update(&value.to_bits().to_be_bytes());
-                    }
-                    ValueRef::Text(value) => {
-                        hasher.update(&[3]);
-                        hasher.update(&(value.len() as u64).to_be_bytes());
-                        hasher.update(value);
-                    }
-                    ValueRef::Blob(value) => {
-                        hasher.update(&[4]);
-                        hasher.update(&(value.len() as u64).to_be_bytes());
-                        hasher.update(value);
-                    }
-                };
-            }
-            Ok(hasher.finalize().as_bytes().to_vec())
+            (0..28)
+                .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                .collect::<rusqlite::Result<Vec<_>>>()
         })
         .optional()?;
-    Ok(result)
+    drop(statement);
+    let Some(mut values) = result else {
+        return Ok(None);
+    };
+    let reconciliation_json = match values.pop() {
+        Some(rusqlite::types::Value::Text(value)) => value,
+        _ => return Err(RebuildError::Invalid("invalid usage reconciliation carry")),
+    };
+    use crate::codex::ingestion::usage_processor::{CarryError, ReconciliationCarry};
+    let carry =
+        ReconciliationCarry::from_json(&reconciliation_json).map_err(|error| match error {
+            CarryError::UnsupportedVersion => {
+                RebuildError::Invalid("usage reconciliation carry version requires rebuild")
+            }
+            CarryError::Invalid => RebuildError::Invalid("invalid usage reconciliation carry"),
+        })?;
+    let canonical = carry
+        .to_json()
+        .map_err(|_| RebuildError::Invalid("invalid usage reconciliation carry"))?;
+    if canonical != reconciliation_json {
+        return Err(RebuildError::Invalid(
+            "usage reconciliation carry is not canonical",
+        ));
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"usage-source-state-proof-v3\0");
+    for value in &values {
+        use rusqlite::types::Value;
+        match value {
+            Value::Null => {
+                hasher.update(&[0]);
+            }
+            Value::Integer(value) => {
+                hasher.update(&[1]);
+                hasher.update(&value.to_be_bytes());
+            }
+            Value::Real(value) => {
+                hasher.update(&[2]);
+                hasher.update(&value.to_bits().to_be_bytes());
+            }
+            Value::Text(value) => {
+                hasher.update(&[3]);
+                hasher.update(&(value.len() as u64).to_be_bytes());
+                hasher.update(value.as_bytes());
+            }
+            Value::Blob(value) => {
+                hasher.update(&[4]);
+                hasher.update(&(value.len() as u64).to_be_bytes());
+                hasher.update(value.as_slice());
+            }
+        };
+    }
+    hasher.update(&[3]);
+    hasher.update(&(canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical.as_bytes());
+    let file_generation = match values.first() {
+        Some(rusqlite::types::Value::Integer(value)) => *value,
+        _ => return Err(RebuildError::Invalid("invalid usage source generation")),
+    };
+    super::usage::append_usage_source_private_proof(
+        transaction,
+        active_epoch,
+        source_file_id,
+        file_generation,
+        &mut hasher,
+    )
+    .map_err(|_| RebuildError::Invalid("active private usage evidence proof is invalid"))?;
+    Ok(Some(hasher.finalize().as_bytes().to_vec()))
 }
 
 fn insert_manifest(

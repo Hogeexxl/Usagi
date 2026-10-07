@@ -435,6 +435,7 @@ function parseMainModelUsage(value: unknown): SessionDetailResponse["main"]["mod
   return {
     model: requiredString(record, "model"),
     reasoning_effort: nullableString(record, "reasoning_effort"),
+    compaction_tokens: nullableSafeInteger(record, "compaction_tokens"),
     usage: parseTokenUsage(record.usage),
   };
 }
@@ -444,6 +445,7 @@ function parseSubagentModelUsage(value: unknown): SessionDetailResponse["subagen
   return {
     model: requiredString(record, "model"),
     reasoning_effort: nullableString(record, "reasoning_effort"),
+    compaction_tokens: nullableSafeInteger(record, "compaction_tokens"),
     last_activity_at_ms: requiredSafeInteger(record, "last_activity_at_ms"),
     usage: parseTokenUsage(record.usage),
   };

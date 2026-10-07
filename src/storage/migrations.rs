@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, Result, TransactionBehavior};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 13;
+pub const LATEST_SCHEMA_VERSION: u32 = 14;
 
 struct Migration {
     version: u32,
@@ -78,6 +78,11 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 13,
         sql: include_str!("schema/0013_antigravity_adapter_state.sql"),
+        requires_foreign_keys_off: false,
+    },
+    Migration {
+        version: 14,
+        sql: include_str!("schema/0014_codex_compaction_evidence.sql"),
         requires_foreign_keys_off: false,
     },
 ];
@@ -500,7 +505,7 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 14);
         (TestDatabase(path), connection)
     }
 
@@ -1190,11 +1195,11 @@ mod tests {
             .unwrap();
         insert_v1_thread_and_source(&connection);
 
-        assert_eq!(migrate(&mut connection, 1).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 1).unwrap(), 14);
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let metadata: (i64, i64, i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
                 "SELECT data_revision,status_revision,active_epoch,build_epoch,
@@ -1282,7 +1287,7 @@ mod tests {
             .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
             .unwrap();
 
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 14);
         let kinds: Vec<(String, String, String)> = connection
             .prepare(
                 "SELECT project_kind,project_path,project_name FROM threads
@@ -1328,7 +1333,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(migrate(&mut connection, 13).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 14).unwrap(), 14);
     }
 
     #[test]
@@ -1464,11 +1469,11 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 14);
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         for (table, required, forbidden) in [
             (
                 "usage_events",
@@ -1663,12 +1668,12 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert_eq!(migrate(&mut connection, 3).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 3).unwrap(), 14);
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
 
         let revisions: (i64, i64) = connection
@@ -1963,7 +1968,7 @@ mod tests {
         ));
         let ledger =
             crate::storage::Ledger::open(crate::storage::LedgerOptions::new(&database.0)).unwrap();
-        assert_eq!(ledger.schema_version().unwrap(), 13);
+        assert_eq!(ledger.schema_version().unwrap(), 14);
         let app_state = ledger.app_state().unwrap();
         assert_eq!(app_state.data_revision, 8);
         assert_eq!(app_state.scan.status_revision, 9);
@@ -1997,7 +2002,7 @@ mod tests {
     fn t_dc_027_v2_rows_migrate_without_losing_canonical_values_or_occurrences() {
         let mut connection = v2_connection();
         add_v2_rows(&connection);
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 14);
         let known: (i64, i64, Option<i64>, i64, i64, i64) = connection
             .query_row(
                 "SELECT input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_events WHERE event_id='known'",
@@ -2104,7 +2109,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 2).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 2).unwrap(), 14);
         let versions: (i64, i64) = connection.query_row("SELECT source_usage_epochs.active_parser_version,codex_usage_source_states.canonical_algorithm_version FROM source_usage_epochs JOIN codex_usage_source_states ON codex_usage_source_states.ledger_epoch=source_usage_epochs.active_epoch WHERE source_usage_epochs.source='codex'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(versions, (2, 2));
         assert_eq!(
@@ -2117,12 +2122,12 @@ mod tests {
     fn t_mu03_s01_v7_features_survive_v8_upgrade_idempotence_and_rollback() {
         let mut fresh = Connection::open_in_memory().unwrap();
         fresh.pragma_update(None, "foreign_keys", true).unwrap();
-        assert_eq!(migrate(&mut fresh, 0).unwrap(), 13);
+        assert_eq!(migrate(&mut fresh, 0).unwrap(), 14);
         assert_eq!(
             fresh
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
 
         for (table, required) in [
@@ -2235,7 +2240,7 @@ mod tests {
             .unwrap();
         assert!(usage_sql.contains("estimated_cost_nanos_usd"));
         assert!(usage_sql.contains("estimated_cost_nanos_usd IS NULL"));
-        assert_eq!(migrate(&mut fresh, 13).unwrap(), 13);
+        assert_eq!(migrate(&mut fresh, 14).unwrap(), 14);
 
         let mut upgraded = v5_connection_with_rows();
         let before: (i64, i64, i64, i64, i64) = upgraded
@@ -2258,12 +2263,12 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 13);
+        assert_eq!(migrate(&mut upgraded, 5).unwrap(), 14);
         assert_eq!(
             upgraded
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
         let after: (i64, i64, i64, i64, i64) = upgraded
             .query_row(
@@ -2286,7 +2291,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(before, after);
-        assert_eq!(migrate(&mut upgraded, 13).unwrap(), 13);
+        assert_eq!(migrate(&mut upgraded, 14).unwrap(), 14);
         let mut foreign_key_statement = upgraded.prepare("PRAGMA foreign_key_check").unwrap();
         let mut foreign_key_rows = foreign_key_statement.query([]).unwrap();
         let foreign_key_check = foreign_key_rows.next().unwrap();
@@ -2337,7 +2342,7 @@ mod tests {
         backfill
             .execute("DELETE FROM usage_event_occurrences", [])
             .unwrap();
-        assert_eq!(migrate(&mut backfill, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut backfill, 10).unwrap(), 14);
         let counts: (i64, i64) = backfill
             .query_row(
                 "SELECT
@@ -2398,7 +2403,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         type ThreadIdentityRow = (
             String,
             String,
@@ -2511,7 +2516,7 @@ mod tests {
             .unwrap();
         assert!(before.iter().any(|event| event.2.is_some()));
         drop(statement);
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         type UsageIdentityRow = (
             String,
             i64,
@@ -2615,7 +2620,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         let after: Vec<(String, i64, i64, i64, i64, i64, String)> = connection
             .prepare(
                 "SELECT source,ledger_epoch,source_file_id,file_generation,
@@ -2666,7 +2671,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         let epoch: (i64, Option<i64>, i64, Option<i64>) = connection
             .query_row(
                 "SELECT active_epoch,build_epoch,active_parser_version,build_parser_version
@@ -2687,7 +2692,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         let revisions: (i64, i64) = connection
             .query_row(
                 "SELECT data_revision,status_revision FROM app_meta WHERE id=1",
@@ -2752,7 +2757,7 @@ mod tests {
                 .unwrap()
         };
         let before = snapshot(&connection);
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         let after = snapshot(&connection);
         assert_eq!(after, before);
         for removed_column in [
@@ -2809,7 +2814,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(migrate(&mut connection, 10).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 10).unwrap(), 14);
         let after: (i64, i64, i64, i64) = connection
             .query_row(
                 "SELECT usage_parser_version,canonical_algorithm_version,
@@ -2938,7 +2943,7 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
-        assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
+        assert_eq!(migrate(&mut connection, 0).unwrap(), 14);
         crate::storage::validate_schema(&connection, std::path::Path::new(":memory:")).unwrap();
         let source_scan_runs_sql: String = connection
             .query_row(
@@ -3250,7 +3255,7 @@ mod tests {
         drop(connection);
 
         let ledger = Arc::new(Ledger::open(LedgerOptions::new(database.0.clone())).unwrap());
-        assert_eq!(ledger.schema_version().unwrap(), 13);
+        assert_eq!(ledger.schema_version().unwrap(), 14);
 
         let range = TimeRange::new(0, i64::MAX).unwrap();
         let usage = UsageLedger::new(&ledger, &[&CodexSessionErrorSidecar]);
@@ -3408,7 +3413,7 @@ mod tests {
             connection
                 .pragma_update(None, "foreign_keys", true)
                 .unwrap();
-            assert_eq!(migrate(&mut connection, 0).unwrap(), 13);
+            assert_eq!(migrate(&mut connection, 0).unwrap(), 14);
             let mut statement = connection.prepare("PRAGMA foreign_key_check").unwrap();
             let mut rows = statement.query([]).unwrap();
             assert!(
@@ -3477,12 +3482,12 @@ mod tests {
                 .unwrap();
 
             // Run migration 12 -> 13
-            assert_eq!(migrate(&mut connection, 12).unwrap(), 13);
+            assert_eq!(migrate(&mut connection, 12).unwrap(), 14);
             assert_eq!(
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                     .unwrap(),
-                13
+                14
             );
 
             // Verify foreign_key_check passes
@@ -3713,5 +3718,354 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info('{table}')"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn schema_object_exists(connection: &Connection, kind: &str, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
+                [kind, name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            != 0
+    }
+
+    fn assert_compaction_schema_complete(connection: &Connection) {
+        for table in [
+            "codex_usage_event_facts",
+            "codex_compaction_markers",
+            "codex_usage_reconciliation_windows",
+            "codex_usage_event_holds",
+        ] {
+            assert!(schema_object_exists(connection, "table", table), "{table}");
+        }
+        assert!(!schema_object_exists(
+            connection,
+            "table",
+            "codex_usage_build_sources_v13"
+        ));
+        for index in [
+            "codex_usage_response_identity_idx",
+            "codex_compaction_marker_scope_idx",
+            "codex_compaction_marker_response_idx",
+            "codex_usage_window_thread_idx",
+            "codex_usage_event_hold_event_idx",
+            "codex_usage_build_sources_status_idx",
+        ] {
+            assert!(schema_object_exists(connection, "index", index), "{index}");
+        }
+        for trigger in [
+            "codex_usage_fact_owner_insert",
+            "codex_usage_fact_owner_update",
+            "codex_compaction_marker_binding_insert",
+            "codex_compaction_marker_binding_update",
+            "codex_usage_bound_fact_update",
+            "codex_usage_bound_fact_delete",
+        ] {
+            assert!(
+                schema_object_exists(connection, "trigger", trigger),
+                "{trigger}"
+            );
+        }
+        let state_columns = table_columns(connection, "codex_usage_source_states");
+        assert!(state_columns.contains(&"reconciliation_state_json".to_owned()));
+        let build_columns = table_columns(connection, "codex_usage_build_sources");
+        for column in [
+            "carry_after_fact_event_id",
+            "carry_after_marker_start_offset",
+            "carry_after_window_start_offset",
+        ] {
+            assert!(build_columns.contains(&column.to_owned()), "{column}");
+        }
+        let build_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='codex_usage_build_sources'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(build_sql.contains("'markers','windows','turns'"));
+        let mut foreign_key_check = connection.prepare("PRAGMA foreign_key_check").unwrap();
+        assert!(
+            foreign_key_check
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compaction_storage_migration() {
+        // Fresh database reaches the final schema in one migration.
+        let mut fresh = Connection::open_in_memory().unwrap();
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(migrate(&mut fresh, 0).unwrap(), 14);
+        assert_compaction_schema_complete(&fresh);
+        crate::storage::validate_schema(&fresh, Path::new(":memory:")).unwrap();
+
+        // Build a real schema 13 database, with an in-flight carry manifest row.
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 13)
+        {
+            if migration.version == 11 {
+                ensure_app_meta_v11_metadata_columns(&connection).unwrap();
+            }
+            connection.execute_batch(migration.sql).unwrap();
+        }
+        connection
+            .pragma_update(None, "user_version", 13_i64)
+            .unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        insert_thread_and_source(&connection);
+        connection
+            .execute(
+                "UPDATE source_usage_epochs SET active_epoch=1,active_parser_version=1,
+                    build_epoch=2,build_parser_version=2 WHERE source='codex'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO codex_usage_build_sources(
+                    build_epoch,source_file_id,target_parser_version,expected_file_generation,
+                    expected_device_id,expected_inode,expected_owning_thread_id,
+                    expected_root_session_id,active_committed_offset,required_generation,
+                    required_through_offset,observed_raw_size,raw_tail_status,
+                    membership_reason,completion_status,carry_from_epoch,carry_phase,
+                    carry_after_start_offset,carry_after_turn_key,carry_after_anomaly_id,
+                    created_at_ms,updated_at_ms
+                 ) VALUES (2,1,2,1,1,1,'thread','thread',0,1,0,100,'unverified',
+                    'active_contributor','pending',1,'turns',7,'turn-a','anomaly-a',1,2)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO codex_usage_source_states(
+                    ledger_epoch,source_file_id,file_generation,device_id,inode,
+                    usage_parser_version,canonical_algorithm_version,resolved_through_offset,
+                    observed_raw_size,raw_tail_status,owning_thread_id,root_session_id,
+                    continuation_state,chain_state,updated_at_ms
+                 ) VALUES (1,1,1,1,1,1,1,0,100,'unverified','thread','thread',
+                    'owning_live','continuous',1)",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(migrate(&mut connection, 13).unwrap(), 14);
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        assert_compaction_schema_complete(&connection);
+        crate::storage::validate_schema(&connection, Path::new(":memory:")).unwrap();
+
+        // Old carry state is preserved verbatim; new cursors are NULL; no guessed backfill.
+        let carried: (
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ) = connection
+            .query_row(
+                "SELECT carry_phase,carry_after_start_offset,carry_after_turn_key,
+                        carry_after_anomaly_id,carry_after_fact_event_id,
+                        carry_after_marker_start_offset,carry_after_window_start_offset
+                 FROM codex_usage_build_sources WHERE build_epoch=2 AND source_file_id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            carried,
+            (
+                "turns".to_owned(),
+                7,
+                "turn-a".to_owned(),
+                "anomaly-a".to_owned(),
+                None,
+                None,
+                None
+            )
+        );
+        let default_state: String = connection
+            .query_row(
+                "SELECT reconciliation_state_json FROM codex_usage_source_states",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            default_state,
+            r#"{"version":1,"open_window_start_offset":null,"pending_response_ids":[],"modern_counter_domain":null,"modern_counter_total":null,"pending_evidence":[]}"#
+        );
+        for table in [
+            "codex_usage_event_facts",
+            "codex_compaction_markers",
+            "codex_usage_reconciliation_windows",
+            "codex_usage_event_holds",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must not be backfilled");
+        }
+        let pragma_fk: i64 = connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert_eq!(pragma_fk, 1);
+
+        // Carry check constraints still reject a phase without its source epoch.
+        assert!(
+            connection
+                .execute(
+                    "UPDATE codex_usage_build_sources SET carry_from_epoch=NULL
+                     WHERE build_epoch=2",
+                    [],
+                )
+                .is_err()
+        );
+
+        // Foreign keys, checks and triggers of the new tables are enforced.
+        connection
+            .execute(
+                "INSERT INTO usage_events(
+                    source,source_epoch,event_id,event_kind,occurred_at_ms,thread_id,root_session_id,
+                    model,reasoning_effort,estimated_cost_nanos_usd,
+                    input_tokens,cached_tokens,cache_write_tokens,output_tokens,
+                    reasoning_tokens,total_tokens,quality_status,created_at_ms
+                 ) VALUES ('codex',1,'e1','normal',1,'thread','thread','model',NULL,NULL,10,2,3,4,1,14,
+                    'complete',1)",
+                [],
+            )
+            .unwrap();
+        let insert_fact =
+            |event: &str, thread: &str, response: Option<&str>, kind: &str, op: &str| {
+                connection.execute(
+                    "INSERT INTO codex_usage_event_facts(
+                    ledger_epoch,event_id,owning_thread_id,response_id,evidence_kind,operation
+                 ) VALUES (1,?1,?2,?3,?4,?5)",
+                    params![event, thread, response, kind, op],
+                )
+            };
+        assert!(insert_fact("e1", "thread", None, "explicit", "response").is_err());
+        assert!(insert_fact("e1", "thread", Some("r1"), "legacy", "response").is_err());
+        assert!(insert_fact("e1", "thread", None, "legacy", "compaction").is_err());
+        assert!(insert_fact("missing", "thread", Some("r1"), "explicit", "response").is_err());
+        connection
+            .execute(
+                "INSERT INTO threads(
+                    thread_id,source,native_session_id,parent_thread_id,root_session_id,agent_role,
+                    project_kind,archived,metadata_quality_status,metadata_resolved_at_ms
+                 ) VALUES ('other','codex','other',NULL,'other','main','unknown',0,'complete',0)",
+                [],
+            )
+            .unwrap();
+        assert!(insert_fact("e1", "other", Some("r1"), "explicit", "response").is_err());
+        insert_fact("e1", "thread", Some("r1"), "explicit", "compaction").unwrap();
+
+        let insert_marker =
+            |start: i64, response: Option<&str>, resolved: Option<&str>, reason: Option<&str>| {
+                connection.execute(
+                    "INSERT INTO codex_compaction_markers(
+                    ledger_epoch,source_file_id,file_generation,source_start_offset,
+                    source_end_offset,owning_thread_id,root_session_id,response_id,
+                    resolved_event_id,unknown_reason
+                 ) VALUES (1,1,1,?1,?1+10,'thread','thread',?2,?3,?4)",
+                    params![start, response, resolved, reason],
+                )
+            };
+        assert!(insert_marker(0, Some("r1"), None, None).is_err());
+        assert!(insert_marker(0, None, Some("e1"), None).is_err());
+        assert!(insert_marker(0, Some("wrong"), Some("e1"), None).is_err());
+        assert!(insert_marker(0, Some("r1"), Some("e1"), Some("usage_missing")).is_err());
+        assert!(insert_marker(0, None, None, Some("not_a_reason")).is_err());
+        insert_marker(0, Some("r1"), Some("e1"), None).unwrap();
+        insert_marker(20, None, None, Some("identity_missing")).unwrap();
+
+        for sql in [
+            "UPDATE codex_usage_event_facts SET operation='response' WHERE event_id='e1'",
+            "UPDATE codex_usage_event_facts SET response_id='r2' WHERE event_id='e1'",
+            "DELETE FROM codex_usage_event_facts WHERE event_id='e1'",
+            "DELETE FROM usage_events WHERE event_id='e1'",
+            "UPDATE codex_compaction_markers SET response_id='r2' WHERE source_start_offset=0",
+        ] {
+            assert!(connection.execute(sql, []).is_err(), "accepted {sql}");
+        }
+
+        connection
+            .execute(
+                "INSERT INTO codex_usage_reconciliation_windows(
+                    ledger_epoch,source_file_id,file_generation,source_start_offset,
+                    source_end_offset,owning_thread_id,turn_key,state_json
+                 ) VALUES (1,1,1,0,10,'thread','turn','{}')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO codex_usage_reconciliation_windows(
+                        ledger_epoch,source_file_id,file_generation,source_start_offset,
+                        source_end_offset,owning_thread_id,turn_key,state_json
+                     ) VALUES (1,1,1,10,20,'thread','turn','{bad')",
+                    [],
+                )
+                .is_err()
+        );
+        connection
+            .execute(
+                "INSERT INTO codex_usage_event_holds(
+                    ledger_epoch,source_file_id,file_generation,event_id,hold_reason
+                 ) VALUES (1,1,1,'e1','carry')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO codex_usage_event_holds(
+                        ledger_epoch,source_file_id,file_generation,event_id,hold_reason
+                     ) VALUES (1,1,1,'e1','other')",
+                    [],
+                )
+                .is_err()
+        );
     }
 }

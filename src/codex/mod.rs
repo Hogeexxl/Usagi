@@ -68,6 +68,7 @@ pub(crate) mod status;
 pub(crate) mod storage;
 
 pub use adapter::{CodexAdapter, CodexSessionErrorSidecar};
+pub use analytics::CodexSessionDetailSidecar;
 pub use config::{CodexConfig, CodexConfigError, CodexConfigResolution, CodexMetadataPaths};
 
 pub use crate::domain::ExistingThreadProjection;

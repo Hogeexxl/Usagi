@@ -1,0 +1,1 @@
+{"timestamp":"2026-09-05T05:27:04.051Z","ordinal":42,"type":"compacted","payload":{"window_number":1,"first_window_id":"01a07004-c607-776a-810a-8654e946e258","previous_window_id":"01a07004-c607-776a-810a-8654e946e258","window_id":"01a07008-dc72-7778-a299-0ff5daa8b44f","compaction_response_id":"resp_fx_cdca5681bf940dff69c75f75","latest_token_usage_record":null}}

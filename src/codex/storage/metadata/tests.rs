@@ -373,10 +373,12 @@ mod tests {
                 .unwrap();
         }
 
-        with_codex(&ledger, |storage| {
+        let outcome = with_codex(&ledger, |storage| {
             storage.commit_metadata(MetadataCommitBatch::new(vec![group]).unwrap())
         })
         .unwrap();
+        assert_eq!(outcome.data_revision, 0);
+        assert!(!outcome.data_changed);
         let connection = ledger.connection().unwrap();
         let committed: (
             Option<String>,
@@ -571,6 +573,17 @@ mod tests {
         let (db, home) = temp_paths("source-only");
         let ledger = Ledger::open(LedgerOptions::new(&db)).unwrap();
         insert_source(&ledger);
+        ledger
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO codex_source_checkpoints (
+                    source_file_id, consumer_kind, parser_version, committed_offset,
+                    guard_hash, processing_status, last_successful_scan_at_ms
+                 ) VALUES (1, 'usage', ?1, 10, x'AA', 'ready', 10)",
+                [USAGE_PARSER_VERSION],
+            )
+            .unwrap();
         let first = MetadataThreadCommit::new("thread", None, vec![source_commit(None)]).unwrap();
         let first_outcome = with_codex(&ledger, |storage| {
             storage.commit_metadata(MetadataCommitBatch::new(vec![first]).unwrap())
@@ -590,6 +603,21 @@ mod tests {
         .unwrap();
         assert_eq!(second_outcome.data_revision, 0);
         assert!(!second_outcome.data_changed);
+        let usage_checkpoint: (i64, i64, String) = ledger
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT parser_version, committed_offset, processing_status
+                 FROM codex_source_checkpoints
+                 WHERE source_file_id=1 AND consumer_kind='usage'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            usage_checkpoint,
+            (USAGE_PARSER_VERSION, 10, "ready".to_owned())
+        );
     }
 
     #[test]

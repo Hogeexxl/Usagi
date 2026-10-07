@@ -23,6 +23,8 @@ pub enum EnvelopeKind {
     SessionMeta,
     TurnContext,
     TokenCount,
+    ResponseUsage,
+    Compacted,
     Lifecycle,
     Ignored,
     Unknown,
@@ -529,6 +531,7 @@ pub struct RecordClassification {
     pub end_offset: u64,
     pub envelope: EnvelopeKind,
     pub ownership: RecordOwnership,
+    pub response_ownership_mismatch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -545,6 +548,7 @@ pub enum DiagnosticCode {
     UnknownEnvelope,
     InvalidAllowedField,
     OwningCandidateConflict,
+    ResponseOwnershipMismatch,
     ForeignSessionMeta,
     UnresolvedReplayBoundary,
     InvalidResumeState,
@@ -652,6 +656,7 @@ impl RolloutOwnershipClassifier {
             end_offset,
             envelope: EnvelopeKind::Unknown,
             ownership: self.parser.default_ownership(),
+            response_ownership_mismatch: false,
         };
         self.parser.last_classification = Some(classification.clone());
         self.parser.last_processed_offset = end_offset;
@@ -912,6 +917,44 @@ impl Parser {
         match classify_envelope(object) {
             EnvelopeKind::SessionMeta => self.parse_session_meta(line, object),
             EnvelopeKind::TurnContext => self.parse_turn_context(line, object),
+            envelope @ (EnvelopeKind::ResponseUsage | EnvelopeKind::Compacted) => {
+                let payload = object.get("payload").and_then(Value::as_object);
+                let evidence = match envelope {
+                    EnvelopeKind::ResponseUsage => payload,
+                    EnvelopeKind::Compacted => payload
+                        .and_then(|payload| payload.get("latest_token_usage_record"))
+                        .and_then(Value::as_object),
+                    _ => unreachable!(),
+                };
+                let mut ownership = self.default_ownership();
+                let mut response_ownership_mismatch = false;
+                if ownership == RecordOwnership::Owning
+                    && let Some(thread_id) = evidence
+                        .and_then(|evidence| evidence.get("thread_id"))
+                        .and_then(Value::as_str)
+                        .filter(|value| {
+                            !value.trim().is_empty() && !value.chars().any(char::is_control)
+                        })
+                    && self.owning_thread_id.as_deref() != Some(thread_id)
+                {
+                    ownership = RecordOwnership::UnknownOwnership;
+                    response_ownership_mismatch = true;
+                    self.needs_rebuild = true;
+                    self.diagnostic(
+                        DiagnosticCode::ResponseOwnershipMismatch,
+                        DiagnosticSeverity::Conflict,
+                        Some(line.start_offset),
+                        self.owning_thread_id.clone(),
+                        Some("thread_id"),
+                    );
+                }
+                self.record_with_response_ownership_mismatch(
+                    line,
+                    envelope,
+                    ownership,
+                    response_ownership_mismatch,
+                );
+            }
             envelope => {
                 let ownership = self.default_ownership();
                 self.record(line, envelope, ownership);
@@ -1058,11 +1101,22 @@ impl Parser {
         envelope: EnvelopeKind,
         ownership: RecordOwnership,
     ) {
+        self.record_with_response_ownership_mismatch(line, envelope, ownership, false);
+    }
+
+    fn record_with_response_ownership_mismatch(
+        &mut self,
+        line: &CompleteRolloutLine,
+        envelope: EnvelopeKind,
+        ownership: RecordOwnership,
+        response_ownership_mismatch: bool,
+    ) {
         let classification = RecordClassification {
             start_offset: line.start_offset,
             end_offset: line.end_offset,
             envelope,
             ownership,
+            response_ownership_mismatch,
         };
         self.last_classification = Some(classification.clone());
         if self.retain_details {
@@ -1224,8 +1278,10 @@ fn classify_envelope(object: &Map<String, Value>) -> EnvelopeKind {
         "session_meta" => EnvelopeKind::SessionMeta,
         "turn_context" => EnvelopeKind::TurnContext,
         "token_count" => EnvelopeKind::TokenCount,
+        "token_usage_record" => EnvelopeKind::ResponseUsage,
+        "compacted" => EnvelopeKind::Compacted,
         "lifecycle" | "turn_started" | "turn_completed" | "turn_aborted" => EnvelopeKind::Lifecycle,
-        "response_item" | "compacted" | "ghost_snapshot" => EnvelopeKind::Ignored,
+        "response_item" | "ghost_snapshot" => EnvelopeKind::Ignored,
         "event_msg" => match object
             .get("payload")
             .and_then(Value::as_object)
@@ -1766,6 +1822,106 @@ mod tests {
             resume_state,
             existing_fact,
         }
+    }
+
+    #[test]
+    fn compaction_parse_ownership_and_envelopes() {
+        let owning = uuid7(2_000, 1);
+        let parent = uuid7(1_000, 2);
+        let records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":owning}}).to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{
+                "thread_id":owning,"session_id":parent
+            }})
+            .to_string(),
+            serde_json::json!({"type":"compacted","payload":{
+                "latest_token_usage_record":{"thread_id":owning,"session_id":parent}
+            }})
+            .to_string(),
+            serde_json::json!({"type":"compacted","payload":{
+                "compaction_response_id":"id-only"
+            }})
+            .to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{
+                "thread_id":parent,"session_id":owning
+            }})
+            .to_string(),
+            serde_json::json!({"type":"compacted","payload":{
+                "latest_token_usage_record":{"thread_id":parent}
+            }})
+            .to_string(),
+        ];
+        let result = RolloutMetadataParser::parse_chunk(
+            context(0, &owning, ResumeState::AwaitOwningMeta, None),
+            lines(&records, 0),
+        );
+        assert_eq!(result.records[1].envelope, EnvelopeKind::ResponseUsage);
+        assert_eq!(result.records[2].envelope, EnvelopeKind::Compacted);
+        assert!(
+            result.records[..4]
+                .iter()
+                .all(|record| record.ownership == RecordOwnership::Owning)
+        );
+        assert!(
+            result.records[4..]
+                .iter()
+                .all(|record| record.ownership == RecordOwnership::UnknownOwnership)
+        );
+        assert!(result.needs_rebuild);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.field == Some("thread_id"))
+                .all(|diagnostic| diagnostic.source_start_offset.is_some())
+        );
+
+        let ancestor = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":parent}}).to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{"thread_id":parent}})
+                .to_string(),
+            serde_json::json!({"type":"compacted","payload":{
+                "latest_token_usage_record":{"thread_id":parent}
+            }})
+            .to_string(),
+        ];
+        let result = RolloutMetadataParser::parse_chunk(
+            context(0, &owning, ResumeState::AwaitOwningMeta, None),
+            lines(&ancestor, 0),
+        );
+        assert!(
+            result
+                .records
+                .iter()
+                .all(|record| record.ownership == RecordOwnership::ReplayedAncestor)
+        );
+    }
+
+    #[test]
+    fn compaction_parse_optional_thread_id_keeps_ownership() {
+        let owning = uuid7(2_000, 1);
+        let records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":owning}}).to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{"thread_id":null}})
+                .to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{}}).to_string(),
+            serde_json::json!({"type":"compacted","payload":{
+                "latest_token_usage_record":{"thread_id":null}
+            }})
+            .to_string(),
+            serde_json::json!({"type":"token_usage_record","payload":{"thread_id":42}}).to_string(),
+        ];
+        let result = RolloutMetadataParser::parse_chunk(
+            context(0, &owning, ResumeState::AwaitOwningMeta, None),
+            lines(&records, 0),
+        );
+        assert!(
+            result
+                .records
+                .iter()
+                .all(|record| record.ownership == RecordOwnership::Owning)
+        );
+        assert!(!result.needs_rebuild);
     }
 
     #[test]

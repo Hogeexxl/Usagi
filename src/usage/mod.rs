@@ -9,10 +9,11 @@ pub mod normalized;
 pub use aggregate::{
     AggregateError, AggregateReader, FilterOptions, MAX_SESSION_ROWS, MainModelUsage,
     MainSessionDetail, ModelFilterOption, ModelUsageRow, ModelUsageRows, ProjectFilterOption,
-    SessionCursor, SessionDetail, SessionErrorProjection, SessionErrorSidecar, SessionPageRequest,
-    SessionSortField, SessionSortIndexItem, SessionSortOrder, SessionUsagePage, SessionUsageRow,
-    SourceFilterOption, SubagentDetail, SubagentModelUsage, SummaryQuery, TimeRange, TokenTotals,
-    UsageFilter, UsageSummary,
+    SessionCompactionProjection, SessionCursor, SessionDetail, SessionDetailSidecar,
+    SessionErrorProjection, SessionErrorSidecar, SessionPageRequest, SessionSortField,
+    SessionSortIndexItem, SessionSortOrder, SessionUsagePage, SessionUsageRow, SourceFilterOption,
+    SubagentDetail, SubagentModelUsage, SummaryQuery, TimeRange, TokenTotals, UsageFilter,
+    UsageSummary,
 };
 pub use event::EventKind;
 pub use ledger::{

@@ -94,8 +94,58 @@ pub struct TurnContextRecord {
     pub occurred_at_ms: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "usage", rename_all = "snake_case")]
+pub enum UsageValue {
+    Missing,
+    Invalid,
+    Valid(NormalizedTokenUsage),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResponseUsageEvidence {
+    pub response_id: String,
+    pub thread_id: Option<String>,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub usage: UsageValue,
+    pub thread_token_usage: UsageValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionEvidence {
+    pub compaction_response_id: Option<String>,
+    pub latest_token_usage_record: Option<ResponseUsageEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexOperation {
+    Response,
+    Compaction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvidenceKind {
+    Explicit,
+    Legacy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResponseUsageRecord {
+    pub occurred_at_ms: Option<i64>,
+    pub evidence: ResponseUsageEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactedRecord {
+    pub occurred_at_ms: Option<i64>,
+    pub evidence: CompactionEvidence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UsageRawRecord {
+    ResponseUsage(ResponseUsageRecord),
+    Compacted(CompactedRecord),
     TokenCount(TokenCountRecord),
     TurnContext(TurnContextRecord),
     Lifecycle(LifecycleRecord),
@@ -121,6 +171,46 @@ impl CodexRolloutParser {
         match object.get("type").and_then(Value::as_str) {
             Some("turn_context") => self.parse_turn_context(object, outer_timestamp),
             Some("event_msg") => self.parse_event_msg(object, outer_timestamp),
+            Some("token_usage_record") => {
+                let Some(payload) = object.get("payload").and_then(Value::as_object) else {
+                    return UsageRawRecord::Malformed;
+                };
+                let Some(evidence) = response_evidence(payload) else {
+                    return UsageRawRecord::Malformed;
+                };
+                UsageRawRecord::ResponseUsage(ResponseUsageRecord {
+                    occurred_at_ms: payload
+                        .get("timestamp")
+                        .and_then(parse_timestamp_ms)
+                        .or(outer_timestamp),
+                    evidence,
+                })
+            }
+            Some("compacted") => {
+                let Some(payload) = object.get("payload").and_then(Value::as_object) else {
+                    return UsageRawRecord::Malformed;
+                };
+                let latest_token_usage_record = match payload.get("latest_token_usage_record") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Object(latest)) => {
+                        if !valid_optional_thread_id(latest) {
+                            return UsageRawRecord::Malformed;
+                        }
+                        response_evidence(latest)
+                    }
+                    Some(_) => return UsageRawRecord::Malformed,
+                };
+                UsageRawRecord::Compacted(CompactedRecord {
+                    occurred_at_ms: payload
+                        .get("timestamp")
+                        .and_then(parse_timestamp_ms)
+                        .or(outer_timestamp),
+                    evidence: CompactionEvidence {
+                        compaction_response_id: safe_string(payload.get("compaction_response_id")),
+                        latest_token_usage_record,
+                    },
+                })
+            }
             Some(_) => UsageRawRecord::Unknown,
             None => UsageRawRecord::Malformed,
         }
@@ -215,6 +305,37 @@ impl CodexRolloutParser {
             Some(_) => UsageRawRecord::Unknown,
             None => UsageRawRecord::Malformed,
         }
+    }
+}
+
+fn response_evidence(payload: &Map<String, Value>) -> Option<ResponseUsageEvidence> {
+    if !valid_optional_thread_id(payload) {
+        return None;
+    }
+    Some(ResponseUsageEvidence {
+        response_id: safe_string(payload.get("response_id"))?,
+        thread_id: safe_string(payload.get("thread_id")),
+        session_id: safe_string(payload.get("session_id")),
+        turn_id: safe_string(payload.get("turn_id")),
+        usage: evidence_usage(payload.get("usage")),
+        thread_token_usage: evidence_usage(payload.get("thread_token_usage")),
+    })
+}
+
+fn valid_optional_thread_id(payload: &Map<String, Value>) -> bool {
+    match payload.get("thread_id") {
+        None | Some(Value::Null) => true,
+        value => safe_string(value).is_some(),
+    }
+}
+
+fn evidence_usage(value: Option<&Value>) -> UsageValue {
+    match value {
+        None => UsageValue::Missing,
+        Some(value) => match normalize_snapshot(value) {
+            Ok(usage) => UsageValue::Valid(usage),
+            Err(_) => UsageValue::Invalid,
+        },
     }
 }
 
@@ -345,6 +466,195 @@ mod tests {
             "reasoning_output_tokens": 1,
             "total_tokens": 14,
         })
+    }
+
+    #[test]
+    fn compaction_parse_schema() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/codex/compaction");
+        let mut responses = Vec::new();
+        let mut embedded = Vec::new();
+        let mut id_only = false;
+        let mut usage_null = false;
+        let mut context_estimate = false;
+        for name in [
+            "schema_top_and_embedded.jsonl",
+            "schema_id_only.jsonl",
+            "schema_usage_null.jsonl",
+            "schema_top_only.jsonl",
+            "schema_embedded_only.jsonl",
+            "schema_zero_context_estimate.jsonl",
+        ] {
+            let contents = std::fs::read_to_string(directory.join(name))
+                .expect("compaction fixtures must be ready before the Phase 1 gate");
+            let mut top_count = 0;
+            let mut embedded_count = 0;
+            for raw in contents.lines() {
+                let value: Value = serde_json::from_str(raw).unwrap();
+                match CodexRolloutParser.parse_line(&line(raw)) {
+                    UsageRawRecord::ResponseUsage(record) => {
+                        if matches!(record.evidence.usage, UsageValue::Valid(_)) {
+                            assert!(record.occurred_at_ms.is_some());
+                            top_count += 1;
+                            responses.push(record.evidence);
+                        }
+                    }
+                    UsageRawRecord::Compacted(record) => {
+                        if record.evidence.compaction_response_id.is_some()
+                            && record.evidence.latest_token_usage_record.is_none()
+                        {
+                            id_only = true;
+                        }
+                        if value["payload"]["latest_token_usage_record"].is_object()
+                            && value["payload"]["latest_token_usage_record"]["usage"] == Value::Null
+                        {
+                            assert!(matches!(
+                                record.evidence.latest_token_usage_record.as_ref(),
+                                Some(ResponseUsageEvidence {
+                                    usage: UsageValue::Invalid,
+                                    ..
+                                })
+                            ));
+                            usage_null = true;
+                        }
+                        if let Some(evidence) = record.evidence.latest_token_usage_record
+                            && matches!(evidence.usage, UsageValue::Valid(_))
+                        {
+                            assert_eq!(
+                                record.evidence.compaction_response_id.as_deref(),
+                                Some(evidence.response_id.as_str())
+                            );
+                            embedded.push(evidence);
+                            embedded_count += 1;
+                        }
+                    }
+                    UsageRawRecord::TokenCount(record)
+                        if name == "schema_zero_context_estimate.jsonl" =>
+                    {
+                        assert!(matches!(
+                            record.info.unwrap().last_usage,
+                            OptionalTokenValue::Invalid(_)
+                        ));
+                        context_estimate = true;
+                    }
+                    _ => {}
+                }
+            }
+            match name {
+                "schema_top_only.jsonl" => assert_eq!((top_count, embedded_count), (1, 0)),
+                "schema_embedded_only.jsonl" => assert_eq!((top_count, embedded_count), (0, 1)),
+                _ => {}
+            }
+        }
+        assert!(!responses.is_empty(), "actual top-level evidence missing");
+        assert!(!embedded.is_empty(), "actual embedded evidence missing");
+        assert!(id_only, "actual id-only fixture missing");
+        assert!(
+            usage_null,
+            "explicitly constructed usage-null fixture missing"
+        );
+        assert!(
+            context_estimate,
+            "actual zero-component context estimate fixture missing"
+        );
+        assert!(
+            embedded.iter().any(|evidence| responses.contains(evidence)),
+            "top-level and embedded evidence must preserve the same six-dimensional usage and IDs"
+        );
+        assert!(responses.iter().any(|evidence| evidence.usage
+            == UsageValue::Valid(
+                NormalizedTokenUsage::new(311996, 311040, Some(0), 4993, 0, 316989).unwrap()
+            )));
+    }
+
+    #[test]
+    fn compaction_parse_required_values_and_context_estimate() {
+        let mut payload = json!({
+            "response_id": "fixture-response",
+            "thread_id": "fixture-child",
+            "session_id": "fixture-root",
+            "turn_id": "fixture-turn",
+            "usage": valid_snapshot(),
+            "thread_token_usage": valid_snapshot(),
+            "unknown_body": "BODY_SENTINEL"
+        });
+        let parse = |payload: &Value| {
+            CodexRolloutParser.parse_line(&line(
+                &json!({"type":"token_usage_record", "timestamp":1000, "payload":payload})
+                    .to_string(),
+            ))
+        };
+        let UsageRawRecord::ResponseUsage(record) = parse(&payload) else {
+            panic!("expected response evidence");
+        };
+        assert_eq!(record.occurred_at_ms, Some(1000));
+        assert_eq!(record.evidence.thread_id.as_deref(), Some("fixture-child"));
+        assert_eq!(record.evidence.session_id.as_deref(), Some("fixture-root"));
+        assert!(!format!("{record:?}").contains("BODY_SENTINEL"));
+        payload["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_write_input_tokens");
+        let UsageRawRecord::ResponseUsage(record) = parse(&payload) else {
+            panic!("expected response evidence");
+        };
+        assert!(matches!(record.evidence.usage,
+            UsageValue::Valid(usage) if usage.cache_write_tokens.is_none()));
+        payload["usage"] = json!({"input_tokens":0,"cached_input_tokens":0,
+            "output_tokens":0,"reasoning_output_tokens":0,"total_tokens":100});
+        let UsageRawRecord::ResponseUsage(record) = parse(&payload) else {
+            panic!("expected response evidence");
+        };
+        assert_eq!(record.evidence.usage, UsageValue::Invalid);
+        payload.as_object_mut().unwrap().remove("usage");
+        let UsageRawRecord::ResponseUsage(record) = parse(&payload) else {
+            panic!("expected response evidence");
+        };
+        assert_eq!(record.evidence.usage, UsageValue::Missing);
+        payload.as_object_mut().unwrap().remove("response_id");
+        assert_eq!(parse(&payload), UsageRawRecord::Malformed);
+        let UsageRawRecord::Compacted(marker) = CodexRolloutParser.parse_line(&line(
+            &json!({"type":"compacted","payload":{
+                "compaction_response_id":"marker-id","latest_token_usage_record":payload
+            }})
+            .to_string(),
+        )) else {
+            panic!("expected marker without a usable response identity");
+        };
+        assert_eq!(
+            marker.evidence.compaction_response_id.as_deref(),
+            Some("marker-id")
+        );
+        assert!(marker.evidence.latest_token_usage_record.is_none());
+    }
+
+    #[test]
+    fn compaction_parse_optional_thread_id() {
+        for thread_id in [None, Some(Value::Null)] {
+            let mut payload = json!({"response_id":"fixture-response","usage":valid_snapshot()});
+            if let Some(value) = thread_id {
+                payload["thread_id"] = value;
+            }
+            let UsageRawRecord::ResponseUsage(record) = CodexRolloutParser.parse_line(&line(
+                &json!({"type":"token_usage_record","payload":payload}).to_string(),
+            )) else {
+                panic!("missing or null thread ID is optional");
+            };
+            assert!(record.evidence.thread_id.is_none());
+        }
+        for thread_id in [json!(42), json!(""), json!("  "), json!("bad\nthread")] {
+            let payload = json!({"response_id":"fixture-response","thread_id":thread_id,"usage":valid_snapshot()});
+            for (kind, payload) in [
+                ("token_usage_record", payload.clone()),
+                ("compacted", json!({"latest_token_usage_record":payload})),
+            ] {
+                assert_eq!(
+                    CodexRolloutParser
+                        .parse_line(&line(&json!({"type":kind,"payload":payload}).to_string())),
+                    UsageRawRecord::Malformed
+                );
+            }
+        }
     }
 
     fn parse_snapshot(value: Value) -> NormalizedTokenValue {

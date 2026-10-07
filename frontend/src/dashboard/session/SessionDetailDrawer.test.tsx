@@ -23,24 +23,28 @@ const subagentModelUsage = [
   {
     model: "Sol",
     reasoning_effort: "high",
+    compaction_tokens: 11,
     last_activity_at_ms: Date.UTC(2026, 7, 12, 7, 40),
     usage: { ...usage, total_tokens: 101, input_tokens: 70, output_tokens: 31, estimated_cost: 0.11 },
   },
   {
     model: "Sol",
     reasoning_effort: "medium",
+    compaction_tokens: null,
     last_activity_at_ms: Date.UTC(2026, 7, 12, 7, 30),
     usage: { ...usage, total_tokens: 202, input_tokens: 140, output_tokens: 62, estimated_cost: 0.22 },
   },
   {
     model: "Luna",
     reasoning_effort: "high",
+    compaction_tokens: 33,
     last_activity_at_ms: Date.UTC(2026, 7, 12, 7, 20),
     usage: { ...usage, total_tokens: 303, input_tokens: 210, output_tokens: 93, estimated_cost: 0.33 },
   },
   {
     model: "Luna",
     reasoning_effort: "max",
+    compaction_tokens: 0,
     last_activity_at_ms: Date.UTC(2026, 7, 12, 7, 10),
     usage: { ...usage, total_tokens: 404, input_tokens: 280, output_tokens: 124, estimated_cost: 0.44 },
   },
@@ -63,8 +67,8 @@ const detail: SessionDetailResponse = {
     root_session_id: "root-session-full-id",
     models_used: ["gpt-5", "o4-mini"],
     model_usage: [
-      { model: "gpt-5", reasoning_effort: "high", usage },
-      { model: "o4-mini", reasoning_effort: null, usage: { ...usage, total_tokens: 200, estimated_cost: 0.1 } },
+      { model: "gpt-5", reasoning_effort: "high", compaction_tokens: 0, usage },
+      { model: "o4-mini", reasoning_effort: null, compaction_tokens: 37, usage: { ...usage, total_tokens: 200, estimated_cost: 0.1 } },
     ],
     self_usage: { ...usage, total_tokens: 1_801, estimated_cost: 0.6 },
     subagent_count: 2,
@@ -421,8 +425,11 @@ describe("SessionDetailDrawer v0.2.0", () => {
       "Cache Read",
       "Cache Write",
       "Cache Hit Rate",
+      "Compaction",
       "Estimated Cost",
     ]);
+    const compactionRow = Array.from(usageReceipt.querySelectorAll("dt")).find((node) => node.textContent === "Compaction");
+    expect(compactionRow?.nextElementSibling).toHaveTextContent("0");
     expect(usageReceipt).toHaveTextContent("1,801");
     expect(usageReceipt).toHaveTextContent("1,234");
     expect(usageReceipt).toHaveTextContent("567");
@@ -432,6 +439,11 @@ describe("SessionDetailDrawer v0.2.0", () => {
     expect(usageReceipt).toHaveTextContent("1.0%");
     expect(usageReceipt).toHaveTextContent("$0.50");
     expect(usageReceipt).not.toHaveTextContent("1234");
+
+    fireEvent.click(screen.getByRole("button", { name: "o4-mini (—)" }));
+    const secondRegion = screen.getByRole("region", { name: "o4-mini (—)" });
+    const secondCompaction = Array.from(secondRegion.querySelectorAll("dt")).find((node) => node.textContent === "Compaction");
+    expect(secondCompaction?.nextElementSibling).toHaveTextContent("37");
   });
 
   it("renders ordered Subagent model usage blocks with basic identity metadata", () => {
@@ -475,6 +487,39 @@ describe("SessionDetailDrawer v0.2.0", () => {
       "303",
       "404",
     ]);
+    expect(usageReceipts.map((receipt) => Array.from(receipt.querySelectorAll("dt"), (node) => node.textContent))).toEqual(
+      Array.from({ length: 4 }, () => [
+        "Total Tokens",
+        "Input",
+        "Output",
+        "Reasoning",
+        "Cache Read",
+        "Cache Write",
+        "Cache Hit Rate",
+        "Compaction",
+        "Estimated Cost",
+      ]),
+    );
+    expect(
+      usageReceipts.map((receipt) =>
+        Array.from(receipt.querySelectorAll("dt")).find((node) => node.textContent === "Compaction")?.nextElementSibling?.textContent,
+      ),
+    ).toEqual(["11", "—", "33", "0"]);
+  });
+
+  it("hides Compaction rows for non-Codex Main and Subagent usage", () => {
+    const nonCodexDetail: SessionDetailResponse = {
+      ...detail,
+      source: "antigravity",
+      main: { ...detail.main, source: "antigravity" },
+      subagents: detail.subagents.map((item) => ({ ...item, source: "antigravity" })),
+    };
+    render(<SessionDetailDrawer view={view({ detail: nonCodexDetail })} timezone="Asia/Shanghai" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "gpt-5 (high)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent subagent" }));
+
+    expect(screen.queryByText("Compaction")).not.toBeInTheDocument();
   });
 
   it("keeps duplicate Subagent titles distinct by thread ID", () => {

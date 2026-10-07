@@ -170,6 +170,7 @@ impl<'a> UsageLedger<'a> {
         filter: UsageFilter,
         expected_data_revision: Option<i64>,
         root_session_id: String,
+        detail_sidecars: &[&dyn super::aggregate::SessionDetailSidecar],
     ) -> Result<SessionDetailSnapshot, UsageLedgerError> {
         self.ledger.with_read_transaction(|transaction| {
             let data_revision = snapshot_meta(transaction)?;
@@ -177,6 +178,7 @@ impl<'a> UsageLedger<'a> {
                 return Err(UsageLedgerError::StaleDataRevision);
             }
             let value = AggregateReader::new(transaction, self.session_error_sidecars)
+                .with_detail_sidecars(detail_sidecars)
                 .session_detail(range, &filter, &root_session_id)?;
             Ok(SessionDetailSnapshot {
                 data_revision,
@@ -191,6 +193,7 @@ impl<'a> UsageLedger<'a> {
         filter: UsageFilter,
         expected_data_revision: Option<i64>,
         root_session_id: String,
+        detail_sidecars: &[&dyn super::aggregate::SessionDetailSidecar],
     ) -> Result<UsageSnapshot<SessionDetailWithProject>, UsageLedgerError> {
         self.ledger.with_read_transaction(|transaction| {
             let data_revision = snapshot_meta(transaction)?;
@@ -198,6 +201,7 @@ impl<'a> UsageLedger<'a> {
                 return Err(UsageLedgerError::StaleDataRevision);
             }
             let value = AggregateReader::new(transaction, self.session_error_sidecars)
+                .with_detail_sidecars(detail_sidecars)
                 .session_detail_with_project(range, &filter, &root_session_id)?;
             Ok(UsageSnapshot {
                 data_revision,
