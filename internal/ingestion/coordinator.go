@@ -889,10 +889,10 @@ func nowMS() int64 {
 }
 
 func newScanID() string {
-	sequence := scanIDSequence.Add(1)
 	if id, err := uuid.NewRandom(); err == nil {
 		return id.String()
 	}
+	sequence := scanIDSequence.Add(1)
 	var input [20]byte
 	binary.BigEndian.PutUint32(input[0:4], uint32(os.Getpid()))
 	binary.BigEndian.PutUint64(input[4:12], uint64(time.Now().UnixNano()))

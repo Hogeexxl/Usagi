@@ -978,7 +978,13 @@ func TestQueuedFollowupStartFailureBecomesTerminal(t *testing.T) {
 	}
 	store.inject(opFollowupStart, injectedError(storage.ErrorInvalidState))
 	close(firstRelease)
-	waitUntil(t, "queued follow-up start failure transition", func() bool { return store.count(opFollowupFailure) == 1 })
+	waitUntil(t, "durable queued follow-up start failure transition", func() bool {
+		_, followup := readTarget(t, db, disposition.ScanID)
+		return followup.State == domain.ScanRunStartFailed
+	})
+	if count := store.count(opFollowupFailure); count != 1 {
+		t.Fatalf("follow-up start failure persistence calls = %d, want 1", count)
+	}
 	_, followup := readTarget(t, db, disposition.ScanID)
 	if followup.State != domain.ScanRunStartFailed || followup.ErrorCode == nil || *followup.ErrorCode != "SCAN_START_FAILED" {
 		t.Fatalf("queued follow-up start failure = %+v", followup)
