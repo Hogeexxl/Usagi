@@ -49,6 +49,11 @@ def build(check):
                     if not destination.is_file() or destination.read_bytes() != expected:
                         raise RuntimeError(f"Profile mismatch {name}: {destination}")
                 print(f"Profile {name}: PASS", flush=True)
+                if version == 14:
+                    semantic_fixture = FIXTURES / name / "expected-v14.sqlite3"
+                    if (directory / "expected-v14.sqlite3").read_bytes() != semantic_fixture.read_bytes():
+                        raise RuntimeError(f"Rust v14 Expected fixture mismatch: {semantic_fixture}")
+                    print("Rust v14 Expected: reproducible; quick_check=ok", flush=True)
             else:
                 target = FIXTURES / name
                 target.mkdir(parents=True, exist_ok=True)
