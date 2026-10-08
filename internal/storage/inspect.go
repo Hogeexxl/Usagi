@@ -178,7 +178,7 @@ func readSchemaObjects(ctx context.Context, queryer schemaQueryer) ([]schemaObje
 		SELECT type, name, tbl_name, sql
 		FROM sqlite_schema
 		WHERE type IN ('table', 'index', 'trigger')
-		  AND name NOT LIKE 'sqlite_%'
+		  AND name NOT GLOB 'sqlite_*'
 		ORDER BY type, name COLLATE BINARY
 	`)
 	if err != nil {
@@ -383,20 +383,28 @@ func inspectForeignKeys(ctx context.Context, queryer schemaQueryer, tableName st
 		return nil, mapSQLiteError(err)
 	}
 	result := make([]foreignKeySnapshot, 0, len(groups))
-	for _, group := range groups {
+	if len(groups) != len(definitions) {
+		return nil, schemaMismatch("foreign key", tableName, fmt.Errorf("SQL definition count differs from foreign_key_list"))
+	}
+	for id := 0; id < len(groups); id++ {
+		group := groups[id]
+		if group == nil {
+			return nil, schemaMismatch("foreign key", tableName, fmt.Errorf("missing FK id %d", id))
+		}
 		sort.Slice(group.columns, func(i, j int) bool { return group.columns[i].sequence < group.columns[j].sequence })
 		foreignKey := group.snapshot
 		for _, column := range group.columns {
 			foreignKey.columns = append(foreignKey.columns, column.column)
 		}
-		for i := range definitions {
-			if !definitions[i].used && matchesForeignKeyDefinition(foreignKey, definitions[i]) {
-				foreignKey.deferrable = definitions[i].deferrable
-				foreignKey.initialMode = definitions[i].initialMode
-				definitions[i].used = true
-				break
-			}
+		// SQLite prepends each declared FK to its list; PRAGMA assigns IDs while
+		// walking that list. ID therefore identifies the reverse declaration order,
+		// including duplicate mappings with different actions or deferrability.
+		definition := definitions[len(definitions)-1-id]
+		if !matchesForeignKeyDefinition(foreignKey, definition) {
+			return nil, schemaMismatch("foreign key", tableName, fmt.Errorf("FK id %d does not match its declaration", id))
 		}
+		foreignKey.deferrable = definition.deferrable
+		foreignKey.initialMode = definition.initialMode
 		result = append(result, foreignKey)
 	}
 	return result, nil
@@ -408,7 +416,8 @@ type foreignKeyDefinition struct {
 	to          []string
 	deferrable  bool
 	initialMode string
-	used        bool
+	onUpdate    string
+	onDelete    string
 }
 
 func foreignKeyDefinitions(tokens []schemaToken) ([]foreignKeyDefinition, error) {
@@ -422,7 +431,7 @@ func foreignKeyDefinitions(tokens []schemaToken) ([]foreignKeyDefinition, error)
 		if references < 0 {
 			continue
 		}
-		definition := foreignKeyDefinition{initialMode: "immediate"}
+		definition := foreignKeyDefinition{initialMode: "immediate", onUpdate: "no action", onDelete: "no action"}
 		foreignKey := findTopLevelKeyword(segment, "foreign", 0)
 		if foreignKey >= 0 && foreignKey+1 < references && isKeyword(segment[foreignKey+1], "key") {
 			open := findSymbol(segment, "(", foreignKey+2)
@@ -453,6 +462,18 @@ func foreignKeyDefinitions(tokens []schemaToken) ([]foreignKeyDefinition, error)
 			end = close + 1
 		}
 		for i := end; i < len(segment); i++ {
+			if isKeyword(segment[i], "on") && i+2 < len(segment) {
+				action := segment[i+2].text
+				if (action == "no" || action == "set") && i+3 < len(segment) {
+					action += " " + segment[i+3].text
+				}
+				if isKeyword(segment[i+1], "update") {
+					definition.onUpdate = action
+				}
+				if isKeyword(segment[i+1], "delete") {
+					definition.onDelete = action
+				}
+			}
 			if isKeyword(segment[i], "deferrable") && (i == 0 || !isKeyword(segment[i-1], "not")) {
 				definition.deferrable = true
 			}
@@ -470,7 +491,7 @@ func foreignKeyDefinitions(tokens []schemaToken) ([]foreignKeyDefinition, error)
 }
 
 func matchesForeignKeyDefinition(foreignKey foreignKeySnapshot, definition foreignKeyDefinition) bool {
-	if !strings.EqualFold(foreignKey.parent, definition.parent) || len(foreignKey.columns) != len(definition.from) {
+	if !strings.EqualFold(foreignKey.parent, definition.parent) || len(foreignKey.columns) != len(definition.from) || foreignKey.onUpdate != definition.onUpdate || foreignKey.onDelete != definition.onDelete {
 		return false
 	}
 	for i, column := range foreignKey.columns {

@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"sync"
+
+	"github.com/Hogeexxl/Usagi/internal/platform"
 
 	_ "modernc.org/sqlite"
 )
@@ -19,6 +22,91 @@ type DB struct {
 	path      string
 	closeOnce sync.Once
 	closeErr  error
+}
+
+func Open(ctx context.Context, cfg Config) (*DB, error) {
+	paths, err := platform.ResolvePaths(cfg.Path)
+	if err != nil {
+		return nil, newStorageError(ErrorIO, err)
+	}
+	if _, err := inspectCrashArtifacts(ctx, paths.ActivePath); err != nil {
+		return nil, err
+	}
+	_, err = os.Stat(paths.ActivePath)
+	if errors.Is(err, os.ErrNotExist) {
+		converted := false
+		for _, candidate := range paths.LegacyCandidates {
+			if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return nil, newStorageError(ErrorIO, err)
+			}
+			if _, err := preflightLegacySource(ctx, candidate); err != nil {
+				return nil, err
+			}
+			if err := ConvertLegacy(ctx, LegacyConversionConfig{SourcePath: candidate, TargetPath: paths.ActivePath}); err != nil {
+				return nil, err
+			}
+			converted = true
+			break
+		}
+		if !converted {
+			if err := createFreshCurrent(ctx, paths.ActivePath); err != nil {
+				return nil, err
+			}
+		}
+	} else if err != nil {
+		return nil, newStorageError(ErrorIO, err)
+	}
+	class, err := classifyDatabase(ctx, paths.ActivePath)
+	if err != nil {
+		return nil, err
+	}
+	switch class {
+	case schemaFresh:
+		if err := createFreshCurrent(ctx, paths.ActivePath); err != nil {
+			return nil, err
+		}
+	case schemaRustLegacy:
+		return nil, newStorageError(ErrorLegacyRequiresConversion, errors.New("explicit conversion required for Rust Legacy Active"))
+	}
+	if err := validateCurrentPath(ctx, paths.ActivePath); err != nil {
+		return nil, err
+	}
+	marker, err := readConversionMarker(paths.ActivePath)
+	if err != nil {
+		return nil, err
+	}
+	if marker != nil {
+		if err := recoverActiveMarker(ctx, marker); err != nil {
+			return nil, err
+		}
+	}
+	writer, err := openWriter(paths.ActivePath)
+	if err != nil {
+		return nil, err
+	}
+	readers, err := openReaders(paths.ActivePath)
+	if err != nil {
+		return nil, errors.Join(err, mapSQLiteError(writer.Close()))
+	}
+	return &DB{writer: writer, readers: readers, path: paths.ActivePath}, nil
+}
+
+func (db *DB) Path() string { return db.path }
+
+func (db *DB) Validate(ctx context.Context) error {
+	return db.Read(ctx, func(conn *sql.Conn) error {
+		return validateCurrent(ctx, conn)
+	})
+}
+
+func (db *DB) SchemaVersion(ctx context.Context) (SchemaVersion, error) {
+	var version SchemaVersion
+	err := db.Read(ctx, func(conn *sql.Conn) error {
+		return mapSQLiteError(conn.QueryRowContext(ctx, "SELECT generation,version FROM schema_meta WHERE id=1").Scan(&version.Generation, &version.Version))
+	})
+	return version, err
 }
 
 func openWriter(path string) (*sql.DB, error) {
