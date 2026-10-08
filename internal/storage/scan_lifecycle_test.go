@@ -392,6 +392,145 @@ func TestSourceScanStateMachine(t *testing.T) {
 	}
 }
 
+func TestSourceScanStateMachineMatrix(t *testing.T) {
+	ctx := context.Background()
+	operations := []struct {
+		name string
+		run  func(*DB) error
+	}{
+		{"Start", func(db *DB) error { return db.MarkSourceScanStarted(ctx, "matrix", domain.SourceCodex, 30) }},
+		{"Complete", func(db *DB) error { return db.MarkSourceScanCompleted(ctx, "matrix", domain.SourceCodex, 30) }},
+		{"Skip", func(db *DB) error { return db.MarkSourceScanSkipped(ctx, "matrix", domain.SourceCodex, 30) }},
+		{"Fail", func(db *DB) error {
+			return db.MarkSourceScanFailed(ctx, "matrix", domain.SourceCodex, 30, "NEXT_FAILURE")
+		}},
+	}
+	states := []domain.SourceScanState{
+		domain.SourceScanQueued, domain.SourceScanRunning, domain.SourceScanCompleted,
+		domain.SourceScanSkipped, domain.SourceScanFailed,
+	}
+	prepare := func(t *testing.T, initial domain.SourceScanState) *DB {
+		t.Helper()
+		db := openCanonicalTestDB(t)
+		lifecycleStart(t, db, "matrix", domain.SourceCodex)
+		if initial == domain.SourceScanRunning || initial == domain.SourceScanCompleted {
+			if err := db.MarkSourceScanStarted(ctx, "matrix", domain.SourceCodex, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var err error
+		switch initial {
+		case domain.SourceScanCompleted:
+			err = db.MarkSourceScanCompleted(ctx, "matrix", domain.SourceCodex, 20)
+		case domain.SourceScanSkipped:
+			err = db.MarkSourceScanSkipped(ctx, "matrix", domain.SourceCodex, 20)
+		case domain.SourceScanFailed:
+			err = db.MarkSourceScanFailed(ctx, "matrix", domain.SourceCodex, 20, "INITIAL_FAILURE")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	assertUnchanged := func(t *testing.T, db *DB, row lifecycleSourceRowData, snapshot domain.ScanStatusSnapshot, revision RevisionTuple) {
+		t.Helper()
+		if got := lifecycleSourceRow(t, db, "matrix", string(domain.SourceCodex)); got != row {
+			t.Fatalf("rejected operation changed child row: got %+v, want %+v", got, row)
+		}
+		if got := lifecycleSnapshot(t, db, ptrString("matrix")); !reflect.DeepEqual(got, snapshot) {
+			t.Fatalf("rejected operation changed durable snapshot: got %+v, want %+v", got, snapshot)
+		}
+		if got := db.CurrentRevision(); got != revision {
+			t.Fatalf("rejected operation changed published revision: got %+v, want %+v", got, revision)
+		}
+	}
+
+	for _, initial := range states {
+		for _, operation := range operations {
+			t.Run(string(initial)+"/"+operation.name, func(t *testing.T) {
+				db := prepare(t, initial)
+				beforeRow := lifecycleSourceRow(t, db, "matrix", string(domain.SourceCodex))
+				beforeSnapshot := lifecycleSnapshot(t, db, ptrString("matrix"))
+				beforeRevision := db.CurrentRevision()
+				allowed := initial == domain.SourceScanQueued && (operation.name == "Start" || operation.name == "Skip" || operation.name == "Fail") ||
+					initial == domain.SourceScanRunning && (operation.name == "Complete" || operation.name == "Fail")
+				err := operation.run(db)
+				if !allowed {
+					assertErrorKind(t, err, ErrorInvalidState)
+					assertUnchanged(t, db, beforeRow, beforeSnapshot, beforeRevision)
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := beforeRow
+				switch operation.name {
+				case "Start":
+					want.State = "running"
+					want.StartedAtMS = sql.NullInt64{Int64: 30, Valid: true}
+				case "Complete":
+					want.State = "completed"
+					want.FinishedAtMS = sql.NullInt64{Int64: 30, Valid: true}
+				case "Skip":
+					want.State = "skipped"
+					want.FinishedAtMS = sql.NullInt64{Int64: 30, Valid: true}
+				case "Fail":
+					want.State = "failed"
+					want.FinishedAtMS = sql.NullInt64{Int64: 30, Valid: true}
+					want.ErrorCode = sql.NullString{String: "NEXT_FAILURE", Valid: true}
+				}
+				if got := lifecycleSourceRow(t, db, "matrix", string(domain.SourceCodex)); got != want {
+					t.Fatalf("child row = %+v, want %+v", got, want)
+				}
+				wantRevision := beforeRevision
+				wantRevision.StatusRevision++
+				if got := db.CurrentRevision(); got != wantRevision {
+					t.Fatalf("revision = %+v, want %+v", got, wantRevision)
+				}
+				if got := lifecycleSnapshot(t, db, ptrString("matrix")).AppState.Scan.StatusRevision; got != wantRevision.StatusRevision {
+					t.Fatalf("durable status revision = %d, want %d", got, wantRevision.StatusRevision)
+				}
+			})
+		}
+	}
+
+	for _, parent := range []string{"active-mismatch", "completed", "failed"} {
+		for _, initial := range []domain.SourceScanState{domain.SourceScanQueued, domain.SourceScanRunning} {
+			for _, operation := range operations {
+				t.Run(parent+"/"+string(initial)+"/"+operation.name, func(t *testing.T) {
+					db := prepare(t, initial)
+					// Keep the child runnable to isolate the parent guard from child-state rejection.
+					if parent == "active-mismatch" {
+						if _, err := db.writer.ExecContext(ctx,
+							`INSERT INTO scan_runs (scan_id, trigger, request_kind, state, requested_at_ms, started_at_ms, started_status_revision)
+							 VALUES ('other-active', 'Manual', 'direct', 'running', 1, 2, 1)`); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := db.writer.ExecContext(ctx, "UPDATE app_meta SET active_scan_id = 'other-active' WHERE id = 1"); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						var code any
+						if parent == "failed" {
+							code = "PARENT_FAILURE"
+						}
+						if _, err := db.writer.ExecContext(ctx,
+							`UPDATE scan_runs SET state = ?, finished_at_ms = 20, terminal_status_revision = 1, error_code = ?
+							 WHERE scan_id = 'matrix'`, parent, code); err != nil {
+							t.Fatal(err)
+						}
+					}
+					beforeRow := lifecycleSourceRow(t, db, "matrix", string(domain.SourceCodex))
+					beforeSnapshot := lifecycleSnapshot(t, db, ptrString("matrix"))
+					beforeRevision := db.CurrentRevision()
+					assertErrorKind(t, operation.run(db), ErrorInvalidState)
+					assertUnchanged(t, db, beforeRow, beforeSnapshot, beforeRevision)
+				})
+			}
+		}
+	}
+}
+
 func TestLifecycleStatusRevision(t *testing.T) {
 	ctx := context.Background()
 	db := openCanonicalTestDB(t)
