@@ -19,6 +19,7 @@ type Config struct {
 type DB struct {
 	writer    *sql.DB
 	readers   *sql.DB
+	revisions *revisionHub
 	path      string
 	closeOnce sync.Once
 	closeErr  error
@@ -90,10 +91,32 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err != nil {
 		return nil, errors.Join(err, mapSQLiteError(writer.Close()))
 	}
-	return &DB{writer: writer, readers: readers, path: paths.ActivePath}, nil
+	var initialRevision RevisionTuple
+	err = writer.QueryRowContext(ctx,
+		"SELECT data_revision,status_revision FROM app_meta WHERE id=1",
+	).Scan(&initialRevision.DataRevision, &initialRevision.StatusRevision)
+	if err != nil {
+		readerErr := mapSQLiteError(readers.Close())
+		writerErr := mapSQLiteError(writer.Close())
+		return nil, errors.Join(mapSQLiteError(err), readerErr, writerErr)
+	}
+	return &DB{
+		writer:    writer,
+		readers:   readers,
+		revisions: newRevisionHub(initialRevision),
+		path:      paths.ActivePath,
+	}, nil
 }
 
 func (db *DB) Path() string { return db.path }
+
+func (db *DB) CurrentRevision() RevisionTuple {
+	return db.revisions.currentRevision()
+}
+
+func (db *DB) SubscribeRevisions(ctx context.Context) <-chan RevisionTuple {
+	return db.revisions.subscribe(ctx)
+}
 
 func (db *DB) Validate(ctx context.Context) error {
 	return db.Read(ctx, func(conn *sql.Conn) error {
@@ -175,6 +198,7 @@ func (db *DB) Close() error {
 		if writerErr != nil {
 			writerErr = mapSQLiteError(writerErr)
 		}
+		db.revisions.close()
 		db.closeErr = errors.Join(readerErr, writerErr)
 	})
 	return db.closeErr
