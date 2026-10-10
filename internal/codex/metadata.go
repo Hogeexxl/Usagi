@@ -522,7 +522,8 @@ func resolveMetadataThread(input MetadataResolveInput, id string, state StateThr
 	patch.MetadataQualityStatus = quality
 
 	relationHasConflict := parentConflict || cycle || rootConflict
-	if !relationHasConflict {
+	// An unresolved current root cannot replace part of a valid historical relationship tuple.
+	if !relationHasConflict && rootKnown {
 		switch {
 		case role == "main" && hasExplicitMainEvidence(input, id, facts) && (!hasOld || old.ParentThreadID == nil || relationshipComplete):
 			if relationshipComplete && hasOld && old.ParentThreadID != nil {
@@ -545,12 +546,10 @@ func resolveMetadataThread(input MetadataResolveInput, id string, state StateThr
 			if !hasOld || old.AgentRole != role {
 				patch.AgentRole = domain.Set(role)
 			}
-			if rootKnown {
-				setOrClearString(&patch.RootSessionID, root)
-			}
-		case relationshipComplete && role == "unknown":
-			patch.AgentRole = domain.Set(domain.AgentRole("unknown"))
+			setOrClearString(&patch.RootSessionID, root)
 		}
+	} else if !hasOld {
+		patch.AgentRole = domain.Set(domain.AgentRole("unknown"))
 	}
 
 	title := resolveMetadataTitle(input, id, state, hasState, facts, role, old, hasOld)
