@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"github.com/Hogeexxl/Usagi/internal/codex/rollout"
 	"github.com/Hogeexxl/Usagi/internal/source"
 	sharedusage "github.com/Hogeexxl/Usagi/internal/usage"
 )
@@ -200,6 +201,7 @@ type TurnWrite struct {
 	Blocks                        CompensationBlocks
 	QualityStatus                 string
 	StateThroughOffset            int64
+	UpdatedAtMS                   int64
 }
 
 type RawTailStatus string
@@ -302,6 +304,11 @@ type CompactionVisibilityProjection struct {
 	UnknownScopes []CompactionUnknownScope
 }
 
+type BindingReconcileDeps struct {
+	InvalidateBuild   BuildBindingInvalidator
+	ProjectCompaction CompactionVisibilityProjector
+}
+
 type BuildBindingInvalidationRequest struct {
 	ThreadID                string
 	PreviousRoot            *string
@@ -325,3 +332,78 @@ type CompactionVisibilityProjector func(
 	target source.UsageWriteTarget,
 	ownerThreadID string,
 ) (CompactionVisibilityProjection, error)
+
+type ReconciliationCarry struct {
+	Version               uint8
+	OpenWindowStartOffset *uint64
+	PendingResponseIDs    []string
+	ModernCounterDomain   *ModernCounterDomain
+	ModernCounterTotal    *sharedusage.NormalizedTokenUsage
+	PendingEvidence       []PendingUsageEvidence
+}
+
+type ModernCounterDomain struct {
+	ThreadID  string
+	SessionID *string
+}
+
+type PendingEvidenceKind string
+
+const (
+	PendingResponseUsage PendingEvidenceKind = "response_usage"
+	PendingCompacted     PendingEvidenceKind = "compacted"
+)
+
+type PendingEvidenceRecord struct {
+	Kind        PendingEvidenceKind
+	TimestampMS *int64
+	StartOffset uint64
+	EndOffset   uint64
+	Response    *ResponseEvidence
+	Compaction  *CompactionEvidence
+}
+
+type PendingUsageEvidence struct {
+	Record          PendingEvidenceRecord
+	Model           *string
+	ReasoningEffort *string
+}
+
+type OwnedRecord struct {
+	Parsed            ParsedRecord
+	Ownership         rollout.Ownership
+	PhysicalEndOffset int64
+}
+
+type UsageCandidate struct {
+	SourceFileID    int64
+	Generation      int64
+	EventID         string
+	EventKind       byte
+	EvidenceKind    EvidenceKind
+	Operation       Operation
+	OccurredAtMS    int64
+	StartOffset     int64
+	EndOffset       int64
+	OwningThreadID  string
+	RootSessionID   string
+	TurnKey         *string
+	Model           string
+	ReasoningEffort *string
+	Response        *ResponseEvidence
+	PreviousTotal   *sharedusage.NormalizedTokenUsage
+	CurrentTotal    *sharedusage.NormalizedTokenUsage
+	Usage           sharedusage.NormalizedTokenUsage
+}
+
+type ProcessBatch struct {
+	Candidates         []UsageCandidate
+	Occurrences        []OccurrenceWrite
+	Compactions        []PendingUsageEvidence
+	TurnUpserts        []TurnWrite
+	SourceState        SourceState
+	LogicalSafeOffset  int64
+	StopBeforeOffset   *int64
+	UnresolvedBoundary bool
+	Fatal              *FatalConflict
+}

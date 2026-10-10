@@ -7,7 +7,7 @@ import (
 	sharedusage "github.com/Hogeexxl/Usagi/internal/usage"
 )
 
-func TestUsageIdentityRustOracleGoldens(t *testing.T) {
+func TestIdentityRustOracleGoldens(t *testing.T) {
 	current := identityUsage(t, 1_200, 300, identityInt64(100), 200, 50, 1_400)
 	previous := identityUsage(t, 800, 200, identityInt64(50), 100, 20, 900)
 	delta := identityUsage(t, 400, 100, identityInt64(50), 100, 30, 500)
