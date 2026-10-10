@@ -399,7 +399,7 @@ func TestProcessBatchLegacyReplacementCommitsOnlyExplicitCanonicalEvent(t *testi
 		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_facts WHERE source='codex' AND ledger_epoch=?`, epoch).Scan(&factCount); err != nil {
 			return err
 		}
-		if eventCount != 1 || occurrenceCount != 1 || factCount != 1 {
+		if eventCount != 1 || occurrenceCount != 2 || factCount != 1 {
 			t.Fatalf("replacement commit persisted wrong canonical/provenance cardinality: events=%d occurrences=%d facts=%d", eventCount, occurrenceCount, factCount)
 		}
 		var onlyEvent, onlyOccurrence, onlyFact string
@@ -414,6 +414,106 @@ func TestProcessBatchLegacyReplacementCommitsOnlyExplicitCanonicalEvent(t *testi
 		}
 		if onlyEvent != explicitID || onlyOccurrence != explicitID || onlyFact != explicitID {
 			t.Fatalf("replacement commit retained the legacy ID: event=%q occurrence=%q fact=%q", onlyEvent, onlyOccurrence, onlyFact)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessBatchLaterExplicitRetargetsDurableLegacyOccurrence(t *testing.T) {
+	owner := "owner"
+	run, epoch, ids := setupReconcileStorage(t, []string{owner})
+	state := processorTestState()
+	state.Source.SourceFileID = ids[0]
+	state.Source.OwningThreadID = owner
+	state.Source.RootSessionID = owner
+	state.Source.PreviousTotal = usagePointer(testUsage(t, 50, 0, nil, 0, 0))
+	state.Source.PreviousTotalOffset = int64Pointer(0)
+	model := "model"
+	state.Source.ActiveModel = &model
+	state.Source.ActiveModelOffset = int64Pointer(0)
+	legacy := tokenCountRecord(testUsage(t, 80, 0, nil, 0, 0), UsageValue{State: UsageValueMissing}, 20)
+	legacy.Parsed.StartOffset, legacy.Parsed.EndOffset = 10, 20
+	firstBatch, err := ProcessRecords(state, []OwnedRecord{legacy}, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID := firstBatch.Candidates[0].EventID
+	first := reconcileRootForTest(t, run, epoch, []ProcessBatch{firstBatch})[0]
+	if first.Fatal != nil || len(first.Events) != 1 || first.Events[0].EventID != legacyID || len(first.WindowUpserts) != 1 {
+		t.Fatalf("D legacy batch did not create its durable proposal window: %+v", first)
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		_, err := Commit(tx, source.UsageTargetActive, first, 50)
+		return err
+	}); err != nil {
+		t.Fatalf("initial legacy commit failed: %v", err)
+	}
+
+	secondState, err := CounterStateFromSourceState(firstBatch.SourceState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := processorRecord(RawResponseUsage, 20, 30, 30)
+	response.Parsed.TimestampMS = int64Pointer(60)
+	response.Parsed.Response = &ResponseEvidence{
+		ResponseID: "later-explicit", ThreadID: owner,
+		Usage: validUsage(testUsage(t, 30, 0, nil, 0, 0)),
+	}
+	secondBatch, err := ProcessRecords(secondState, []OwnedRecord{response}, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := reconcileRootForTest(t, run, epoch, []ProcessBatch{secondBatch})[0]
+	explicitID := ResponseEventID(owner, "later-explicit")
+	if second.Fatal != nil || len(second.DeleteEventIDs) != 1 || second.DeleteEventIDs[0] != legacyID ||
+		len(second.Events) != 1 || second.Events[0].EventID != explicitID || len(second.Facts) != 1 || second.Facts[0].EventID != explicitID {
+		t.Fatalf("durable window did not generate the later explicit replacement patch: %+v", second)
+	}
+	var retargeted bool
+	for _, occurrence := range second.Occurrences {
+		if occurrence.SourceFileID == ids[0] && occurrence.Generation == 1 && occurrence.StartOffset == 10 &&
+			occurrence.EndOffset == 20 && occurrence.EventID == explicitID {
+			retargeted = true
+		}
+	}
+	if !retargeted {
+		t.Fatalf("later explicit coverage omitted the legacy logical occurrence retarget: %+v", second.Occurrences)
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		_, err := Commit(tx, source.UsageTargetActive, second, 60)
+		return err
+	}); err != nil {
+		t.Fatalf("later explicit replacement commit failed: %v", err)
+	}
+	if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+		var eventID string
+		var startOffset, endOffset int64
+		if err := reader.QueryRow(`SELECT event_id,source_start_offset,source_end_offset FROM codex_usage_event_occurrences
+			WHERE source='codex' AND ledger_epoch=? AND source_file_id=? AND file_generation=1 AND source_start_offset=10`, epoch, ids[0]).
+			Scan(&eventID, &startOffset, &endOffset); err != nil {
+			return err
+		}
+		if eventID != explicitID || startOffset != 10 || endOffset != 20 {
+			t.Fatalf("durable legacy occurrence was not retargeted in place: event=%q range=%d-%d", eventID, startOffset, endOffset)
+		}
+		var legacyEvents, legacyFacts, legacyOccurrences, windows int
+		if err := reader.QueryRow(`SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=? AND event_id=?`, epoch, legacyID).Scan(&legacyEvents); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_facts WHERE source='codex' AND ledger_epoch=? AND event_id=?`, epoch, legacyID).Scan(&legacyFacts); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=? AND event_id=?`, epoch, legacyID).Scan(&legacyOccurrences); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_reconciliation_windows WHERE source='codex' AND ledger_epoch=? AND source_file_id=?`, epoch, ids[0]).Scan(&windows); err != nil {
+			return err
+		}
+		if legacyEvents != 0 || legacyFacts != 0 || legacyOccurrences != 0 || windows != 0 {
+			t.Fatalf("legacy durable rows survived explicit replacement: events=%d facts=%d occurrences=%d windows=%d",
+				legacyEvents, legacyFacts, legacyOccurrences, windows)
 		}
 		return nil
 	}); err != nil {
