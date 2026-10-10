@@ -1,0 +1,2 @@
+{"ordinal":0,"payload":{"id":"01a1065c-fdc0-7078-8000-000000000078","model_provider":"openai","originator":"Codex Desktop","session_id":"01a1065c-fdc0-7078-8000-000000000078","timestamp":"2026-10-04T10:02:00.000Z"},"timestamp":"2026-10-04T10:02:00.000Z","type":"session_meta"}
+{"ordinal":1,"payload":{"started_at":1791108122,"turn_id":"01a1065d-0590-7079-8000-000000000079","type":"task_started"},"timestamp":"2026-10-04T10:02:02.000Z","type":"event_msg"}
