@@ -520,3 +520,168 @@ func TestProcessBatchLaterExplicitRetargetsDurableLegacyOccurrence(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestRecoveredDeltaResidualReconcilesClosedTurnAcrossBatches(t *testing.T) {
+	owner := "owner"
+	run, epoch, ids := setupReconcileStorage(t, []string{owner})
+	previous := testUsage(t, 50, 0, nil, 0, 0)
+	current := testUsage(t, 150, 0, nil, 0, 0)
+	model := "model"
+	state := processorTestState()
+	state.Source.SourceFileID = ids[0]
+	state.Source.OwningThreadID = owner
+	state.Source.RootSessionID = owner
+	state.Source.PreviousTotal = usagePointer(previous)
+	state.Source.PreviousTotalOffset = int64Pointer(0)
+	state.Source.ActiveModel = &model
+	state.Source.ActiveModelOffset = int64Pointer(0)
+	start := lifecycleRecord(LifecycleStarted, "turn", 0)
+	legacy := tokenCountRecord(current, UsageValue{State: UsageValueMissing}, 20)
+	legacy.Parsed.StartOffset, legacy.Parsed.EndOffset = 10, 20
+	firstBatch, err := ProcessRecords(state, []OwnedRecord{start, legacy}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstBatch.Candidates) != 1 || firstBatch.Candidates[0].EventKind != 1 ||
+		firstBatch.Candidates[0].Usage.InputTokens != 100 || len(firstBatch.TurnUpserts) != 1 ||
+		firstBatch.TurnUpserts[0].Status != TurnOpen {
+		t.Fatalf("D did not produce the open recovered-delta turn and proposal: %+v", firstBatch)
+	}
+	legacyID := firstBatch.Candidates[0].EventID
+	first := reconcileRootForTest(t, run, epoch, []ProcessBatch{firstBatch})[0]
+	if first.Fatal != nil || len(first.Events) != 1 || first.Events[0].EventID != legacyID || len(first.WindowUpserts) != 1 {
+		t.Fatalf("initial recovered-delta reconciliation failed: %+v", first)
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		_, err := Commit(tx, source.UsageTargetActive, first, 100)
+		return err
+	}); err != nil {
+		t.Fatalf("initial recovered-delta commit failed: %v", err)
+	}
+
+	var secondState CounterState
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		loaded, found, err := LoadCounterState(tx, source.UsageTargetActive, ids[0], 1)
+		if err != nil {
+			return err
+		}
+		if !found || loaded.OpenTurn == nil {
+			t.Fatal("committed open turn did not reload")
+		}
+		secondState = loaded
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response := processorRecord(RawResponseUsage, 20, 30, 30)
+	response.Parsed.TimestampMS = int64Pointer(200)
+	response.Parsed.Response = &ResponseEvidence{
+		ResponseID: "residual-response", ThreadID: owner,
+		Usage: validUsage(testUsage(t, 40, 0, nil, 0, 0)),
+	}
+	complete := lifecycleRecord(LifecycleCompleted, "turn", 30)
+	secondBatch, err := ProcessRecords(secondState, []OwnedRecord{response, complete}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondBatch.Candidates) != 1 || secondBatch.Candidates[0].EvidenceKind != EvidenceExplicit ||
+		len(secondBatch.TurnUpserts) != 1 || secondBatch.TurnUpserts[0].Status != TurnCompleted ||
+		secondBatch.TurnUpserts[0].Accounted.InputTokens != 140 {
+		t.Fatalf("D did not produce the later explicit and closed turn input: %+v", secondBatch)
+	}
+
+	second := reconcileRootForTest(t, run, epoch, []ProcessBatch{secondBatch})[0]
+	explicitID := ResponseEventID(owner, "residual-response")
+	residual := testUsage(t, 60, 0, nil, 0, 0)
+	residualID := LegacyEventID(owner, firstBatch.Candidates[0].TurnKey, 1,
+		firstBatch.Candidates[0].OccurredAtMS, &previous, current, residual,
+		firstBatch.Candidates[0].Model, firstBatch.Candidates[0].ReasoningEffort)
+	if second.Fatal != nil || len(second.DeleteEventIDs) != 1 || second.DeleteEventIDs[0] != legacyID ||
+		len(second.Events) != 2 || len(second.Facts) != 2 {
+		t.Fatalf("later explicit did not produce the residual replacement patch: %+v", second)
+	}
+	var sawExplicit, sawResidual, sawCompensation bool
+	for _, event := range second.Events {
+		switch event.EventID {
+		case explicitID:
+			sawExplicit = event.Usage.InputTokens == 40
+		case residualID:
+			sawResidual = event.Kind == sharedusage.EventKindRecovered && event.Usage.InputTokens == 60
+		}
+		if event.Kind == sharedusage.EventKindTurnCompensation {
+			sawCompensation = true
+		}
+	}
+	if !sawExplicit || !sawResidual || sawCompensation {
+		t.Fatalf("canonical events or compensation do not reflect the 40+60 turn total: %+v", second.Events)
+	}
+	if len(second.TurnUpserts) != 1 || second.TurnUpserts[0].Accounted.InputTokens != 100 ||
+		second.TurnUpserts[0].AccountedCandidateCount != 2 {
+		t.Fatalf("closed turn accounted did not overlay the final residual patch: %+v", second.TurnUpserts)
+	}
+	var window LegacyReconciliationWindow
+	if len(second.WindowUpserts) != 1 {
+		t.Fatalf("residual window was not retained: %+v", second.WindowUpserts)
+	}
+	window, err = DecodeLegacyReconciliationWindow(second.WindowUpserts[0].StateJSON)
+	if err != nil || len(window.ProposalEventIDs) != 1 || window.ProposalEventIDs[0] != residualID ||
+		len(window.LegacyCoveredResponseIDs) != 1 || window.LegacyCoveredResponseIDs[0] != "residual-response" {
+		t.Fatalf("residual proposal/coverage was not retained in the durable window: %+v err=%v", window, err)
+	}
+	var retargeted bool
+	for _, occurrence := range second.Occurrences {
+		if occurrence.SourceFileID == ids[0] && occurrence.Generation == 1 && occurrence.StartOffset == 10 &&
+			occurrence.EndOffset == 20 && occurrence.EventID == residualID {
+			retargeted = true
+		}
+	}
+	if !retargeted {
+		t.Fatalf("residual replacement did not preserve the legacy logical occurrence: %+v", second.Occurrences)
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		_, err := Commit(tx, source.UsageTargetActive, second, 200)
+		return err
+	}); err != nil {
+		t.Fatalf("residual replacement commit failed: %v", err)
+	}
+	if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+		var count, total int64
+		if err := reader.QueryRow(`SELECT count(*),coalesce(sum(input_tokens),0) FROM usage_events
+			WHERE source='codex' AND source_epoch=?`, epoch).Scan(&count, &total); err != nil {
+			return err
+		}
+		if count != 2 || total != 100 {
+			t.Fatalf("durable canonical usage is not exactly explicit 40 plus residual 60: count=%d total=%d", count, total)
+		}
+		var legacyCount, compensationCount int
+		if err := reader.QueryRow(`SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=? AND event_id=?`, epoch, legacyID).Scan(&legacyCount); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=? AND event_kind='turn_compensation'`, epoch).Scan(&compensationCount); err != nil {
+			return err
+		}
+		if legacyCount != 0 || compensationCount != 0 {
+			t.Fatalf("replaced legacy or spurious compensation survived: legacy=%d compensation=%d", legacyCount, compensationCount)
+		}
+		var accountedInput, candidateCount int64
+		var status string
+		if err := reader.QueryRow(`SELECT accounted_input_tokens,accounted_candidate_count,status FROM codex_turns
+			WHERE ledger_epoch=? AND source_file_id=? AND file_generation=1`, epoch, ids[0]).Scan(&accountedInput, &candidateCount, &status); err != nil {
+			return err
+		}
+		if accountedInput != 100 || candidateCount != 2 || status != string(TurnCompleted) {
+			t.Fatalf("closed turn persisted wrong accounted total: input=%d candidates=%d status=%q", accountedInput, candidateCount, status)
+		}
+		var occurrenceEvent string
+		if err := reader.QueryRow(`SELECT event_id FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?
+			AND source_file_id=? AND file_generation=1 AND source_start_offset=10`, epoch, ids[0]).Scan(&occurrenceEvent); err != nil {
+			return err
+		}
+		if occurrenceEvent != residualID {
+			t.Fatalf("legacy logical occurrence did not retarget to residual: %q", occurrenceEvent)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
