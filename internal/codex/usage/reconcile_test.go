@@ -1,0 +1,422 @@
+package usage
+
+import (
+	"bufio"
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Hogeexxl/Usagi/internal/codex/rollout"
+	"github.com/Hogeexxl/Usagi/internal/source"
+	"github.com/Hogeexxl/Usagi/internal/storage"
+	sharedusage "github.com/Hogeexxl/Usagi/internal/usage"
+)
+
+func setupReconcileStorage(t *testing.T, owners []string) (source.RunContext, int64, []int64) {
+	t.Helper()
+	run := newUsageTestRun(t)
+	var epoch int64
+	ids := make([]int64, len(owners))
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		uniqueOwners := make(map[string]struct{})
+		for _, owner := range owners {
+			uniqueOwners[owner] = struct{}{}
+		}
+		ownerList := make([]string, 0, len(uniqueOwners))
+		for owner := range uniqueOwners {
+			ownerList = append(ownerList, owner)
+		}
+		if err := seedUsageTestThreads(tx, ownerList...); err != nil {
+			return err
+		}
+		if err := activateUsageTestEpoch(tx); err != nil {
+			return err
+		}
+		state, err := tx.UsageEpochState()
+		if err != nil {
+			return err
+		}
+		epoch = state.ActiveEpoch
+		for index, owner := range owners {
+			ids[index], err = insertUsageTestSourceFile(tx, "reconcile-"+string(rune('a'+index))+".jsonl", owner)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return run, epoch, ids
+}
+
+func reconcileSourceState(sourceFileID int64, owner, root string) SourceState {
+	state := processorTestState().Source
+	state.SourceFileID = sourceFileID
+	state.OwningThreadID = owner
+	state.RootSessionID = root
+	state.ObservedRawSize = 128
+	state.RawTailStatus = RawTailUnverified
+	state.ResolvedThroughOffset = 0
+	state.ReconciliationStateJSON, _ = CanonicalReconciliationCarryJSON(NewReconciliationCarry())
+	return state
+}
+
+func explicitCandidate(sourceFileID int64, owner, root, responseID string, usage sharedusage.NormalizedTokenUsage,
+	start, end, occurredAt int64, model string, turnKey *string, operation Operation) UsageCandidate {
+	evidence := &ResponseEvidence{ResponseID: responseID, ThreadID: owner, Usage: UsageValue{State: UsageValueValid, Value: usage}}
+	return UsageCandidate{
+		SourceFileID: sourceFileID, Generation: 1, EventID: ResponseEventID(owner, responseID),
+		EvidenceKind: EvidenceExplicit, Operation: operation, OccurredAtMS: occurredAt,
+		StartOffset: start, EndOffset: end, OwningThreadID: owner, RootSessionID: root,
+		TurnKey: cloneString(turnKey), Model: model, Response: evidence, Usage: usage,
+	}
+}
+
+func legacyCandidate(sourceFileID int64, owner, root string, start, end int64,
+	previous, current, usage sharedusage.NormalizedTokenUsage, turnKey *string) UsageCandidate {
+	occurredAtMS := int64(100)
+	eventID := LegacyEventID(owner, turnKey, 1, occurredAtMS, &previous, current, usage, "model", nil)
+	return UsageCandidate{
+		SourceFileID: sourceFileID, Generation: 1, EventID: eventID,
+		EventKind: 1, EvidenceKind: EvidenceLegacy, Operation: OperationResponse,
+		OccurredAtMS: occurredAtMS, StartOffset: start, EndOffset: end, OwningThreadID: owner,
+		RootSessionID: root, TurnKey: cloneString(turnKey), Model: "model",
+		PreviousTotal: usagePointer(previous), CurrentTotal: usagePointer(current), Usage: usage,
+	}
+}
+
+func reconcileRootForTest(t *testing.T, run source.RunContext, epoch int64, batches []ProcessBatch) []ReconcileResult {
+	t.Helper()
+	var results []ReconcileResult
+	if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+		var err error
+		results, err = ReconcileRoot(reader, epoch, batches)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return results
+}
+
+func TestLegacyReconciliationWindowCanonicalCodec(t *testing.T) {
+	eventID := strings.Repeat("a", 64)
+	window := LegacyReconciliationWindow{
+		Version: 1, PreviousTotal: UsageValue{State: UsageValueMissing},
+		CurrentTotal: UsageValue{State: UsageValueInvalid}, LastUsage: UsageValue{State: UsageValueMissing},
+		ExplicitResponseIDs:      []string{"response-z", "response-a", "response-z"},
+		LegacyCoveredResponseIDs: []string{}, ProposalEventIDs: []string{eventID},
+		TurnAccountedBefore: sharedusage.Zero(), ChainState: LegacyWindowChainState{Kind: "continuous"}, Closed: true,
+	}
+	encoded, err := CanonicalLegacyReconciliationWindowJSON(window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeLegacyReconciliationWindow(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := CanonicalLegacyReconciliationWindowJSON(decoded)
+	if err != nil || !bytes.Equal(encoded, reencoded) {
+		t.Fatalf("window wire did not round-trip canonically: %s, err=%v", reencoded, err)
+	}
+	if !bytes.Contains(encoded, []byte(`"explicit_response_ids":["response-a","response-z"]`)) {
+		t.Fatalf("response identifiers were not sorted and deduplicated: %s", encoded)
+	}
+	invalid := window
+	invalid.ProposalEventIDs = []string{strings.Repeat("A", 64)}
+	if _, err := CanonicalLegacyReconciliationWindowJSON(invalid); err == nil {
+		t.Fatal("non-lowercase proposal event ID was accepted")
+	}
+	if _, err := DecodeLegacyReconciliationWindow(bytes.Replace(encoded, []byte(eventID), []byte(strings.Repeat("A", 64)), 1)); err == nil {
+		t.Fatal("decoder accepted a noncanonical proposal event ID")
+	}
+	if _, err := DecodeLegacyReconciliationWindow(bytes.Replace(encoded, []byte(`{"version":1`), []byte(`{"version": 1`), 1)); err == nil {
+		t.Fatal("decoder accepted noncanonical whitespace")
+	}
+}
+
+func TestReconcileRootStagesDuplicateResponsesAcrossSources(t *testing.T) {
+	owner := "owner"
+	run, epoch, ids := setupReconcileStorage(t, []string{owner, owner})
+	usage := testUsage(t, 4, 1, nil, 2, 1)
+	first := explicitCandidate(ids[0], owner, owner, "response-1", usage, 10, 20, 100, "first-model", nil, OperationResponse)
+	secondTurn := "second-turn"
+	second := explicitCandidate(ids[1], owner, owner, "response-1", usage, 30, 40, 147, "embedded-model", &secondTurn, OperationCompaction)
+	batches := []ProcessBatch{
+		{SourceState: reconcileSourceState(ids[0], owner, owner), Candidates: []UsageCandidate{first}, LogicalSafeOffset: 20},
+		{SourceState: reconcileSourceState(ids[1], owner, owner), Candidates: []UsageCandidate{second}, LogicalSafeOffset: 40},
+	}
+	results := reconcileRootForTest(t, run, epoch, batches)
+	if len(results) != 2 || len(results[0].Events) != 1 || len(results[0].Occurrences) != 2 || len(results[0].Facts) != 1 {
+		t.Fatalf("root batch did not merge the shared response: %+v", results)
+	}
+	event := results[0].Events[0]
+	if event.OccurredAtMS != first.OccurredAtMS || event.Model != first.Model || event.TurnKey != nil || results[0].Facts[0].Operation != OperationCompaction {
+		t.Fatalf("first staged binding did not retain canonical attribution while promoting operation: event=%+v fact=%+v", event, results[0].Facts[0])
+	}
+	second.Usage = testUsage(t, 5, 1, nil, 2, 1)
+	batches[1].Candidates = []UsageCandidate{second}
+	conflict := reconcileRootForTest(t, run, epoch, batches)
+	if conflict[0].Fatal == nil || conflict[0].Fatal.Code != FatalCompactionIdentity {
+		t.Fatalf("same response with contradictory compaction usage did not fail identity validation: %+v", conflict[0].Fatal)
+	}
+}
+
+func TestReconcileLegacyCoverageRequiresProvenSourceOrTurn(t *testing.T) {
+	t.Run("same source adjacent without turn", func(t *testing.T) {
+		owner := "owner"
+		run, epoch, ids := setupReconcileStorage(t, []string{owner})
+		legacyUsage := testUsage(t, 3, 0, nil, 0, 0)
+		before := testUsage(t, 5, 0, nil, 0, 0)
+		after := testUsage(t, 8, 0, nil, 0, 0)
+		explicit := explicitCandidate(ids[0], owner, owner, "adjacent", legacyUsage, 20, 30, 200, "model", nil, OperationResponse)
+		legacy := legacyCandidate(ids[0], owner, owner, 10, 20, before, after, legacyUsage, nil)
+		batch := ProcessBatch{SourceState: reconcileSourceState(ids[0], owner, owner), Candidates: []UsageCandidate{legacy, explicit}, LogicalSafeOffset: 30}
+		result := reconcileRootForTest(t, run, epoch, []ProcessBatch{batch})[0]
+		if len(result.DeleteEventIDs) != 1 || result.DeleteEventIDs[0] != legacy.EventID {
+			t.Fatalf("same-source adjacent explicit response did not cover a nil-turn legacy window: %+v", result)
+		}
+	})
+
+	t.Run("cross source nil turns do not associate", func(t *testing.T) {
+		owner := "owner"
+		run, epoch, ids := setupReconcileStorage(t, []string{owner, owner})
+		usage := testUsage(t, 3, 0, nil, 0, 0)
+		legacy := legacyCandidate(ids[0], owner, owner, 10, 20, sharedusage.Zero(), usage, usage, nil)
+		explicit := explicitCandidate(ids[1], owner, owner, "unrelated", usage, 100, 110, 200, "model", nil, OperationResponse)
+		batches := []ProcessBatch{
+			{SourceState: reconcileSourceState(ids[0], owner, owner), Candidates: []UsageCandidate{legacy}, LogicalSafeOffset: 20},
+			{SourceState: reconcileSourceState(ids[1], owner, owner), Candidates: []UsageCandidate{explicit}, LogicalSafeOffset: 110},
+		}
+		result := reconcileRootForTest(t, run, epoch, batches)[0]
+		if len(result.DeleteEventIDs) != 0 || len(result.WindowUpserts) != 1 {
+			t.Fatalf("cross-source nil-turn evidence was guessed as related: %+v", result)
+		}
+		window, err := DecodeLegacyReconciliationWindow(result.WindowUpserts[0].StateJSON)
+		if err != nil || len(window.ExplicitResponseIDs) != 0 {
+			t.Fatalf("unproven explicit response entered the legacy window: %+v err=%v", window, err)
+		}
+	})
+
+	t.Run("one response cannot cover two logical windows", func(t *testing.T) {
+		owner, turn := "owner", "turn"
+		run, epoch, ids := setupReconcileStorage(t, []string{owner, owner, owner})
+		usage := testUsage(t, 3, 0, nil, 0, 0)
+		legacyA := legacyCandidate(ids[0], owner, owner, 10, 20, sharedusage.Zero(), usage, usage, &turn)
+		legacyB := legacyCandidate(ids[1], owner, owner, 100, 110, sharedusage.Zero(), usage, usage, &turn)
+		explicit := explicitCandidate(ids[2], owner, owner, "shared", usage, 500, 510, 200, "model", &turn, OperationResponse)
+		batches := []ProcessBatch{
+			{SourceState: reconcileSourceState(ids[0], owner, owner), Candidates: []UsageCandidate{legacyA}, LogicalSafeOffset: 20},
+			{SourceState: reconcileSourceState(ids[1], owner, owner), Candidates: []UsageCandidate{legacyB}, LogicalSafeOffset: 110},
+			{SourceState: reconcileSourceState(ids[2], owner, owner), Candidates: []UsageCandidate{explicit}, LogicalSafeOffset: 510},
+		}
+		result := reconcileRootForTest(t, run, epoch, batches)[0]
+		if result.Fatal == nil || result.Fatal.Code != FatalLegacyCoverage {
+			t.Fatalf("one explicit response was assigned to two logical windows without a fatal conflict: %+v", result)
+		}
+	})
+}
+
+func TestUniqueUsageSubsetsPrunesFullPositiveCoverage(t *testing.T) {
+	usage := testUsage(t, 1, 0, nil, 0, 0)
+	candidates := make([]UsageCandidate, 48)
+	target := sharedusage.Zero()
+	for index := range candidates {
+		candidates[index] = UsageCandidate{Usage: usage}
+		target, _ = target.CheckedAdd(usage)
+	}
+	matching := uniqueUsageSubsets(candidates, target)
+	if len(matching) != 1 || len(matching[0]) != len(candidates) {
+		t.Fatalf("unique full positive set was not found: matches=%d", len(matching))
+	}
+	if multiple := uniqueUsageSubsets([]UsageCandidate{
+		{Usage: testUsage(t, 1, 0, nil, 0, 0)},
+		{Usage: testUsage(t, 2, 0, nil, 0, 0)},
+		{Usage: testUsage(t, 3, 0, nil, 0, 0)},
+	}, testUsage(t, 3, 0, nil, 0, 0)); len(multiple) != 2 {
+		t.Fatalf("ambiguous subset did not stop after exposing a second solution: %d", len(multiple))
+	}
+	cacheWrite := int64(0)
+	unknownCache := testUsage(t, 1, 0, nil, 0, 0)
+	knownCache := testUsage(t, 1, 0, &cacheWrite, 0, 0)
+	if matches := uniqueUsageSubsets([]UsageCandidate{{Usage: unknownCache}}, knownCache); len(matches) != 0 {
+		t.Fatalf("unknown cache-write knownness was treated as a proven match: %+v", matches)
+	}
+}
+
+func readTopAndEmbeddedFixture(t *testing.T) [][]byte {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "tests", "fixtures", "codex", "compaction", "schema_top_and_embedded.jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var lines [][]byte
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, append([]byte(nil), scanner.Bytes()...))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected two fixture records, got %d", len(lines))
+	}
+	return lines
+}
+
+func processFixtureRecord(t *testing.T, sourceFileID int64, owner string, raw []byte, start, end int64) ProcessBatch {
+	t.Helper()
+	state := processorTestState()
+	state.Source.SourceFileID = sourceFileID
+	state.Source.OwningThreadID = owner
+	state.Source.RootSessionID = owner
+	if state.Source.ObservedRawSize < end {
+		state.Source.ObservedRawSize = end
+	}
+	model := "fixture-model"
+	state.Source.ActiveModel = &model
+	state.Source.ActiveModelOffset = int64Pointer(0)
+	record := rollout.Record{SourceFileID: sourceFileID, Generation: 1, LogicalStartOffset: start, LogicalEndOffset: end, JSON: raw}
+	owned := OwnedRecord{
+		Parsed:            ParseRecord(record),
+		Ownership:         rollout.Ownership{Kind: rollout.OwnershipOwning, ThreadID: owner},
+		PhysicalEndOffset: end,
+	}
+	batch, err := ProcessRecords(state, []OwnedRecord{owned}, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return batch
+}
+
+func TestReconcileTopAndEmbeddedCompactionAcrossBatches(t *testing.T) {
+	owner := "01a0adad-044f-74b2-9e99-307a40594f89"
+	run, epoch, ids := setupReconcileStorage(t, []string{owner, owner})
+	lines := readTopAndEmbeddedFixture(t)
+	top := processFixtureRecord(t, ids[0], owner, lines[0], 0, 10)
+	compacted := processFixtureRecord(t, ids[1], owner, lines[1], 100, 110)
+	if len(top.Candidates) != 1 || len(compacted.Compactions) != 1 {
+		t.Fatalf("D processor did not produce the expected fixture evidence: top=%+v compacted=%+v", top, compacted)
+	}
+	staged := reconcileRootForTest(t, run, epoch, []ProcessBatch{top, compacted})
+	if staged[0].Fatal != nil || len(staged[0].Events) != 1 || len(staged[0].Occurrences) != 2 ||
+		staged[0].Events[0].OccurredAtMS != top.Candidates[0].OccurredAtMS ||
+		staged[0].Events[0].Model != top.Candidates[0].Model || staged[0].Facts[0].Operation != OperationCompaction ||
+		len(staged[0].MarkerUpserts) != 1 || staged[0].MarkerUpserts[0].ResolvedEventID == nil ||
+		*staged[0].MarkerUpserts[0].ResolvedEventID != top.Candidates[0].EventID {
+		t.Fatalf("root staging did not retain first binding and upgrade it through embedded compaction: %+v", staged[0])
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		for _, result := range staged {
+			if _, err := Commit(tx, source.UsageTargetActive, result, 50); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	durable := reconcileRootForTest(t, run, epoch, []ProcessBatch{compacted})[0]
+	if durable.Fatal != nil || len(durable.Events) != 1 || durable.Events[0].OccurredAtMS != top.Candidates[0].OccurredAtMS ||
+		durable.Events[0].Model != top.Candidates[0].Model || len(durable.MarkerUpserts) != 1 || durable.MarkerUpserts[0].ResolvedEventID == nil {
+		t.Fatalf("durable duplicate did not preserve first attribution: %+v", durable)
+	}
+	idOnly := compacted
+	idOnly.Candidates = nil
+	idOnly.Compactions = append([]PendingUsageEvidence(nil), compacted.Compactions...)
+	idOnlyCompaction := *idOnly.Compactions[0].Record.Compaction
+	idOnlyCompaction.Latest = nil
+	idOnly.Compactions[0].Record.Compaction = &idOnlyCompaction
+	resolved := reconcileRootForTest(t, run, epoch, []ProcessBatch{idOnly})[0]
+	if resolved.Fatal != nil || len(resolved.MarkerUpserts) != 1 || resolved.MarkerUpserts[0].ResolvedEventID == nil ||
+		*resolved.MarkerUpserts[0].ResolvedEventID != top.Candidates[0].EventID || len(resolved.Facts) != 1 || resolved.Facts[0].Operation != OperationCompaction {
+		t.Fatalf("ID-only compaction did not resolve through the durable canonical binding: %+v", resolved)
+	}
+	conflicting := compacted
+	conflicting.Compactions = append([]PendingUsageEvidence(nil), compacted.Compactions...)
+	badUsage := testUsage(t, 311997, 311040, int64Pointer(0), 4993, 0)
+	conflicting.Compactions[0].Record.Compaction.Latest.Usage = validUsage(badUsage)
+	bad := reconcileRootForTest(t, run, epoch, []ProcessBatch{conflicting})[0]
+	if bad.Fatal == nil || bad.Fatal.Code != FatalCompactionIdentity {
+		t.Fatalf("durable binding with contradictory embedded usage did not fail compaction identity: %+v", bad.Fatal)
+	}
+}
+
+func TestProcessBatchLegacyReplacementCommitsOnlyExplicitCanonicalEvent(t *testing.T) {
+	owner := "owner"
+	run, epoch, ids := setupReconcileStorage(t, []string{owner})
+	state := processorTestState()
+	state.Source.SourceFileID = ids[0]
+	state.Source.OwningThreadID = owner
+	state.Source.RootSessionID = owner
+	state.Source.ObservedRawSize = 2500
+	state.Source.PreviousTotal = usagePointer(testUsage(t, 50, 0, nil, 0, 0))
+	state.Source.PreviousTotalOffset = int64Pointer(900)
+	model := "model"
+	state.Source.ActiveModel = &model
+	state.Source.ActiveModelOffset = int64Pointer(0)
+	legacy := tokenCountRecord(testUsage(t, 80, 0, nil, 0, 0), UsageValue{State: UsageValueMissing}, 1000)
+	legacy.Parsed.StartOffset, legacy.Parsed.EndOffset = 10, 20
+	response := processorRecord(RawResponseUsage, 20, 30, 2000)
+	response.Parsed.TimestampMS = int64Pointer(101)
+	response.Parsed.Response = &ResponseEvidence{
+		ResponseID: "replacement", ThreadID: owner,
+		Usage: validUsage(testUsage(t, 30, 0, nil, 0, 0)),
+	}
+	batch, err := ProcessRecords(state, []OwnedRecord{legacy, response}, 70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Candidates) != 2 || batch.Candidates[0].EvidenceKind != EvidenceLegacy || batch.Candidates[0].EventKind != 1 {
+		t.Fatalf("D processor did not produce recovered legacy and explicit evidence: %+v", batch.Candidates)
+	}
+	result := reconcileRootForTest(t, run, epoch, []ProcessBatch{batch})[0]
+	legacyID := batch.Candidates[0].EventID
+	explicitID := batch.Candidates[1].EventID
+	if result.Fatal != nil || len(result.DeleteEventIDs) != 1 || result.DeleteEventIDs[0] != legacyID ||
+		len(result.Events) != 1 || result.Events[0].EventID != explicitID || len(result.Facts) != 1 || result.Facts[0].EventID != explicitID {
+		t.Fatalf("same-call coverage patch retained a replaced legacy canonical event or fact: %+v", result)
+	}
+	if err := run.Storage().Write(func(tx *source.WriteTx) error {
+		_, err := Commit(tx, source.UsageTargetActive, result, 70)
+		return err
+	}); err != nil {
+		t.Fatalf("same-call explicit replacement failed v14 SQLite commit: %v", err)
+	}
+	if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+		var eventCount, occurrenceCount, factCount int
+		if err := reader.QueryRow(`SELECT count(*) FROM usage_events WHERE source='codex' AND source_epoch=?`, epoch).Scan(&eventCount); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?`, epoch).Scan(&occurrenceCount); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_facts WHERE source='codex' AND ledger_epoch=?`, epoch).Scan(&factCount); err != nil {
+			return err
+		}
+		if eventCount != 1 || occurrenceCount != 1 || factCount != 1 {
+			t.Fatalf("replacement commit persisted wrong canonical/provenance cardinality: events=%d occurrences=%d facts=%d", eventCount, occurrenceCount, factCount)
+		}
+		var onlyEvent, onlyOccurrence, onlyFact string
+		if err := reader.QueryRow(`SELECT event_id FROM usage_events WHERE source='codex' AND source_epoch=?`, epoch).Scan(&onlyEvent); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT event_id FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?`, epoch).Scan(&onlyOccurrence); err != nil {
+			return err
+		}
+		if err := reader.QueryRow(`SELECT event_id FROM codex_usage_event_facts WHERE source='codex' AND ledger_epoch=?`, epoch).Scan(&onlyFact); err != nil {
+			return err
+		}
+		if onlyEvent != explicitID || onlyOccurrence != explicitID || onlyFact != explicitID {
+			t.Fatalf("replacement commit retained the legacy ID: event=%q occurrence=%q fact=%q", onlyEvent, onlyOccurrence, onlyFact)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
