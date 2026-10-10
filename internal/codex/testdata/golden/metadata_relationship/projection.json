@@ -1,0 +1,81 @@
+{
+  "quarantine": [],
+  "skills": [],
+  "threads": [
+    {
+      "agent_role": "main",
+      "archived": false,
+      "created_at_ms": 1791028800000,
+      "metadata_model": "gpt-5.6-luna",
+      "metadata_quality_status": "complete",
+      "native_session_id": "01a101a2-aa00-7001-8000-000000000001",
+      "parent_thread_id": null,
+      "project_kind": "project",
+      "project_name": "metadata-root",
+      "project_path": "/fixture/metadata-root",
+      "root_session_id": "01a101a2-aa00-7001-8000-000000000001",
+      "source": "codex",
+      "thread_id": "01a101a2-aa00-7001-8000-000000000001",
+      "title": "Metadata Root",
+      "updated_at_ms": 1791028801000
+    },
+    {
+      "agent_role": "subagent",
+      "archived": false,
+      "created_at_ms": 1791028803000,
+      "metadata_model": "gpt-5.6-luna",
+      "metadata_quality_status": "complete",
+      "native_session_id": "01a101a2-b5b8-7002-8000-000000000002",
+      "parent_thread_id": "01a101a2-aa00-7001-8000-000000000001",
+      "project_kind": "project",
+      "project_name": "metadata-child",
+      "project_path": "/fixture/metadata-child",
+      "root_session_id": "01a101a2-aa00-7001-8000-000000000001",
+      "source": "codex",
+      "thread_id": "01a101a2-b5b8-7002-8000-000000000002",
+      "title": "Metadata Child",
+      "updated_at_ms": 1791028804000
+    }
+  ],
+  "usage_events": [
+    {
+      "cache_write_tokens": 2,
+      "cached_tokens": 5,
+      "estimated_cost_nanos_usd": null,
+      "event_id": "41687203e5e3e9f64b56cf3ca0e0d3f98e7377e01d03075237a4fe137476da96",
+      "event_kind": "normal",
+      "input_tokens": 21,
+      "model": "gpt-5.6-luna",
+      "occurred_at_ms": 1791028810000,
+      "output_tokens": 7,
+      "reasoning_effort": "max",
+      "reasoning_tokens": 3,
+      "root_session_id": "01a101a2-aa00-7001-8000-000000000001",
+      "thread_id": "01a101a2-b5b8-7002-8000-000000000002",
+      "total_tokens": 28,
+      "turn_key": "01a101a2-c940-7004-8000-000000000004"
+    },
+    {
+      "cache_write_tokens": 1,
+      "cached_tokens": 2,
+      "estimated_cost_nanos_usd": null,
+      "event_id": "80d2eda9af537dc56a1daaecb52ae28cfca08ef5c53fd597f43e8c9d84939bd8",
+      "event_kind": "normal",
+      "input_tokens": 13,
+      "model": "gpt-5.6-luna",
+      "occurred_at_ms": 1791028807000,
+      "output_tokens": 4,
+      "reasoning_effort": "max",
+      "reasoning_tokens": 1,
+      "root_session_id": "01a101a2-aa00-7001-8000-000000000001",
+      "thread_id": "01a101a2-aa00-7001-8000-000000000001",
+      "total_tokens": 17,
+      "turn_key": "01a101a2-bd88-7003-8000-000000000003"
+    }
+  ],
+  "visible_compaction": {
+    "events": [],
+    "ready": true,
+    "unknown_scopes": []
+  }
+}
