@@ -55,6 +55,82 @@ func TestConfigResolveDefaultFallsBackToUserHome(t *testing.T) {
 	}
 }
 
+func TestConfigMacOSVarAliasNormalizationFingerprintAndContainment(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("requires the macOS /var alias")
+	}
+	canonicalVar, err := filepath.EvalSymlinks("/var")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalVar != "/private/var" {
+		t.Fatalf("canonical /var = %q, want /private/var", canonicalVar)
+	}
+	privateHome, err := os.MkdirTemp("/private/var/tmp", "usagi-config-var-alias-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(privateHome); err != nil {
+			t.Error(err)
+		}
+	})
+	relative, err := filepath.Rel("/private/var", privateHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasHome := filepath.Join("/var", relative)
+	resolvedAlias, err := filepath.EvalSymlinks(aliasHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedAlias != privateHome {
+		t.Fatalf("canonical alias Home = %q, want %q", resolvedAlias, privateHome)
+	}
+	inside := filepath.Join(privateHome, "inside")
+	if err := os.Mkdir(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inside, "metadata.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		stateIndexFilename:  filepath.Join(inside, "metadata.json"),
+		globalStateFilename: filepath.Join(aliasHome, "inside", "metadata.json"),
+		"metadata-link":     filepath.Join(aliasHome, "inside"),
+	} {
+		if err := os.Symlink(target, filepath.Join(privateHome, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, home := range []string{aliasHome, privateHome} {
+		t.Run(home, func(t *testing.T) {
+			config, err := ResolveConfigFromHome(home + "/./")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Fingerprints use normalized Home spelling; containment uses canonical roots.
+			fingerprint := sha256.Sum256([]byte(home))
+			if config.Home != home || config.HomeFingerprint != hex.EncodeToString(fingerprint[:]) {
+				t.Fatalf("Home/fingerprint = %q/%q", config.Home, config.HomeFingerprint)
+			}
+			if config.Metadata.StateIndex != filepath.Join(home, stateIndexFilename) ||
+				config.Metadata.SessionIndex != filepath.Join(home, sessionIndexFilename) ||
+				config.Metadata.GlobalState != filepath.Join(home, globalStateFilename) {
+				t.Fatalf("Metadata paths = %+v", config.Metadata)
+			}
+			for _, path := range []string{
+				config.Metadata.StateIndex, config.Metadata.SessionIndex, config.Metadata.GlobalState,
+				filepath.Join(home, "metadata-link", "missing.sqlite"),
+			} {
+				if !metadataPathWithinHome(path, home) {
+					t.Fatalf("metadata path %q was rejected within Home %q", path, home)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigResolveFromHomeRejectsExternalSymlinkAndMissingChild(t *testing.T) {
 	home := t.TempDir()
 	external := t.TempDir()
