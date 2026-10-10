@@ -269,11 +269,91 @@ func TestMetadataMissingParentKeepsExistingRelationshipAsUnknown(t *testing.T) {
 		RolloutFacts: []MetadataEvidence{fact}, Sources: []rollout.SourceObservation{metadataObservation(11, child, rollout.AreaSessions)},
 		Existing: []domain.Thread{existingMetadataSubagent(child, "old-parent", "old-root")}, ResolvedAtMS: 110})
 	patch := metadataPatchByID(t, result, child)
-	if got, ok := patch.AgentRole.Value(); !ok || got != "unknown" || patch.ParentThreadID.Kind() != domain.PatchKeep || patch.RootSessionID.Kind() != domain.PatchKeep || patch.MetadataQualityStatus != "partial" {
-		t.Fatalf("missing parent must preserve canonical relation while marking role unknown: %#v", patch)
+	assertRelationshipKept(t, patch)
+	if patch.MetadataQualityStatus != "partial" {
+		t.Fatalf("missing parent must mark unresolved current relationship partial: %#v", patch)
 	}
 	if !hasMetadataDiagnostic(result, "root_unresolved", child, "root_session_id") || !containsString(result.AffectedThreadIDs, child) {
 		t.Fatalf("unresolved current root must be exposed to Phase4: diagnostics=%#v affected=%v", result.Diagnostics, result.AffectedThreadIDs)
+	}
+}
+
+func TestMetadataCommitUnresolvedRelationshipPreservesHistoricalTuple(t *testing.T) {
+	for _, scenario := range []string{"missing parent", "cycle", "missing ancestor"} {
+		for _, existingRole := range []string{"main", "subagent", "new"} {
+			t.Run(scenario+"/"+existingRole, func(t *testing.T) {
+				env := newMetadataTestEnvironment(t)
+				var threadSchema string
+				if err := env.source.PrivateRead(func(reader storage.PrivateReader) error {
+					return reader.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='threads'").Scan(&threadSchema)
+				}); err != nil || !strings.Contains(threadSchema, "agent_role = 'unknown' AND root_session_id IS NULL") {
+					t.Fatalf("real SQLite must retain the v14 unknown-role CHECK: err=%v schema=%s", err, threadSchema)
+				}
+				const child = "child"
+				switch existingRole {
+				case "main":
+					seedMetadataThread(t, env.source, metadataMainPatch(t, child, 1))
+				case "subagent":
+					seedMetadataThread(t, env.source, metadataMainPatch(t, "historical-root", 1))
+					seedMetadataThread(t, env.source, metadataSubagentPatch(t, child, "historical-root", "historical-root", 1))
+				}
+				old, hasOld, err := env.db.GetThreadByID(context.Background(), child)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stateFacts := []StateThreadFact{{ThreadID: child}}
+				edges := []SpawnEdgeFact{{ParentThreadID: "missing-parent", ChildThreadID: child, Source: SpawnEdgeFromState}}
+				facts := []MetadataEvidence{completeMetadataEvidence(child, 11)}
+				sources := []rollout.SourceObservation{metadataObservation(11, child, rollout.AreaSessions)}
+				if scenario != "missing parent" {
+					stateFacts = append(stateFacts, StateThreadFact{ThreadID: "parent"})
+					facts = append(facts, completeMetadataEvidence("parent", 12))
+					sources = append(sources, metadataObservation(12, "parent", rollout.AreaSessions))
+					ancestor := "missing-parent"
+					if scenario == "cycle" {
+						ancestor = child
+					}
+					edges = []SpawnEdgeFact{
+						{ParentThreadID: "parent", ChildThreadID: child, Source: SpawnEdgeFromState},
+						{ParentThreadID: ancestor, ChildThreadID: "parent", Source: SpawnEdgeFromState},
+					}
+				}
+				input := MetadataResolveInput{
+					State: completeStateSnapshotWithEdges(stateFacts, edges), Session: completeSessionSnapshot(),
+					Global: GlobalStateSnapshot{Status: GlobalStateUnreadable}, RolloutFacts: facts, Sources: sources, ResolvedAtMS: 20,
+				}
+				if hasOld {
+					input.Existing = []domain.Thread{old}
+				}
+				result := ResolveThreadView(input)
+				patch := metadataPatchByID(t, result, child)
+				if !hasMetadataDiagnostic(result, "root_unresolved", child, "root_session_id") || !containsString(result.AffectedThreadIDs, child) {
+					t.Fatalf("unresolved current root must remain exposed: %#v", result)
+				}
+				outcome, err := CommitMetadata(env.source, MetadataCommitBatch{Threads: []MetadataThreadCommit{{Patch: &patch}}},
+					MetadataCommitDeps{ProjectActiveCompaction: func(*source.WriteTx) ([]byte, error) { return nil, nil }}, 20)
+				if err != nil || outcome.CommittedThreads != 1 {
+					t.Fatalf("unresolved metadata commit: outcome=%#v err=%v", outcome, err)
+				}
+				if hasOld {
+					assertRelationshipKept(t, patch)
+				}
+				stored, found, err := env.db.GetThreadByID(context.Background(), child)
+				if err != nil || !found {
+					t.Fatalf("committed thread missing: found=%v err=%v", found, err)
+				}
+				if hasOld {
+					if stored.AgentRole != old.AgentRole || !sameOptionalString(stored.ParentThreadID, old.ParentThreadID) || !sameOptionalString(stored.RootSessionID, old.RootSessionID) {
+						t.Fatalf("historical relationship tuple changed: old=%#v stored=%#v", old, stored)
+					}
+				} else if stored.AgentRole != "unknown" || stored.RootSessionID != nil {
+					t.Fatalf("new unresolved thread must remain unknown with NULL root: %#v", stored)
+				}
+				if stored.MetadataQualityStatus != patch.MetadataQualityStatus || stored.MetadataResolvedAtMS != 20 {
+					t.Fatalf("metadata update was not persisted: %#v", stored)
+				}
+			})
+		}
 	}
 }
 
