@@ -489,6 +489,9 @@ func ReconcileRoot(reader storage.PrivateReader, epoch int64, batches []ProcessB
 		rootPatch.HoldDeletes = append(rootPatch.HoldDeletes, local.HoldDeletes...)
 		rootPatch.TurnUpserts = append(rootPatch.TurnUpserts, local.TurnUpserts...)
 		results[index].SourceState = local.SourceState
+		if index == 0 {
+			rootPatch.SourceState = local.SourceState
+		}
 	}
 	rootPatch.DeleteEventIDs = sortedUniqueStrings(rootPatch.DeleteEventIDs)
 	deleted := stringSet(rootPatch.DeleteEventIDs)
@@ -1217,15 +1220,28 @@ func reconcileLegacyWindows(
 	assignments map[ResponseKey]PrivateRowKey,
 	result *ReconcileResult,
 ) error {
+	carry, err := LoadReconciliationCarry(batch.SourceState.ReconciliationStateJSON)
+	if err != nil {
+		return err
+	}
 	byStart := make(map[int64]int, len(windows))
 	for index := range windows {
 		byStart[windows[index].Key.StartOffset] = index
 	}
 	for _, candidate := range candidatesForSource(candidates, batch.SourceState) {
+		if carry.OpenWindowStartOffset == nil {
+			start := uint64(candidate.StartOffset)
+			carry.OpenWindowStartOffset = &start
+		}
 		if candidate.EvidenceKind != EvidenceLegacy {
 			continue
 		}
-		index, found := byStart[candidate.StartOffset]
+		start := int64(*carry.OpenWindowStartOffset)
+		if start > candidate.StartOffset {
+			setFatalAt(result, FatalLegacyCoverage, batch.SourceState, candidate.StartOffset)
+			return nil
+		}
+		index, found := byStart[start]
 		if !found {
 			current := UsageValue{State: UsageValueMissing}
 			if candidate.CurrentTotal != nil {
@@ -1242,13 +1258,13 @@ func reconcileLegacyWindows(
 				state.PreviousTotal = UsageValue{State: UsageValueValid, Value: *cloneUsage(candidate.PreviousTotal)}
 			}
 			created := durableWindow{
-				Key: PrivateRowKey{SourceFileID: candidate.SourceFileID, Generation: candidate.Generation, StartOffset: candidate.StartOffset},
+				Key: PrivateRowKey{SourceFileID: candidate.SourceFileID, Generation: candidate.Generation, StartOffset: start},
 				End: candidate.EndOffset, Owner: candidate.OwningThreadID, Root: candidate.RootSessionID,
 				TurnKey: cloneString(candidate.TurnKey), State: state,
 			}
 			windows = append(windows, created)
 			index = len(windows) - 1
-			byStart[candidate.StartOffset] = index
+			byStart[start] = index
 		} else if windows[index].End != candidate.EndOffset || windows[index].Owner != candidate.OwningThreadID ||
 			!equalStringPointer(windows[index].TurnKey, candidate.TurnKey) ||
 			!sameUsageValue(windows[index].State.LastUsage, candidateLastUsage(candidate)) {
@@ -1258,6 +1274,19 @@ func reconcileLegacyWindows(
 		if !containsString(windows[index].State.ProposalEventIDs, candidate.EventID) {
 			windows[index].State.ProposalEventIDs = append(windows[index].State.ProposalEventIDs, candidate.EventID)
 		}
+		next := uint64(candidate.EndOffset)
+		carry.OpenWindowStartOffset = &next
+	}
+	if err := SetReconciliationCarry(&result.SourceState, carry); err != nil {
+		return err
+	}
+	candidates = append([]UsageCandidate(nil), candidates...)
+	for _, window := range windows {
+		durableCandidates, err := loadWindowExplicitCandidates(reader, epoch, window, bindings)
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, durableCandidates...)
 	}
 	sort.Slice(windows, func(i, j int) bool { return windows[i].Key.StartOffset < windows[j].Key.StartOffset })
 	for index := range windows {
@@ -1270,20 +1299,32 @@ func reconcileLegacyWindows(
 			if candidate.EvidenceKind != EvidenceExplicit || candidate.OwningThreadID != window.Owner || candidate.RootSessionID != batch.SourceState.RootSessionID {
 				continue
 			}
-			sameSource := candidate.SourceFileID == window.Key.SourceFileID && candidate.Generation == window.Key.Generation
-			turnsConflict := window.TurnKey != nil && candidate.TurnKey != nil && *window.TurnKey != *candidate.TurnKey
-			turnMatches := window.TurnKey != nil && candidate.TurnKey != nil && *window.TurnKey == *candidate.TurnKey
-			if !sameSource {
-				if !turnMatches {
-					continue
-				}
-			} else if turnsConflict || (candidate.EndOffset != window.Key.StartOffset && candidate.StartOffset != window.End) {
+			if !candidateBelongsToWindow(candidate, *window, batch.SourceState.RootSessionID) {
 				continue
 			}
 			if candidate.Response == nil {
 				continue
 			}
+			if candidate.SourceFileID == window.Key.SourceFileID && candidate.Generation == window.Key.Generation && candidate.StartOffset == window.End {
+				continue
+			}
 			window.State.ExplicitResponseIDs = append(window.State.ExplicitResponseIDs, candidate.Response.ResponseID)
+		}
+		window.State.ExplicitResponseIDs = sortedUniqueStrings(window.State.ExplicitResponseIDs)
+		for _, candidate := range candidates {
+			if candidate.EvidenceKind != EvidenceExplicit || candidate.Response == nil || candidate.OwningThreadID != window.Owner ||
+				candidate.SourceFileID != window.Key.SourceFileID || candidate.Generation != window.Key.Generation ||
+				candidate.StartOffset != window.End || !candidateBelongsToWindow(candidate, *window, batch.SourceState.RootSessionID) ||
+				containsString(window.State.ExplicitResponseIDs, candidate.Response.ResponseID) {
+				continue
+			}
+			newCall, err := afterBoundaryIsNewCall(reader, epoch, window, candidate, candidates, bindings, modern, result)
+			if err != nil {
+				return err
+			}
+			if !newCall {
+				window.State.ExplicitResponseIDs = append(window.State.ExplicitResponseIDs, candidate.Response.ResponseID)
+			}
 		}
 		window.State.ExplicitResponseIDs = sortedUniqueStrings(window.State.ExplicitResponseIDs)
 		window.State.LegacyCoveredResponseIDs = sortedUniqueStrings(window.State.LegacyCoveredResponseIDs)
@@ -1300,6 +1341,142 @@ func candidateLastUsage(candidate UsageCandidate) UsageValue {
 		return UsageValue{State: UsageValueMissing}
 	}
 	return UsageValue{State: UsageValueValid, Value: candidate.Usage}
+}
+
+func loadWindowExplicitCandidates(reader storage.PrivateReader, epoch int64, window durableWindow, bindings map[ResponseKey]durableBinding) ([]UsageCandidate, error) {
+	rows, err := reader.Query(`SELECT f.event_id,f.response_id,o.source_start_offset,o.source_end_offset
+		FROM codex_usage_event_occurrences o JOIN codex_usage_event_facts f
+		  ON f.source=o.source AND f.ledger_epoch=o.ledger_epoch AND f.event_id=o.event_id
+		JOIN usage_events e ON e.source=f.source AND e.source_epoch=f.ledger_epoch AND e.event_id=f.event_id
+		WHERE o.source='codex' AND o.ledger_epoch=? AND o.source_file_id=? AND o.file_generation=?
+		  AND o.source_start_offset>=? AND o.source_start_offset<=? AND f.evidence_kind='explicit'
+		  AND f.owning_thread_id=? AND e.root_session_id=? ORDER BY o.source_start_offset,f.event_id`,
+		epoch, window.Key.SourceFileID, window.Key.Generation, window.Key.StartOffset, window.End, window.Owner, window.Root)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []UsageCandidate
+	for rows.Next() {
+		candidate := UsageCandidate{SourceFileID: window.Key.SourceFileID, Generation: window.Key.Generation,
+			EvidenceKind: EvidenceExplicit, Response: &ResponseEvidence{}}
+		if err := rows.Scan(&candidate.EventID, &candidate.Response.ResponseID, &candidate.StartOffset, &candidate.EndOffset); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range candidates {
+		candidate := &candidates[index]
+		key := ResponseKey{OwningThreadID: window.Owner, ResponseID: candidate.Response.ResponseID}
+		binding, found := bindings[key]
+		if !found {
+			binding, found, err = loadDurableFactByEventID(reader, epoch, candidate.EventID)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				return nil, ErrInvalidLegacyReconciliationWindow
+			}
+			bindings[key] = binding
+		}
+		if binding.Event.EventID != candidate.EventID || binding.Event.ThreadID != window.Owner || binding.Event.RootSessionID != window.Root {
+			return nil, ErrInvalidLegacyReconciliationWindow
+		}
+		candidate.Operation = binding.Fact.Operation
+		candidate.OwningThreadID = binding.Event.ThreadID
+		candidate.RootSessionID = binding.Event.RootSessionID
+		candidate.OccurredAtMS = binding.Event.OccurredAtMS
+		candidate.TurnKey = cloneString(binding.Event.TurnKey)
+		candidate.Model = binding.Event.Model
+		candidate.ReasoningEffort = cloneString(binding.Event.ReasoningEffort)
+		candidate.Usage = binding.Event.Usage
+		candidate.Response.ThreadID = window.Owner
+		candidate.Response.Usage = UsageValue{State: UsageValueValid, Value: binding.Event.Usage}
+	}
+	return candidates, nil
+}
+
+func explicitForLegacyWindow(window durableWindow, candidates []UsageCandidate, bindings map[ResponseKey]durableBinding) []UsageCandidate {
+	var explicit []UsageCandidate
+	for _, responseID := range sortedUniqueStrings(window.State.ExplicitResponseIDs) {
+		key := ResponseKey{OwningThreadID: window.Owner, ResponseID: responseID}
+		found := false
+		for _, candidate := range candidates {
+			if candidate.EvidenceKind == EvidenceExplicit && candidate.Response != nil && candidate.OwningThreadID == window.Owner &&
+				candidate.Response.ResponseID == responseID && candidateBelongsToWindow(candidate, window, window.Root) {
+				explicit = append(explicit, candidate)
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		if binding, exists := bindings[key]; exists && binding.Event.RootSessionID == window.Root && equalStringPointer(binding.Event.TurnKey, window.TurnKey) {
+			explicit = append(explicit, UsageCandidate{
+				EventID: binding.Event.EventID, EvidenceKind: EvidenceExplicit, Operation: binding.Fact.Operation,
+				OwningThreadID: binding.Event.ThreadID, RootSessionID: binding.Event.RootSessionID,
+				TurnKey: cloneString(binding.Event.TurnKey), Model: binding.Event.Model,
+				ReasoningEffort: cloneString(binding.Event.ReasoningEffort), Usage: binding.Event.Usage,
+				Response: &ResponseEvidence{ResponseID: responseID, ThreadID: binding.Event.ThreadID,
+					Usage: UsageValue{State: UsageValueValid, Value: binding.Event.Usage}},
+			})
+		}
+	}
+	return explicit
+}
+
+func afterBoundaryIsNewCall(reader storage.PrivateReader, epoch int64, window *durableWindow, candidate UsageCandidate,
+	candidates []UsageCandidate, bindings map[ResponseKey]durableBinding, modern modernWindowRelation, result *ReconcileResult) (bool, error) {
+	delta := legacyWindowReconciliationDelta(window, modern)
+	if delta == nil {
+		return false, nil
+	}
+	if len(uniqueUsageSubsets(explicitForLegacyWindow(*window, candidates, bindings), *delta)) == 1 {
+		return true, nil
+	}
+	if window.State.LastUsage.State != UsageValueValid || usageCoverageEqual(*delta, window.State.LastUsage.Value) != 1 ||
+		usageCoverageEqual(candidate.Usage, window.State.LastUsage.Value) != -1 || len(window.State.ProposalEventIDs) != 1 {
+		return false, nil
+	}
+	proposalID := window.State.ProposalEventIDs[0]
+	occurrences, err := legacyProposalOccurrences(reader, epoch, proposalID, result)
+	if err != nil {
+		return false, err
+	}
+	if len(occurrences) != 1 || occurrences[0].SourceFileID != window.Key.SourceFileID || occurrences[0].Generation != window.Key.Generation ||
+		occurrences[0].StartOffset < window.Key.StartOffset || occurrences[0].EndOffset != window.End {
+		return false, nil
+	}
+	for _, proposal := range candidates {
+		if proposal.EventID == proposalID && proposal.EvidenceKind == EvidenceLegacy {
+			return usageCoverageEqual(proposal.Usage, window.State.LastUsage.Value) == 1, nil
+		}
+	}
+	binding, found, err := loadDurableFactByEventID(reader, epoch, proposalID)
+	if err != nil || !found {
+		return false, err
+	}
+	return binding.Fact.EvidenceKind == EvidenceLegacy && usageCoverageEqual(binding.Event.Usage, window.State.LastUsage.Value) == 1, nil
+}
+
+func legacyWindowReconciliationDelta(window *durableWindow, modern modernWindowRelation) *sharedusage.NormalizedTokenUsage {
+	if total, applies, known := modern.currentForWindow(window); applies {
+		if !known {
+			return nil
+		}
+		projected := window.State
+		projected.CurrentTotal = UsageValue{State: UsageValueValid, Value: total}
+		return legacyWindowDelta(projected)
+	}
+	return legacyWindowDelta(window.State)
 }
 
 func reconcileOneLegacyWindow(
@@ -1319,49 +1496,32 @@ func reconcileOneLegacyWindow(
 		}
 		return nil
 	}
-	delta := legacyWindowDelta(window.State)
-	if total, applies, known := modern.currentForWindow(window); applies {
-		if !known {
-			delta = nil
-		} else {
-			projectedWindow := window.State
-			projectedWindow.CurrentTotal = UsageValue{State: UsageValueValid, Value: total}
-			delta = legacyWindowDelta(projectedWindow)
-		}
-	}
-	responseIDs := append([]string(nil), window.State.ExplicitResponseIDs...)
-	responseIDs = sortedUniqueStrings(responseIDs)
-	var explicit []UsageCandidate
-	for _, responseID := range responseIDs {
-		key := ResponseKey{OwningThreadID: window.Owner, ResponseID: responseID}
-		if candidate, found := candidateForResponse(candidates, key); found {
-			if candidateBelongsToWindow(candidate, *window, result.SourceState.RootSessionID) {
-				explicit = append(explicit, candidate)
-			}
-			continue
-		}
-		if binding, found := bindings[key]; found {
-			candidate := UsageCandidate{
-				EventID: binding.Event.EventID, EvidenceKind: EvidenceExplicit, Operation: binding.Fact.Operation,
-				OwningThreadID: binding.Event.ThreadID, RootSessionID: binding.Event.RootSessionID,
-				TurnKey: cloneString(binding.Event.TurnKey), Model: binding.Event.Model,
-				ReasoningEffort: cloneString(binding.Event.ReasoningEffort), Usage: binding.Event.Usage,
-				Response: &ResponseEvidence{ResponseID: responseID, ThreadID: binding.Event.ThreadID,
-					Usage: UsageValue{State: UsageValueValid, Value: binding.Event.Usage}},
-			}
-			if candidate.RootSessionID == result.SourceState.RootSessionID && equalStringPointer(candidate.TurnKey, window.TurnKey) {
-				explicit = append(explicit, candidate)
-			}
-		}
-	}
+	delta := legacyWindowReconciliationDelta(window, modern)
+	explicit := explicitForLegacyWindow(*window, candidates, bindings)
 	covered := make(map[string]struct{})
 	for _, id := range window.State.LegacyCoveredResponseIDs {
 		covered[id] = struct{}{}
 	}
 	var legacyLastMatches []string
 	if window.State.LastUsage.State == UsageValueValid {
+		var legacyOccurrences []OccurrenceWrite
+		for _, proposalID := range proposalIDs {
+			occurrences, err := legacyProposalOccurrences(reader, epoch, proposalID, result)
+			if err != nil {
+				return err
+			}
+			legacyOccurrences = append(legacyOccurrences, occurrences...)
+		}
 		for _, candidate := range explicit {
-			if candidate.Operation == OperationResponse && usageCoverageEqual(candidate.Usage, window.State.LastUsage.Value) == 1 {
+			adjacent := false
+			for _, occurrence := range legacyOccurrences {
+				if candidate.SourceFileID == occurrence.SourceFileID && candidate.Generation == occurrence.Generation &&
+					(candidate.EndOffset == occurrence.StartOffset || candidate.StartOffset == occurrence.EndOffset) {
+					adjacent = true
+					break
+				}
+			}
+			if adjacent && candidate.Operation == OperationResponse && usageCoverageEqual(candidate.Usage, window.State.LastUsage.Value) == 1 {
 				legacyLastMatches = append(legacyLastMatches, candidate.Response.ResponseID)
 			}
 		}
@@ -1448,11 +1608,14 @@ func reconcileOneLegacyWindow(
 			window.State.LegacyCoveredResponseIDs = mapKeys(covered)
 			window.State.ProposalEventIDs = []string{}
 			if len(proposalIDs) == 1 && len(coveredExplicit) == 1 {
-				result.Occurrences = append(result.Occurrences, OccurrenceWrite{
-					SourceFileID: window.Key.SourceFileID, Generation: window.Key.Generation,
-					StartOffset: window.Key.StartOffset, EndOffset: window.End,
-					EventID: coveredExplicit[0].EventID,
-				})
+				occurrences, err := legacyProposalOccurrences(reader, epoch, proposalIDs[0], result)
+				if err != nil {
+					return err
+				}
+				for _, occurrence := range occurrences {
+					occurrence.EventID = coveredExplicit[0].EventID
+					result.Occurrences = append(result.Occurrences, occurrence)
+				}
 			}
 		}
 	}
@@ -1531,9 +1694,17 @@ func replaceLegacyResidual(
 		!equalStringPointer(binding.Event.TurnKey, window.TurnKey) || usageCoverageEqual(binding.Event.Usage, delta) != 1 {
 		return false, nil
 	}
-	uniqueOccurrence, err := hasUniqueLegacyProposalOccurrence(reader, epoch, window, proposalID, candidates, result)
-	if err != nil || !uniqueOccurrence {
+	occurrences, err := legacyProposalOccurrences(reader, epoch, proposalID, result)
+	if err != nil {
 		return false, err
+	}
+	if len(occurrences) != 1 {
+		return false, nil
+	}
+	occurrence := occurrences[0]
+	if occurrence.SourceFileID != window.Key.SourceFileID || occurrence.Generation != window.Key.Generation ||
+		occurrence.StartOffset < window.Key.StartOffset || occurrence.EndOffset != window.End {
+		return false, nil
 	}
 	previous := window.State.PreviousTotal.Value
 	current := window.State.CurrentTotal.Value
@@ -1556,64 +1727,41 @@ func replaceLegacyResidual(
 		result.Events = append(result.Events, event)
 		result.Facts = append(result.Facts, fact)
 	}
-	result.Occurrences = append(result.Occurrences, OccurrenceWrite{
-		SourceFileID: window.Key.SourceFileID, Generation: window.Key.Generation,
-		StartOffset: window.Key.StartOffset, EndOffset: window.End, EventID: residualID,
-	})
+	occurrence.EventID = residualID
+	result.Occurrences = append(result.Occurrences, occurrence)
 	window.State.ProposalEventIDs = []string{residualID}
 	return true, nil
 }
 
-func hasUniqueLegacyProposalOccurrence(
+func legacyProposalOccurrences(
 	reader storage.PrivateReader,
 	epoch int64,
-	window *durableWindow,
 	proposalID string,
-	candidates []UsageCandidate,
 	result *ReconcileResult,
-) (bool, error) {
-	current := false
-	for _, candidate := range candidates {
-		if candidate.EventID == proposalID {
-			current = true
-			break
-		}
-	}
-	if current {
-		count := 0
-		for _, occurrence := range result.Occurrences {
-			if occurrence.EventID != proposalID {
-				continue
-			}
-			count++
-			if occurrence.SourceFileID != window.Key.SourceFileID || occurrence.Generation != window.Key.Generation ||
-				occurrence.StartOffset != window.Key.StartOffset || occurrence.EndOffset != window.End {
-				return false, nil
-			}
-		}
-		return count == 1, nil
-	}
+) ([]OccurrenceWrite, error) {
 	rows, err := reader.Query(`SELECT source_file_id,file_generation,source_start_offset,source_end_offset
 		FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=? AND event_id=?`, epoch, proposalID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer rows.Close()
-	count := 0
-	match := false
+	var occurrences []OccurrenceWrite
 	for rows.Next() {
-		var sourceFileID, generation, start, end int64
-		if err := rows.Scan(&sourceFileID, &generation, &start, &end); err != nil {
-			return false, err
+		occurrence := OccurrenceWrite{EventID: proposalID}
+		if err := rows.Scan(&occurrence.SourceFileID, &occurrence.Generation, &occurrence.StartOffset, &occurrence.EndOffset); err != nil {
+			return nil, err
 		}
-		count++
-		match = sourceFileID == window.Key.SourceFileID && generation == window.Key.Generation &&
-			start == window.Key.StartOffset && end == window.End
+		occurrences = append(occurrences, occurrence)
 	}
 	if err := rows.Err(); err != nil {
-		return false, err
+		return nil, err
 	}
-	return count == 1 && match, nil
+	for _, occurrence := range result.Occurrences {
+		if occurrence.EventID == proposalID {
+			occurrences = append(occurrences, occurrence)
+		}
+	}
+	return dedupeOccurrenceWrites(occurrences), nil
 }
 
 func candidateBelongsToWindow(candidate UsageCandidate, window durableWindow, rootID string) bool {
@@ -1625,7 +1773,7 @@ func candidateBelongsToWindow(candidate UsageCandidate, window durableWindow, ro
 		if candidate.TurnKey != nil && window.TurnKey != nil && *candidate.TurnKey != *window.TurnKey {
 			return false
 		}
-		return candidate.EndOffset == window.Key.StartOffset || candidate.StartOffset == window.End
+		return candidate.StartOffset >= window.Key.StartOffset && candidate.EndOffset <= window.End || candidate.StartOffset == window.End
 	}
 	return candidate.TurnKey != nil && window.TurnKey != nil && *candidate.TurnKey == *window.TurnKey
 }

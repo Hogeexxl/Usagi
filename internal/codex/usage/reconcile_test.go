@@ -685,3 +685,238 @@ func TestRecoveredDeltaResidualReconcilesClosedTurnAcrossBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProcessBatchLogicalWindowCollectsExplicitSet(t *testing.T) {
+	for _, name := range []string{"same call", "durable explicit prefix", "after boundary new call", "nonadjacent last requires set coverage", "multiple exact sets"} {
+		t.Run(name, func(t *testing.T) {
+			owner := "owner"
+			run, epoch, ids := setupReconcileStorage(t, []string{owner})
+			state := processorTestState()
+			state.Source.SourceFileID = ids[0]
+			state.Source.PreviousTotal = usagePointer(testUsage(t, 0, 0, nil, 0, 0))
+			state.Source.PreviousTotalOffset = int64Pointer(900)
+			state.Source.ObservedRawSize = 2000
+			state.Source.ActiveModel = stringPointer("model")
+			state.Source.ActiveModelOffset = int64Pointer(0)
+			state.Carry.OpenWindowStartOffset = uint64Pointer(0)
+			response := func(id string, amount, start int64) OwnedRecord {
+				record := processorRecord(RawResponseUsage, start, start+10, 1000+start+10)
+				record.Parsed.TimestampMS = int64Pointer(100 + start)
+				record.Parsed.Response = &ResponseEvidence{ResponseID: id, ThreadID: owner,
+					Usage: validUsage(testUsage(t, amount, 0, nil, 0, 0))}
+				return record
+			}
+			records := []OwnedRecord{response("forty", 40, 0), response("sixty", 60, 10)}
+			tokenStart := int64(20)
+			if name == "multiple exact sets" {
+				records = append(records, response("hundred", 100, 20))
+				tokenStart = 30
+			}
+			legacy := tokenCountRecord(testUsage(t, 100, 0, nil, 0, 0), UsageValue{State: UsageValueMissing}, 1000+tokenStart+10)
+			legacy.Parsed.StartOffset, legacy.Parsed.EndOffset = tokenStart, tokenStart+10
+			if name == "nonadjacent last requires set coverage" {
+				legacy.Parsed.Last = validUsage(testUsage(t, 40, 0, nil, 0, 0))
+			}
+			if name == "durable explicit prefix" {
+				prefix, err := ProcessRecords(state, records, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prefixResult := reconcileRootForTest(t, run, epoch, []ProcessBatch{prefix})[0]
+				if err := run.Storage().Write(func(tx *source.WriteTx) error {
+					_, err := Commit(tx, source.UsageTargetActive, prefixResult, 100)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				state, err = CounterStateFromSourceState(prefixResult.SourceState)
+				if err != nil {
+					t.Fatal(err)
+				}
+				records = nil
+			}
+			records = append(records, legacy)
+			if name == "after boundary new call" {
+				records = append(records, response("next-call", 100, 30))
+			}
+			batch, err := ProcessRecords(state, records, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := reconcileRootForTest(t, run, epoch, []ProcessBatch{batch})[0]
+			if name == "multiple exact sets" {
+				if result.Fatal == nil || result.Fatal.Code != FatalLegacyCoverage {
+					t.Fatalf("logical window accepted two exact explicit sets: %+v", result)
+				}
+				return
+			}
+			if result.Fatal != nil {
+				t.Fatalf("known logical window did not reconcile its explicit set: %+v", result.Fatal)
+			}
+			if err := run.Storage().Write(func(tx *source.WriteTx) error {
+				_, err := Commit(tx, source.UsageTargetActive, result, 200)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+				var total, count, legacyCount int64
+				if err := reader.QueryRow(`SELECT coalesce(sum(input_tokens),0),count(*),
+					coalesce(sum(event_kind='recovered'),0) FROM usage_events WHERE source='codex' AND source_epoch=?`, epoch).
+					Scan(&total, &count, &legacyCount); err != nil {
+					return err
+				}
+				wantTotal, wantCount := int64(100), int64(2)
+				if name == "after boundary new call" {
+					wantTotal, wantCount = 200, 3
+				}
+				if total != wantTotal || count != wantCount || legacyCount != 0 {
+					t.Fatalf("logical window double counted legacy: total=%d events=%d legacy=%d", total, count, legacyCount)
+				}
+				if name == "nonadjacent last requires set coverage" {
+					var proposalOccurrences int
+					if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?
+						AND source_file_id=? AND source_start_offset=20`, epoch, ids[0]).Scan(&proposalOccurrences); err != nil {
+						return err
+					}
+					if proposalOccurrences != 0 {
+						t.Fatal("nonadjacent last match guessed a single-event retarget for two-event coverage")
+					}
+				}
+				var rawCarry string
+				if err := reader.QueryRow(`SELECT reconciliation_state_json FROM codex_usage_source_states
+					WHERE ledger_epoch=? AND source_file_id=?`, epoch, ids[0]).Scan(&rawCarry); err != nil {
+					return err
+				}
+				carry, err := DecodeReconciliationCarryJSON([]byte(rawCarry))
+				if err != nil || carry.OpenWindowStartOffset == nil || *carry.OpenWindowStartOffset != uint64(tokenStart+10) {
+					t.Fatalf("root first-source carry did not retain its logical boundary: %+v err=%v", carry, err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if name == "same call" {
+				nextState, err := CounterStateFromSourceState(result.SourceState)
+				if err != nil {
+					t.Fatal(err)
+				}
+				nextLegacy := tokenCountRecord(testUsage(t, 150, 0, nil, 0, 0), UsageValue{State: UsageValueMissing}, 1060)
+				nextLegacy.Parsed.StartOffset, nextLegacy.Parsed.EndOffset = 50, 60
+				nextBatch, err := ProcessRecords(nextState, []OwnedRecord{response("twenty", 20, 30), response("thirty", 30, 40), nextLegacy}, 300)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := reconcileRootForTest(t, run, epoch, []ProcessBatch{nextBatch})[0]
+				if next.Fatal != nil {
+					t.Fatalf("next logical window reused the prior window's evidence: %+v", next.Fatal)
+				}
+				if err := run.Storage().Write(func(tx *source.WriteTx) error {
+					_, err := Commit(tx, source.UsageTargetActive, next, 300)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+					var total, count int64
+					if err := reader.QueryRow(`SELECT sum(input_tokens),count(*) FROM usage_events
+						WHERE source='codex' AND source_epoch=?`, epoch).Scan(&total, &count); err != nil {
+						return err
+					}
+					carry, err := DecodeReconciliationCarryJSON(next.SourceState.ReconciliationStateJSON)
+					if err != nil || total != 150 || count != 4 || carry.OpenWindowStartOffset == nil || *carry.OpenWindowStartOffset != 60 {
+						t.Fatalf("next logical window did not advance from 30 to 60: total=%d events=%d carry=%+v err=%v", total, count, carry, err)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessBatchLogicalWindowPreservesProposalOccurrencePK(t *testing.T) {
+	for _, amount := range []int64{100, 40} {
+		t.Run(map[int64]string{100: "full replacement", 40: "residual"}[amount], func(t *testing.T) {
+			owner := "owner"
+			run, epoch, ids := setupReconcileStorage(t, []string{owner})
+			state := processorTestState()
+			state.Source.SourceFileID = ids[0]
+			state.Source.PreviousTotal = usagePointer(testUsage(t, 0, 0, nil, 0, 0))
+			state.Source.PreviousTotalOffset = int64Pointer(900)
+			state.Source.ObservedRawSize = 2000
+			state.Source.ActiveModel = stringPointer("model")
+			state.Source.ActiveModelOffset = int64Pointer(0)
+			state.Carry.OpenWindowStartOffset = uint64Pointer(0)
+			legacy := tokenCountRecord(testUsage(t, 100, 0, nil, 0, 0), UsageValue{State: UsageValueMissing}, 1030)
+			legacy.Parsed.StartOffset, legacy.Parsed.EndOffset = 20, 30
+			firstBatch, err := ProcessRecords(state, []OwnedRecord{legacy}, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := reconcileRootForTest(t, run, epoch, []ProcessBatch{firstBatch})[0]
+			if first.Fatal != nil || len(first.WindowUpserts) != 1 || first.WindowUpserts[0].StartOffset != 0 ||
+				first.WindowUpserts[0].EndOffset != 30 || len(first.Occurrences) != 1 || first.Occurrences[0].StartOffset != 20 {
+				t.Fatalf("logical window range was conflated with the token_count occurrence: %+v", first)
+			}
+			if err := run.Storage().Write(func(tx *source.WriteTx) error {
+				_, err := Commit(tx, source.UsageTargetActive, first, 100)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			secondState, err := CounterStateFromSourceState(first.SourceState)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := processorRecord(RawResponseUsage, 30, 40, 1040)
+			response.Parsed.TimestampMS = int64Pointer(200)
+			response.Parsed.Response = &ResponseEvidence{ResponseID: "later-response", ThreadID: owner,
+				Usage: validUsage(testUsage(t, amount, 0, nil, 0, 0))}
+			secondBatch, err := ProcessRecords(secondState, []OwnedRecord{response}, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second := reconcileRootForTest(t, run, epoch, []ProcessBatch{secondBatch})[0]
+			if second.Fatal != nil || len(second.DeleteEventIDs) != 1 || second.DeleteEventIDs[0] != firstBatch.Candidates[0].EventID {
+				t.Fatalf("late explicit did not reconcile the durable logical window: %+v", second)
+			}
+			wantOccurrenceID := ResponseEventID(owner, "later-response")
+			if amount == 40 {
+				proposal := firstBatch.Candidates[0]
+				wantOccurrenceID = LegacyEventID(owner, proposal.TurnKey, 1, proposal.OccurredAtMS,
+					proposal.PreviousTotal, *proposal.CurrentTotal, testUsage(t, 60, 0, nil, 0, 0), proposal.Model, proposal.ReasoningEffort)
+			}
+			if err := run.Storage().Write(func(tx *source.WriteTx) error {
+				_, err := Commit(tx, source.UsageTargetActive, second, 200)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := run.Storage().PrivateRead(func(reader storage.PrivateReader) error {
+				var eventID string
+				var start, end int64
+				if err := reader.QueryRow(`SELECT event_id,source_start_offset,source_end_offset FROM codex_usage_event_occurrences
+					WHERE source='codex' AND ledger_epoch=? AND source_file_id=? AND file_generation=1 AND source_start_offset=20`, epoch, ids[0]).
+					Scan(&eventID, &start, &end); err != nil {
+					return err
+				}
+				var total, inventedPKs int64
+				if err := reader.QueryRow(`SELECT sum(input_tokens) FROM usage_events WHERE source='codex' AND source_epoch=?`, epoch).Scan(&total); err != nil {
+					return err
+				}
+				if err := reader.QueryRow(`SELECT count(*) FROM codex_usage_event_occurrences WHERE source='codex' AND ledger_epoch=?
+					AND source_file_id=? AND source_start_offset=0`, epoch, ids[0]).Scan(&inventedPKs); err != nil {
+					return err
+				}
+				if eventID != wantOccurrenceID || start != 20 || end != 30 || total != 100 || inventedPKs != 0 {
+					t.Fatalf("proposal provenance moved to window start or usage doubled: event=%q range=%d-%d total=%d inventedPKs=%d", eventID, start, end, total, inventedPKs)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
