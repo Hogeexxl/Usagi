@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+export GOTOOLCHAIN=local
+test "$(go env GOVERSION)" = go1.27.1
+UNFORMATTED=$(gofmt -l internal/codex internal/platform)
+test -z "$UNFORMATTED"
+go test ./internal/platform/...
+go test ./internal/codex/...
+go test ./internal/source/... ./internal/storage/... ./internal/usage/...
+go vet ./internal/codex/... ./internal/platform/...

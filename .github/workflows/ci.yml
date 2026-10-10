@@ -135,8 +135,8 @@ jobs:
       - name: Run embedded frontend runtime smoke
         run: cargo test --locked --test distribution_runtime_integration t_dist_005_release_binary_serves_embedded_frontend_outside_repository -- --nocapture
 
-  go-spec01:
-    name: Go Spec01 (${{ matrix.name }})
+  go-specs:
+    name: Go specs (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     env:
       GOTOOLCHAIN: local
@@ -201,42 +201,6 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash scripts/ci/check_spec01.sh --python "$PYTHON_EXECUTABLE"
-
-  go-spec02:
-    name: Go Spec02 (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    env:
-      GOTOOLCHAIN: local
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-latest
-            architecture: AMD64
-          - name: macOS arm64
-            os: macos-latest
-            architecture: arm64
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.27.1'
-      - name: Verify Windows x64 runner
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-            throw "Expected an x64 Windows runner, got $env:PROCESSOR_ARCHITECTURE"
-          }
-      - name: Verify macOS arm64 runner
-        if: runner.os == 'macOS'
-        shell: bash
-        run: test "$(uname -m)" = 'arm64'
       - name: Check Spec02 on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -245,3 +209,11 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash scripts/ci/check_spec02.sh
+      - name: Check Spec03 on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -File scripts/ci/check_spec03.ps1
+      - name: Check Spec03 on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/ci/check_spec03.sh
