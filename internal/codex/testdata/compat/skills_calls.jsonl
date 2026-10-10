@@ -1,0 +1,3 @@
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","timestamp":1780315200000,"arguments":{"cmd":"cat /workspace/skills/function-compat/SKILL.md"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","timestamp":1780315200000,"input":"tools.exec_command({cmd: 'cat /workspace/skills/custom-compat/SKILL.md'});"}}
+{"type":"response_item","payload":{"type":"local_shell_call","timestamp":1780315200000,"action":{"command":"cat /workspace/skills/local-compat/SKILL.md"}}}
