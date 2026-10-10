@@ -1429,6 +1429,13 @@ func reconcileOneLegacyWindow(
 		}
 		window.State.LegacyCoveredResponseIDs = mapKeys(covered)
 		window.State.ProposalEventIDs = []string{}
+		if len(proposalIDs) == 1 && len(coveredExplicit) == 1 {
+			result.Occurrences = append(result.Occurrences, OccurrenceWrite{
+				SourceFileID: window.Key.SourceFileID, Generation: window.Key.Generation,
+				StartOffset: window.Key.StartOffset, EndOffset: window.End,
+				EventID: coveredExplicit[0].EventID,
+			})
+		}
 	}
 	if len(window.State.ProposalEventIDs) == 0 && window.State.Closed {
 		result.WindowDeletes = append(result.WindowDeletes, window.Key)
