@@ -334,7 +334,7 @@ func metadataEvidenceForEnvelope(record Record, envelope codexRecordEnvelope, pa
 		if turnID == "" {
 			break
 		}
-		evidence.LatestContextTurnID = stringPointer(turnID)
+		evidence.LatestContextTurnID = ownershipStringPointer(turnID)
 		evidence.LatestContextAtMS = parseRolloutTimestamp(envelope.Timestamp)
 		evidence.LatestContextModel = cleanedString(payloadString(payload, "model"))
 		evidence.CWD = stringCandidate(payloadString(payload, "cwd"), "turn_context", offset, normalizeAbsoluteMetadataPath)
@@ -530,8 +530,8 @@ func setOffset(target **int64, value int64) {
 	}
 }
 
-func int64Pointer(value int64) *int64    { return &value }
-func stringPointer(value string) *string { return &value }
+func int64Pointer(value int64) *int64             { return &value }
+func ownershipStringPointer(value string) *string { return &value }
 
 func hasControlCharacters(value string) bool {
 	for _, r := range value {
