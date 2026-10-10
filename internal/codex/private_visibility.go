@@ -352,7 +352,8 @@ func loadIncompleteSourceScopes(
 			row.stateObserved.Valid && row.stateObserved.Int64 == row.observed
 		if activeWithBuild {
 			complete = false
-			validFrozenGuard := row.frozenGuard == nil || len(row.frozenGuard) == 32
+			validFrozenGuard := row.frozenOffset.Valid && ((row.frozenOffset.Int64 == 0 && row.frozenGuard == nil) ||
+				(row.frozenOffset.Int64 > 0 && len(row.frozenGuard) == 32))
 			if row.rowBuildEpoch.Valid && row.frozenOffset.Valid && row.frozenOffset.Int64 == row.observed && validFrozenGuard && len(row.frozenState) == 32 {
 				activeProof, proofErr := activeSourceStateProofV3(q, epoch, row.sourceFileID)
 				if proofErr != nil && !errors.Is(proofErr, errInvalidActiveSourceStateProof) {

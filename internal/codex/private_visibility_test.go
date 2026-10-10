@@ -242,6 +242,64 @@ func TestActiveCompactionProjectionUsesFrozenProofDuringBuild(t *testing.T) {
 	if len(catalogChanged.UnknownScopes) != 1 || reflect.DeepEqual(complete, catalogChanged) {
 		t.Fatalf("accepted catalog change did not affect Active projection: %#v", catalogChanged)
 	}
+	for _, test := range []struct {
+		name         string
+		offset       int64
+		guard        []byte
+		wantComplete bool
+	}{
+		{"positive-null", 128, nil, false},
+		{"positive-short", 128, bytes.Repeat([]byte{7}, 31), false},
+		{"positive-valid", 128, bytes.Repeat([]byte{7}, 32), true},
+		{"zero-null", 0, nil, true},
+		{"zero-nonnull", 0, bytes.Repeat([]byte{7}, 32), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var projection codexusage.CompactionVisibilityProjection
+			if err := fixture.storage.Write(func(tx *source.WriteTx) error {
+				if err := tx.Private(func(private storage.PrivateTx) error {
+					if _, err := private.Exec(`UPDATE codex_source_checkpoints SET committed_offset=0,guard_hash=NULL WHERE source_file_id=? AND consumer_kind='usage'`, fixture.memberFileID); err != nil {
+						return err
+					}
+					if _, err := private.Exec(`UPDATE codex_source_files SET observed_size=? WHERE source_file_id=?`, test.offset, fixture.memberFileID); err != nil {
+						return err
+					}
+					if _, err := private.Exec(`UPDATE codex_usage_source_states SET resolved_through_offset=?,observed_raw_size=? WHERE ledger_epoch=1 AND source_file_id=?`, test.offset, test.offset, fixture.memberFileID); err != nil {
+						return err
+					}
+					var workingGuard []byte
+					if test.offset > 0 {
+						workingGuard = bytes.Repeat([]byte{9}, 32)
+					}
+					_, err := private.Exec(`UPDATE codex_source_checkpoints SET committed_offset=?,guard_hash=?,processing_status='ready' WHERE source_file_id=? AND consumer_kind='usage'`, test.offset, workingGuard, fixture.memberFileID)
+					return err
+				}); err != nil {
+					return err
+				}
+				proof, err := ActiveSourceStateProofV3(tx, 1, fixture.memberFileID)
+				if err != nil {
+					return err
+				}
+				if err := tx.Private(func(private storage.PrivateTx) error {
+					_, err := private.Exec(`UPDATE codex_usage_build_sources SET active_committed_offset=?,active_guard_hash=?,active_state_fingerprint=? WHERE build_epoch=? AND source_file_id=?`, test.offset, test.guard, proof, fixture.buildEpoch, fixture.memberFileID)
+					return err
+				}); err != nil {
+					return err
+				}
+				projection, err = ActiveCompactionVisibilityProjection(tx)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			wantScopes := 1
+			if test.wantComplete {
+				wantScopes = 0
+			}
+			if !projection.Ready || len(projection.UnknownScopes) != wantScopes {
+				t.Fatalf("frozen guard projection with ready working checkpoint = %#v; want %d unknown scopes", projection, wantScopes)
+			}
+		})
+	}
 }
 
 func TestVisiblePrivateEqualComparesSkillQuarantineAndCompaction(t *testing.T) {
