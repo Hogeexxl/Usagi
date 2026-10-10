@@ -13,6 +13,7 @@ import (
 	"github.com/Hogeexxl/Usagi/internal/domain"
 	"github.com/Hogeexxl/Usagi/internal/source"
 	"github.com/Hogeexxl/Usagi/internal/storage"
+	"github.com/google/uuid"
 )
 
 const (
@@ -1106,7 +1107,7 @@ func LoadMetadataEvidence(reader storage.PrivateReader, sourceFileID int64) (Met
 	var fact MetadataEvidence
 	var cwd, cwdProvenance, parent, parentProvenance, role, roleProvenance, agentPath, agentPathProvenance sql.NullString
 	var contextModel, contextTurnID sql.NullString
-	var cwdOffset, parentOffset, roleOffset, agentPathOffset, createdAt, contextAt, contextOffset, replayOffset, owningOffset, relationshipConflict sql.NullInt64
+	var cwdOffset, parentOffset, roleOffset, agentPathOffset, createdAt, contextAt, replayOffset, owningOffset, relationshipConflict sql.NullInt64
 	err := reader.QueryRow(`SELECT source_file_id,file_generation,metadata_parser_version,resolved_through_offset,owning_thread_id,continuation_state,cwd,cwd_provenance,cwd_record_offset,created_at_ms,latest_context_model,latest_context_at_ms,parent_thread_id_hint,parent_hint_provenance,parent_hint_record_offset,agent_role_hint,agent_role_provenance,agent_role_record_offset,agent_path,agent_path_provenance,agent_path_record_offset,replay_start_offset,owning_records_start_offset,ownership_confidence,fact_quality_status,updated_at_ms,latest_context_turn_id,relationship_conflict FROM codex_rollout_metadata_facts WHERE source_file_id=?`, sourceFileID).Scan(
 		&fact.SourceFileID, &fact.FileGeneration, &fact.MetadataParserVersion, &fact.ResolvedThroughOffset, &fact.OwningThreadID, &fact.ContinuationState,
 		&cwd, &cwdProvenance, &cwdOffset, &createdAt, &contextModel, &contextAt,
@@ -1131,9 +1132,14 @@ func LoadMetadataEvidence(reader storage.PrivateReader, sourceFileID int64) (Met
 	if agentPath.Valid {
 		fact.AgentPath = &rollout.MetadataStringCandidate{Value: agentPath.String, Provenance: agentPathProvenance.String, Offset: agentPathOffset.Int64}
 	}
-	fact.CreatedAtMS, fact.LatestContextAtMS, fact.LatestContextRecordOffset = nullableInt64(createdAt), nullableInt64(contextAt), nullableInt64(contextOffset)
+	fact.CreatedAtMS, fact.LatestContextAtMS = nullableInt64(createdAt), nullableInt64(contextAt)
 	if contextModel.Valid {
 		fact.LatestContextModel = &contextModel.String
+		offset := fact.ResolvedThroughOffset
+		if offset > 0 {
+			offset--
+		}
+		fact.LatestContextRecordOffset = &offset
 	}
 	if contextTurnID.Valid {
 		fact.LatestContextTurnID = &contextTurnID.String
@@ -1255,19 +1261,26 @@ func candidatePriority(provenance string) int {
 }
 func isLaterMetadataContext(incoming rollout.RecordMetadataEvidence, current MetadataEvidence) bool {
 	a, b := contextOrder(incoming.LatestContextTurnID, incoming.LatestContextAtMS), contextOrder(current.LatestContextTurnID, current.LatestContextAtMS)
-	if a != b {
-		return a > b
+	switch {
+	case a != nil && b != nil && *a != *b:
+		return *a > *b
+	case a != nil && b == nil:
+		return true
+	case a == nil && b != nil:
+		return false
+	default:
+		return incoming.LatestContextRecordOffset != nil && (current.LatestContextRecordOffset == nil || *incoming.LatestContextRecordOffset > *current.LatestContextRecordOffset)
 	}
-	return incoming.LatestContextRecordOffset != nil && (current.LatestContextRecordOffset == nil || *incoming.LatestContextRecordOffset > *current.LatestContextRecordOffset)
 }
-func contextOrder(turn *string, timestamp *int64) int64 {
-	if timestamp != nil {
-		return *timestamp
-	}
+func contextOrder(turn *string, timestamp *int64) *int64 {
 	if turn != nil {
-		return 1
+		parsed, err := uuid.Parse(*turn)
+		if err == nil && parsed.Version() == 7 {
+			order := int64(parsed[0])<<40 | int64(parsed[1])<<32 | int64(parsed[2])<<24 | int64(parsed[3])<<16 | int64(parsed[4])<<8 | int64(parsed[5])
+			return &order
+		}
 	}
-	return 0
+	return timestamp
 }
 func (e MetadataEvidence) recordEvidence() rollout.RecordMetadataEvidence {
 	return rollout.RecordMetadataEvidence{LatestContextModel: e.LatestContextModel, LatestContextTurnID: e.LatestContextTurnID, LatestContextAtMS: e.LatestContextAtMS, LatestContextRecordOffset: e.LatestContextRecordOffset}

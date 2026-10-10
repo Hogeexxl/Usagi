@@ -34,6 +34,30 @@ func TestMetadataStreamingAccumulatorUsesOwningSessionAndTurnContext(t *testing.
 	}
 }
 
+func TestMetadataAccumulatorOrdersLatestContextByUUIDv7Time(t *testing.T) {
+	const threadID = "01900000-0000-7000-8000-000000000000"
+	accumulator := NewMetadataAccumulator(11, 1, MetadataParserVersion, 40, threadID, rollout.OwningThreadCandidates{}, nil)
+	meta := rollout.Record{SourceFileID: 11, Generation: 1, LogicalStartOffset: 0, LogicalEndOffset: 40,
+		JSON: []byte(`{"type":"session_meta","payload":{"id":"` + threadID + `"}}`)}
+	if got := accumulator.ObserveRecord(meta); got.Ownership.Kind != rollout.OwnershipOwning {
+		t.Fatalf("session_meta ownership: %#v", got)
+	}
+	for _, record := range []rollout.Record{
+		{SourceFileID: 11, Generation: 1, LogicalStartOffset: 40, LogicalEndOffset: 80,
+			JSON: []byte(`{"timestamp":"2026-01-03T04:05:06Z","type":"turn_context","payload":{"turn_id":"01900000-0002-7000-8000-000000000000","model":"uuidv7-later"}}`)},
+		{SourceFileID: 11, Generation: 1, LogicalStartOffset: 80, LogicalEndOffset: 120,
+			JSON: []byte(`{"timestamp":"2027-01-03T04:05:06Z","type":"turn_context","payload":{"turn_id":"01900000-0001-7000-8000-000000000000","model":"envelope-later"}}`)},
+	} {
+		if got := accumulator.ObserveRecord(record); got.Ownership.Kind != rollout.OwnershipOwning {
+			t.Fatalf("turn_context ownership: %#v", got)
+		}
+	}
+	fact := accumulator.Snapshot(120, 50)
+	if fact.LatestContextModel == nil || *fact.LatestContextModel != "uuidv7-later" {
+		t.Fatalf("envelope timestamp incorrectly outranked UUIDv7 timestamp: %#v", fact)
+	}
+}
+
 func TestMetadataResolverKeepsFieldsWithReaderDiagnostics(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.sqlite")
 	db, err := sql.Open("sqlite", statePath)
@@ -525,7 +549,8 @@ func TestMetadataCommitLoadsDurableFactAfterRestartAndKeepsLogicalOffsetSeparate
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if restored.ResolvedThroughOffset != 900 || restored.CWD == nil || restored.CWD.Value != "/persisted/project" || restored.LatestContextModel == nil || *restored.LatestContextModel != "model-before-restart" {
+	if restored.ResolvedThroughOffset != 900 || restored.CWD == nil || restored.CWD.Value != "/persisted/project" || restored.LatestContextModel == nil || *restored.LatestContextModel != "model-before-restart" ||
+		restored.LatestContextRecordOffset == nil || *restored.LatestContextRecordOffset != 899 {
 		t.Fatalf("durable metadata load: %#v", restored)
 	}
 	accumulator := NewMetadataAccumulator(11, 1, MetadataParserVersion, 20, id, rollout.OwningThreadCandidates{}, &restored)
