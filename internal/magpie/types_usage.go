@@ -69,6 +69,7 @@ type UsageRequest struct {
 	Millis          int64     `json:"ms"`
 	TTFTMs          int64     `json:"ttft_ms,omitempty"`
 	Status          int       `json:"status"`
+	Rejected        bool      `json:"rejected,omitempty"`
 	Error           string    `json:"err,omitempty"`
 	Session         string    `json:"session,omitempty"`
 	NativeSession   string    `json:"native_session,omitempty"`

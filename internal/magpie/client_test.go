@@ -73,7 +73,7 @@ func TestClientEndpoints(t *testing.T) {
 				}
 				row := got.Rows[0]
 				if row.Effort != "high" || row.Session != "session-1" || row.Subagent != "worker" ||
-					row.ParentAgent != "codex" || row.Cost != 0.125 {
+					row.ParentAgent != "codex" || row.Cost != 0.125 || !row.Rejected {
 					t.Fatalf("UsageRequests() row = %+v", row)
 				}
 			},
@@ -264,11 +264,32 @@ func TestClientNon2xx(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{baseURL: server.URL, httpClient: server.Client()}
-	if _, err := client.Usage(context.Background(), "today"); err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("Usage() error = %v, want HTTP status 503", err)
+	_, err := client.Usage(context.Background(), "today")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("Usage() error = %v, want HTTPError status %d", err, http.StatusServiceUnavailable)
 	}
-	if _, err := client.Quotas(context.Background(), false); err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("Quotas() error = %v, want HTTP status 503", err)
+	_, err = client.Quotas(context.Background(), false)
+	httpErr = nil
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("Quotas() error = %v, want HTTPError status %d", err, http.StatusServiceUnavailable)
+	}
+}
+
+func TestClientHTTPError404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL, httpClient: server.Client()}
+	_, err := client.Session(context.Background(), "codex:missing")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("Session() error = %v, want HTTPError status %d", err, http.StatusNotFound)
+	}
+	if want := "magpie web request returned HTTP status 404"; err.Error() != want {
+		t.Fatalf("Session() error = %q, want %q", err, want)
 	}
 }
 
@@ -354,7 +375,7 @@ func clientResponseJSON(path string) string {
 	case "/api/usage":
 		return `{"period":"today","input":42,"output":7,"calls":2,"future_field":"ignored"}`
 	case "/api/usage/requests":
-		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true}]}`
+		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}]}`
 	case "/api/usage/quotas":
 		return `[{"provider":"openai","name":"OpenAI","windows":[{"name":"5h","used":0.4,"resetsAt":"2026-10-11T15:00:00Z"}],"resets":{"count":1,"until":"2026-10-11T15:00:00Z"}}]`
 	case "/api/sessions", "/api/sessions/one":

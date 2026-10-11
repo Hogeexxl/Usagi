@@ -15,6 +15,14 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("magpie web request returned HTTP status %d", e.StatusCode)
+}
+
 func (c *Client) Usage(ctx context.Context, period string) (UsageSummary, error) {
 	query := url.Values{}
 	if period != "" {
@@ -99,7 +107,7 @@ func (c *Client) Quotas(ctx context.Context, asked bool) (QuotasResponse, error)
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return QuotasResponse{}, fmt.Errorf("magpie web request returned HTTP status %d", response.StatusCode)
+		return QuotasResponse{}, &HTTPError{StatusCode: response.StatusCode}
 	}
 
 	var quotas []Quota
@@ -197,7 +205,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("magpie web request returned HTTP status %d", response.StatusCode)
+		return &HTTPError{StatusCode: response.StatusCode}
 	}
 	return json.NewDecoder(response.Body).Decode(out)
 }
