@@ -123,7 +123,6 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 filters={view.filters}
                 options={view.filter_options}
                 optionsLoading={view.filter_options_loading}
-                optionsStale={view.filter_options_stale}
                 optionsErrorCode={view.filter_options_error_code}
                 anyFilterActive={view.anyFilterActive}
                 onChange={view.select_filters}

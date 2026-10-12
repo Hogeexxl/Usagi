@@ -15,7 +15,7 @@ type queryAPI interface {
 	Usage(context.Context, query.UsageQuery) (query.UsageResult, error)
 	UsageRows(context.Context, query.UsageRowsQuery) (query.UsageRowsResult, error)
 	Sessions(context.Context, query.SessionQuery) (query.SessionResult, error)
-	FilterOptions(context.Context) (query.FilterOptionsResult, error)
+	FilterOptions(context.Context, query.DateRange) (query.FilterOptionsResult, error)
 	Quota(context.Context, bool) (magpie.QuotasResponse, error)
 }
 

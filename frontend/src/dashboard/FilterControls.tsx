@@ -1,6 +1,6 @@
 import { ChevronRight, Cpu, Folder, SquareTerminal } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
-import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type {
   DashboardFilters,
@@ -14,6 +14,7 @@ import { modelSelectionKey } from "../data/usagiClient";
 import { Button, type ButtonProps } from "../ui/beui/button";
 import { Checkbox } from "../ui/beui/checkbox";
 import { MorphPopover, MorphPopoverContent, MorphPopoverTrigger } from "../ui/beui/morph-popover";
+import { cn } from "../ui/lib/cn";
 import { SPRING_LAYOUT } from "../ui/lib/ease";
 import { projectDisplay, projectKey, projectTitle, type ProjectLike } from "./shared/projectDisplay";
 
@@ -21,7 +22,6 @@ type FilterControlsProps = {
   filters: DashboardFilters;
   options: FilterOptionsResponse | null;
   optionsLoading: boolean;
-  optionsStale: boolean;
   optionsErrorCode?: string;
   anyFilterActive: boolean;
   onChange: (filters: DashboardFilters) => void;
@@ -35,48 +35,60 @@ type ModelGroup = {
   models: ModelFilterOption[];
 };
 
-function modelGroups(options: FilterOptionsResponse | null, selectedModels: DashboardFilters["models"]): ModelGroup[] {
-  const optionModels = options?.models ?? [];
-  const knownModels = new Set(optionModels.map(modelSelectionKey));
+// Options only cover the current range. Selections the range has no data for
+// stay listed (and selected) so they can be seen and cleared.
+type FilterMenuItems<T> = { available: T[]; unavailable: T[] };
+
+function splitSelected<T, S>(options: readonly T[], selected: readonly S[], optionKey: (value: T | S) => string, fallback: (selection: S) => T): FilterMenuItems<T> {
+  const present = new Set(options.map(optionKey));
+  return {
+    available: [...options],
+    unavailable: selected.filter((selection) => !present.has(optionKey(selection))).map(fallback),
+  };
+}
+
+function modelGroups(models: readonly ModelFilterOption[]): ModelGroup[] {
   const groups = new Map<string, ModelGroup>();
-  for (const option of optionModels) {
-    const group = groups.get(option.provider_id) ?? {
-      key: option.provider_id,
-      label: option.provider_name,
-      models: [],
-    };
+  for (const option of models) {
+    const group = groups.get(option.provider_id) ?? { key: option.provider_id, label: option.provider_name, models: [] };
     group.models.push(option);
     groups.set(option.provider_id, group);
   }
   const result = [...groups.values()];
   for (const group of result) group.models.sort((left, right) => left.model.localeCompare(right.model, "en", { numeric: true }));
-  const selectedOrphans = selectedModels.filter((model) => !knownModels.has(modelSelectionKey(model)));
-  if (selectedOrphans.length > 0) {
-    result.push({
-      key: "selected",
-      label: "已选",
-      models: selectedOrphans.map((model) => ({ ...model, provider_name: model.provider_id })),
-    });
-  }
   return result;
 }
 
-function agentSelections(options: FilterOptionsResponse | null): AgentFilterOption[] {
-  return [...(options?.agents ?? [])];
+// Remembers labels of options seen in earlier ranges, for selections the
+// current range no longer lists.
+function useSeenLabels(options: FilterOptionsResponse | null) {
+  const seen = useRef({
+    agents: new Map<string, AgentFilterOption>(),
+    models: new Map<string, ModelFilterOption>(),
+    projects: new Map<string, ProjectFilterOption>(),
+  });
+  if (options) {
+    for (const agent of options.agents) seen.current.agents.set(agent.agent, agent);
+    for (const model of options.models) seen.current.models.set(modelSelectionKey(model), model);
+    for (const project of options.projects) seen.current.projects.set(projectKey(project), project);
+  }
+  return seen.current;
 }
 
-function projectSelections(options: FilterOptionsResponse | null, selected: readonly ProjectSelection[]): ProjectLike[] {
-  const values: ProjectLike[] = [...(options?.projects ?? [])];
-  const present = new Set(values.map(projectKey));
-  for (const selection of selected) if (!present.has(projectKey(selection))) values.push(selection);
-  return values;
-}
-
-function OptionStatus({ loading, stale, error, hasOptions, onRetry }: { loading: boolean; stale: boolean; error?: string; hasOptions: boolean; onRetry: () => void }) {
+function OptionStatus({ loading, error, onRetry }: { loading: boolean; error?: string; onRetry: () => void }) {
   if (loading) return <div className="px-2 py-2 text-xs text-muted-foreground" role="status">选项加载中…</div>;
   if (error) return <div className="flex items-center justify-between gap-3 px-2 py-2 text-xs text-destructive" role="status"><span>选项加载失败</span><Button variant="ghost" size="sm" onClick={onRetry}>重试</Button></div>;
-  if (stale) return <div className="flex items-center justify-between gap-3 px-2 py-2 text-xs text-warning" role="status"><span>{hasOptions ? "选项可能已更新" : "选项需要刷新"}</span><Button variant="ghost" size="sm" onClick={onRetry}>重试</Button></div>;
   return null;
+}
+
+// Until the range's options arrive it is unknown whether a selection has data,
+// so it is listed as a plain selected row.
+function UnavailableRow({ label, title, known, onUncheck }: { label: string; title?: string; known: boolean; onUncheck: () => void }) {
+  const hintId = useId();
+  return <div className={cn("flex min-h-9 w-full min-w-0 items-center gap-2 px-2 py-1.5", known && "text-muted-foreground")} title={title}>
+    <Checkbox checked onCheckedChange={onUncheck} label={label} aria-describedby={known ? hintId : undefined} />
+    {known ? <span id={hintId} className="ml-auto shrink-0 text-xs">当前范围无数据</span> : null}
+  </div>;
 }
 
 type FilterTriggerProps = Omit<ButtonProps, "children"> & { label: string; count: number; icon: React.ReactNode };
@@ -86,22 +98,31 @@ const FilterTrigger = forwardRef<HTMLButtonElement, FilterTriggerProps>(function
   return <Button ref={ref} {...buttonProps} variant={active ? "primary" : "secondary"} size="sm" aria-label={`${label}筛选${active ? `，已选${count}项` : "，全部"}`}><span className="inline-flex h-4 w-4 items-center justify-center">{icon}</span><span>{label} · {active ? `${count} 项` : "全部"}</span></Button>;
 });
 
-export function FilterControls({ filters, options, optionsLoading, optionsStale, optionsErrorCode, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
+export function FilterControls({ filters, options, optionsLoading, optionsErrorCode, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const modelGroupsInitialized = useRef(false);
   const reduce = useReducedMotion();
-  const showAgentFilter = (options?.agents?.length ?? 0) > 1;
-  const agents = useMemo(() => agentSelections(options), [options]);
-  const groups = useMemo(() => modelGroups(options, filters.models), [options, filters.models]);
-  const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
+  const seen = useSeenLabels(options);
+  const agents = useMemo(() => splitSelected<AgentFilterOption, string>(
+    options?.agents ?? [], filters.agents,
+    (value) => typeof value === "string" ? value : value.agent,
+    (agent) => seen.agents.get(agent) ?? { agent, display_name: agent },
+  ), [options, filters.agents, seen]);
+  const models = useMemo(() => splitSelected<ModelFilterOption, DashboardFilters["models"][number]>(
+    options?.models ?? [], filters.models, modelSelectionKey,
+    (model) => seen.models.get(modelSelectionKey(model)) ?? { ...model, provider_name: model.provider_id },
+  ), [options, filters.models, seen]);
+  const groups = useMemo(() => modelGroups(models.available), [models]);
+  const projects = useMemo(() => splitSelected<ProjectLike, ProjectSelection>(
+    options?.projects ?? [], filters.projects, projectKey,
+    (project) => seen.projects.get(projectKey(project)) ?? project,
+  ), [options, filters.projects, seen]);
 
   useEffect(() => {
-    if (modelGroupsInitialized.current || !options) return;
-    const firstActive = groups.find((group) => group.key !== "selected");
-    if (!firstActive) return;
+    if (modelGroupsInitialized.current || groups.length === 0) return;
     modelGroupsInitialized.current = true;
-    setExpandedGroups((current) => ({ ...current, [firstActive.key]: true }));
-  }, [groups, options]);
+    setExpandedGroups((current) => ({ ...current, [groups[0].key]: true }));
+  }, [groups]);
 
   const selectedAgents = new Set(filters.agents);
   const selectedModels = new Set(filters.models.map(modelSelectionKey));
@@ -135,7 +156,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
             .map(({ provider_id, model }) => ({ provider_id, model }))],
     });
   };
-  const toggleProject = (project: ProjectFilterOption | ProjectSelection) => {
+  const toggleProject = (project: ProjectLike) => {
     const key = projectKey(project);
     const addition: ProjectSelection = project.kind === "project" ? { kind: "project", path: project.path } : { kind: project.kind };
     onChange({ ...filters, projects: selectedProjects.has(key) ? filters.projects.filter((selection) => projectKey(selection) !== key) : [...filters.projects, addition] });
@@ -145,24 +166,18 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {showAgentFilter ? (
-        <MorphPopover>
+      <MorphPopover>
           <MorphPopoverTrigger>
             <FilterTrigger label="终端" count={filters.agents.length} icon={<SquareTerminal className="h-4 w-4" />} />
           </MorphPopoverTrigger>
           <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
             <div className="p-2">
-            <OptionStatus
-              loading={optionsLoading}
-              stale={optionsStale}
-              error={optionsErrorCode}
-              hasOptions={agents.length > 0}
-              onRetry={onRetryOptions}
-            />
-            {!optionsLoading && agents.length === 0 ? (
-              <div className="px-2 py-3 text-xs text-muted-foreground">暂无终端</div>
+            <OptionStatus loading={optionsLoading} error={optionsErrorCode} onRetry={onRetryOptions} />
+            {agents.unavailable.map((item) => <UnavailableRow known={options !== null} key={item.agent} label={item.display_name} onUncheck={() => toggleAgent(item.agent)} />)}
+            {!optionsLoading && !optionsErrorCode && agents.available.length === 0 ? (
+              <div className="px-2 py-3 text-xs text-muted-foreground">当前范围暂无终端</div>
             ) : null}
-            {agents.map((item) => (
+            {agents.available.map((item) => (
               <div key={item.agent} className={rowClass}>
                 <Checkbox
                   checked={selectedAgents.has(item.agent)}
@@ -174,13 +189,13 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
             </div>
           </MorphPopoverContent>
         </MorphPopover>
-      ) : null}
       <MorphPopover>
         <MorphPopoverTrigger><FilterTrigger label="模型" count={filters.models.length} icon={<Cpu className="h-4 w-4" />} /></MorphPopoverTrigger>
         <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-72">
           <div className="p-2">
-          <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={groups.length > 0} onRetry={onRetryOptions} />
-          {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
+          <OptionStatus loading={optionsLoading} error={optionsErrorCode} onRetry={onRetryOptions} />
+          {models.unavailable.map((model) => <UnavailableRow known={options !== null} key={modelSelectionKey(model)} label={`${model.model} · ${model.provider_name}`} onUncheck={() => toggleModel(model)} />)}
+          {!optionsLoading && !optionsErrorCode && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">当前范围暂无模型</div> : null}
           {groups.map((group) => {
             const expanded = Boolean(expandedGroups[group.key]);
             const allSelected = group.models.every((model) => selectedModels.has(modelSelectionKey(model)));
@@ -201,9 +216,10 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
         <MorphPopoverTrigger><FilterTrigger label="项目" count={filters.projects.length} icon={<Folder className="h-4 w-4" />} /></MorphPopoverTrigger>
         <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
           <div className="p-2">
-          <OptionStatus loading={optionsLoading} stale={optionsStale} error={optionsErrorCode} hasOptions={projects.length > 0} onRetry={onRetryOptions} />
-          {!optionsLoading && projects.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无项目</div> : null}
-          {projects.map((project) => <div key={projectKey(project)} className={rowClass} title={projectTitle(project)}><Checkbox checked={selectedProjects.has(projectKey(project))} onCheckedChange={() => toggleProject(project)} label={projectDisplay(project)} /></div>)}
+          <OptionStatus loading={optionsLoading} error={optionsErrorCode} onRetry={onRetryOptions} />
+          {projects.unavailable.map((project) => <UnavailableRow known={options !== null} key={projectKey(project)} label={projectDisplay(project)} title={projectTitle(project)} onUncheck={() => toggleProject(project)} />)}
+          {!optionsLoading && !optionsErrorCode && projects.available.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">当前范围暂无项目</div> : null}
+          {projects.available.map((project) => <div key={projectKey(project)} className={rowClass} title={projectTitle(project)}><Checkbox checked={selectedProjects.has(projectKey(project))} onCheckedChange={() => toggleProject(project)} label={projectDisplay(project)} /></div>)}
           </div>
         </MorphPopoverContent>
       </MorphPopover>

@@ -91,8 +91,8 @@ describe("Usagi Spec04 HTTP client", () => {
       projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
     };
     const fetchMock = mockJson(options);
-    await expect(usagiClient.filterOptions()).resolves.toEqual(options);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/usage/filter-options");
+    await expect(usagiClient.filterOptions({ key: "custom", from: "2026-10-01", to: "2026-10-11" })).resolves.toEqual(options);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/usage/filter-options?range=custom&from=2026-10-01&to=2026-10-11");
 
     const filters: DashboardFilters = {
       agents: ["aider", "aider"],

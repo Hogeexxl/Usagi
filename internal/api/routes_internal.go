@@ -88,14 +88,27 @@ func (s *Server) handleProjectDistribution(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleFilterOptions(w http.ResponseWriter, r *http.Request) {
-	if !requestHasNoQuery(w, r) {
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeProjectionError(w, query.ErrInvalidRange)
+		return
+	}
+	for name := range values {
+		if name != "range" && name != "from" && name != "to" {
+			writeProjectionError(w, query.ErrInvalidFilter)
+			return
+		}
+	}
+	rangeValue, err := ResolveRange(values)
+	if err != nil {
+		writeProjectionError(w, err)
 		return
 	}
 	if !s.requireRuntimeReady(w) {
 		return
 	}
 	dataRevision := s.revisions.Current().DataRevision
-	view, err := s.projection.FilterOptions(r.Context())
+	view, err := s.projection.FilterOptions(r.Context(), projection.ScopeQuery{Range: rangeValue.Query})
 	if err != nil {
 		writeProjectionError(w, err)
 		return

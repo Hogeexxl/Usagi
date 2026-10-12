@@ -18,7 +18,7 @@ type fakeQuery struct {
 	onUsage         func(context.Context, query.UsageQuery) (query.UsageResult, error)
 	onUsageRows     func(context.Context, query.UsageRowsQuery) (query.UsageRowsResult, error)
 	onSessions      func(context.Context, query.SessionQuery) (query.SessionResult, error)
-	onFilterOptions func(context.Context) (query.FilterOptionsResult, error)
+	onFilterOptions func(context.Context, query.DateRange) (query.FilterOptionsResult, error)
 	onQuota         func(context.Context, bool) (magpie.QuotasResponse, error)
 }
 
@@ -41,9 +41,9 @@ func (q *fakeQuery) Sessions(ctx context.Context, input query.SessionQuery) (que
 	return q.sessions, nil
 }
 
-func (q *fakeQuery) FilterOptions(ctx context.Context) (query.FilterOptionsResult, error) {
+func (q *fakeQuery) FilterOptions(ctx context.Context, r query.DateRange) (query.FilterOptionsResult, error) {
 	if q.onFilterOptions != nil {
-		return q.onFilterOptions(ctx)
+		return q.onFilterOptions(ctx, r)
 	}
 	return q.filterOptions, nil
 }

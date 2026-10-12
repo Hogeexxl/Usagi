@@ -14,7 +14,7 @@ type ProjectionService interface {
 	Summary(context.Context, projection.ScopeQuery) (projection.SummaryView, error)
 	ModelDistribution(context.Context, projection.ScopeQuery) (projection.ModelDistributionView, error)
 	ProjectDistribution(context.Context, projection.ScopeQuery) (projection.ProjectDistributionView, error)
-	FilterOptions(context.Context) (projection.FilterOptionsView, error)
+	FilterOptions(context.Context, projection.ScopeQuery) (projection.FilterOptionsView, error)
 	Sessions(context.Context, projection.ScopeQuery) (projection.SessionListView, error)
 	SessionDetail(context.Context, projection.ScopeQuery, projection.ThreadKey) (projection.SessionDetailView, error)
 	Quotas(context.Context, bool) (projection.QuotaView, error)
@@ -65,7 +65,7 @@ func (f *FakeProjectionService) ProjectDistribution(_ context.Context, q project
 	return f.ProjectDistributionResult, f.ProjectDistributionErr
 }
 
-func (f *FakeProjectionService) FilterOptions(context.Context) (projection.FilterOptionsView, error) {
+func (f *FakeProjectionService) FilterOptions(context.Context, projection.ScopeQuery) (projection.FilterOptionsView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.FilterOptionsResult, f.FilterOptionsErr

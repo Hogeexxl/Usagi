@@ -385,7 +385,7 @@ async function requestJson<T>(path: string, method: "GET" | "POST", signal?: Abo
 export type UsagiClient = {
   quota(signal?: AbortSignal): Promise<QuotaResponse>;
   refreshQuota(signal?: AbortSignal): Promise<QuotaResponse>;
-  filterOptions(signal?: AbortSignal): Promise<FilterOptionsResponse>;
+  filterOptions(range: DashboardRange, signal?: AbortSignal): Promise<FilterOptionsResponse>;
   summary(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<SummaryResponse>;
   modelDistribution(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<ModelDistributionResponse>;
   projectDistribution(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<ProjectDistributionResponse>;
@@ -490,8 +490,9 @@ export const usagiClient: UsagiClient = {
   async refreshQuota(signal) {
     return parseQuota(await requestJson<unknown>("/api/quota/refresh", "POST", signal));
   },
-  async filterOptions(signal) {
-    return parseFilterOptions(await requestJson<unknown>("/api/usage/filter-options", "GET", signal));
+  async filterOptions(range, signal) {
+    const params = appendRangeParams(new URLSearchParams(), range);
+    return parseFilterOptions(await requestJson<unknown>(`/api/usage/filter-options?${params.toString()}`, "GET", signal));
   },
   async summary(range, filters, signal) {
     const params = filterParams(range, filters);

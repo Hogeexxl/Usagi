@@ -30,7 +30,6 @@ export type DashboardViewModel = {
   epoch_reset_key: number;
   filter_options: FilterOptionsResponse | null;
   filter_options_loading: boolean;
-  filter_options_stale: boolean;
   filter_options_error_code?: string;
   agentFilterActive: boolean;
   modelFilterActive: boolean;
@@ -60,7 +59,6 @@ type InternalState = {
   status: RuntimeStatusResponse | null;
   filter_options: FilterOptionsResponse | null;
   filter_options_loading: boolean;
-  filter_options_stale: boolean;
   filter_options_error_code?: string;
 };
 
@@ -78,6 +76,8 @@ function isAbortError(error: unknown): boolean {
 function clientErrorCode(error: unknown): string {
   return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
+
+const EMPTY_FILTERS: DashboardFilters = { agents: [], models: [], projects: [] };
 
 export function useDashboardController(options: DashboardControllerOptions = {}): DashboardViewModel {
   const client = options.client ?? usagiClient;
@@ -104,7 +104,6 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     status: null,
     filter_options: null,
     filter_options_loading: true,
-    filter_options_stale: false,
   });
   const stateRef = useRef(state);
   const snapshotsRef = useRef(new Map<string, SummaryResponse>());
@@ -114,7 +113,8 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   const statusGenerationRef = useRef(0);
   const filterOptionsAbortRef = useRef<AbortController | null>(null);
   const filterOptionsGenerationRef = useRef(0);
-  const filterOptionsRevisionRef = useRef(0);
+  // Options last loaded per range, so switching back shows them at once.
+  const filterOptionsCacheRef = useRef(new Map<string, FilterOptionsResponse>());
   const acceptedTupleRef = useRef<RevisionTuple>({ data_revision: 0, status_revision: 0 });
 
   const commit = useCallback((next: InternalState | ((current: InternalState) => InternalState)) => {
@@ -169,30 +169,37 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     );
   }, [client, commit]);
 
-  const loadFilterOptions = useCallback((force = false): Promise<void> => {
-    if (stateRef.current.filter_options_loading && !force) return Promise.resolve();
+  // Loads the options of the current range in the background. Options already
+  // on screen stay until the new ones arrive, so menus never flash or nag.
+  const loadFilterOptions = useCallback((): Promise<void> => {
+    const range = stateRef.current.range;
+    const key = dashboardQueryKey(range, EMPTY_FILTERS);
     filterOptionsAbortRef.current?.abort();
     const controller = new AbortController();
     filterOptionsAbortRef.current = controller;
     const generation = ++filterOptionsGenerationRef.current;
+    const cached = filterOptionsCacheRef.current.get(key) ?? null;
     commit((current) => ({
       ...current,
-      filter_options_loading: true,
+      filter_options: cached,
+      filter_options_loading: cached === null,
       filter_options_error_code: undefined,
     }));
-    return client.filterOptions(controller.signal).then(
+    return client.filterOptions(range, controller.signal).then(
       (response) => {
         if (controller.signal.aborted || generation !== filterOptionsGenerationRef.current) return;
-        if (response.data_revision < acceptedTupleRef.current.data_revision) {
-          commit((current) => ({ ...current, filter_options_loading: false, filter_options_stale: true }));
+        const previous = filterOptionsCacheRef.current.get(key);
+        // An older snapshot than the one shown is dropped; the revision that
+        // made it old triggers another load.
+        if (previous && response.data_revision < previous.data_revision) {
+          commit((current) => ({ ...current, filter_options_loading: false }));
           return;
         }
-        filterOptionsRevisionRef.current = response.data_revision;
+        filterOptionsCacheRef.current.set(key, response);
         commit((current) => ({
           ...current,
           filter_options: response,
           filter_options_loading: false,
-          filter_options_stale: false,
           filter_options_error_code: undefined,
         }));
       },
@@ -201,8 +208,8 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         commit((current) => ({
           ...current,
           filter_options_loading: false,
-          filter_options_stale: true,
-          filter_options_error_code: clientErrorCode(error),
+          // Keep showing usable options; only report a failure with nothing to show.
+          filter_options_error_code: current.filter_options ? undefined : clientErrorCode(error),
         }));
       },
     );
@@ -222,8 +229,10 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         }
         const wasReady = stateRef.current.status?.runtime_state === "ready";
         commit((current) => ({ ...current, status }));
-        if (!wasReady && status.runtime_state === "ready" && !stateRef.current.snapshot) {
-          void loadSummary(stateRef.current.range, stateRef.current.filters);
+        if (!wasReady && status.runtime_state === "ready") {
+          if (!stateRef.current.snapshot) void loadSummary(stateRef.current.range, stateRef.current.filters);
+          // Only a failed load is retried; one still in flight is left to finish.
+          if (stateRef.current.filter_options_error_code) void loadFilterOptions();
         }
       },
       (error: unknown) => {
@@ -235,7 +244,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         }));
       },
     );
-  }, [client, commit, loadSummary]);
+  }, [client, commit, loadFilterOptions, loadSummary]);
 
   const handleRevision = useCallback((event: RevisionFeedEvent) => {
     const tuple = event.tuple;
@@ -244,7 +253,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       snapshotsRef.current.clear();
       summaryAbortRef.current?.abort();
       filterOptionsAbortRef.current?.abort();
-      filterOptionsRevisionRef.current = 0;
+      filterOptionsCacheRef.current.clear();
       const { range, filters } = stateRef.current;
       commit((current) => ({
         ...current,
@@ -255,12 +264,11 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         load_state: "loading",
         error_code: undefined,
         filter_options: null,
-        filter_options_loading: false,
-        filter_options_stale: true,
+        filter_options_loading: true,
         filter_options_error_code: undefined,
       }));
       void loadSummary(range, filters);
-      void loadFilterOptions(true);
+      void loadFilterOptions();
       void loadStatus();
       return;
     }
@@ -273,11 +281,8 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     acceptedTupleRef.current = tuple;
     if (dataAdvanced) {
       const { range, filters } = stateRef.current;
-      commit((current) => ({
-        ...current,
-        filter_options_stale: Boolean(current.filter_options && current.filter_options.data_revision < tuple.data_revision),
-      }));
       void loadSummary(range, filters);
+      void loadFilterOptions();
     }
     if (statusAdvanced) void loadStatus();
   }, [commit, loadFilterOptions, loadStatus, loadSummary]);
@@ -296,7 +301,8 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       error_code: undefined,
     }));
     void loadSummary(range, filters);
-  }, [commit, loadSummary]);
+    void loadFilterOptions();
+  }, [commit, loadFilterOptions, loadSummary]);
 
   const selectFilters = useCallback((filters: DashboardFilters) => {
     const canonical = canonicalDashboardFilters(filters);
@@ -324,7 +330,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   }, [selectFilters]);
 
   const retryFilterOptions = useCallback(() => {
-    void loadFilterOptions(true);
+    void loadFilterOptions();
   }, [loadFilterOptions]);
 
   const requestRefresh = useCallback(() => {
@@ -334,7 +340,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       refreshing: true,
       reload_key: current.reload_key + 1,
     }));
-    void Promise.allSettled([loadSummary(range, filters), loadFilterOptions(true)]).finally(() => {
+    void Promise.allSettled([loadSummary(range, filters), loadFilterOptions()]).finally(() => {
       commit((current) => ({ ...current, refreshing: false }));
     });
   }, [commit, loadFilterOptions, loadSummary]);
@@ -343,14 +349,14 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     const current = stateRef.current;
     if (current.load_state === "error" || !current.snapshot) void loadSummary(current.range, current.filters);
     if (!current.status) void loadStatus();
-    if (current.filter_options_stale) void loadFilterOptions(true);
+    if (current.filter_options_error_code) void loadFilterOptions();
     revisionFeedRef.current?.retry_now();
   }, [loadFilterOptions, loadStatus, loadSummary]);
 
   useEffect(() => {
     const { range, filters } = stateRef.current;
     void loadSummary(range, filters);
-    void loadFilterOptions(true);
+    void loadFilterOptions();
     void loadStatus();
     const unsubscribe = revisionFeedRef.current?.subscribe(handleRevision);
     return () => {
@@ -378,7 +384,6 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     epoch_reset_key: state.epoch_reset_key,
     filter_options: state.filter_options,
     filter_options_loading: state.filter_options_loading,
-    filter_options_stale: state.filter_options_stale,
     filter_options_error_code: state.filter_options_error_code,
     agentFilterActive,
     modelFilterActive,

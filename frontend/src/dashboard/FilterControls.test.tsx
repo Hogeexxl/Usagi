@@ -45,7 +45,6 @@ type RenderOverrides = {
   filters?: DashboardFilters;
   options?: FilterOptionsResponse | null;
   optionsLoading?: boolean;
-  optionsStale?: boolean;
   optionsErrorCode?: string;
   anyFilterActive?: boolean;
   onChange?: (filters: DashboardFilters) => void;
@@ -58,7 +57,7 @@ function renderControls(overrides: RenderOverrides = {}) {
     filters: emptyFilters,
     options: modelOptions,
     optionsLoading: false,
-    optionsStale: false,
+
     optionsErrorCode: undefined,
     anyFilterActive: false,
     onChange: vi.fn(),
@@ -201,91 +200,71 @@ describe("FilterControls", () => {
     expect(within(dialog).getByRole("checkbox", { name: "codex-auto-review" })).toBeInTheDocument();
   });
 
-  it("keeps a selected orphan model cancellable in the Selected fallback group", async () => {
+  it("pins a selected model the range has no data for at the top, still selected and cancellable", async () => {
     const onChange = vi.fn();
     renderControls({
       filters: { agents: [], models: modelSelections("orphan-rollout"), projects: [] },
       onChange,
     });
     const dialog = await openPopover("模型筛选，已选1项");
-    ensureModelGroupExpanded(dialog, "已选");
-    const orphan = within(dialog).getByRole("checkbox", { name: "orphan-rollout" });
+    const orphan = within(dialog).getByRole("checkbox", { name: "orphan-rollout · orphan-provider" });
+    expect(orphan).toHaveAttribute("aria-checked", "true");
+    expect(within(dialog).getAllByRole("checkbox")[0]).toBe(orphan);
+    expect(within(dialog).getByText("当前范围无数据")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "已选" })).not.toBeInTheDocument();
 
-    expect(within(dialog).getByRole("button", { name: "已选" })).toBeInTheDocument();
     fireEvent.click(orphan);
-
     expect(onChange).toHaveBeenCalledWith({ agents: [], models: [], projects: [] });
   });
 
-  it("waits for the first active model group and then preserves group state", async () => {
-    const { rerender } = render(
-      <FilterControls
-        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
-        options={{ data_revision: 1, agents: [], models: [], projects: [] }}
-        optionsLoading={false}
-        optionsStale={false}
-        anyFilterActive={true}
-        onChange={vi.fn()}
-        onClear={vi.fn()}
-        onRetryOptions={vi.fn()}
-      />,
-    );
-
+  it("lists selections without the no-data hint while the range's options are not loaded", async () => {
+    renderControls({ options: null, optionsLoading: true, filters: { agents: [], models: modelSelections("gpt-4o"), projects: [] }, anyFilterActive: true });
     const dialog = await openPopover("模型筛选，已选1项");
-    const selectedToggle = within(dialog).getByRole("button", { name: "已选" });
-    expect(selectedToggle).toHaveAttribute("aria-expanded", "false");
-    expect(within(dialog).queryByRole("checkbox", { name: "orphan-rollout" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("checkbox", { name: "gpt-4o · openai" })).toHaveAttribute("aria-checked", "true");
+    expect(within(dialog).queryByText("当前范围无数据")).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(selectedToggle);
-    expect(selectedToggle).toHaveAttribute("aria-expanded", "true");
-    rerender(
-      <FilterControls
-        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
-        options={{
-          data_revision: 2,
-          agents: [],
-          models: [{ model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" }],
-          projects: [],
-        }}
-        optionsLoading={false}
-        optionsStale={false}
-        anyFilterActive={true}
-        onChange={vi.fn()}
-        onClear={vi.fn()}
-        onRetryOptions={vi.fn()}
-      />,
-    );
-    const updatedDialog = screen.getByRole("dialog");
-    expect(within(updatedDialog).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "true");
-    const openAiToggle = within(updatedDialog).getByRole("button", { name: "OpenAI" });
+  it("labels unavailable selections with names seen in earlier ranges", async () => {
+    const props = { filters: { agents: ["codex"], models: [{ provider_id: "openai", model: "gpt-4o" }], projects: [{ kind: "project" as const, path: "/workspace" }] }, optionsLoading: false, anyFilterActive: true, onChange: vi.fn(), onClear: vi.fn(), onRetryOptions: vi.fn() };
+    const { rerender } = render(<FilterControls {...props} options={{ ...projectOptions, agents: [{ agent: "codex", display_name: "Codex" }], models: modelOptions.models }} />);
+    rerender(<FilterControls {...props} options={{ data_revision: 2, agents: [], models: [], projects: [] }} />);
+    expect(within(await openPopover("模型筛选，已选1项")).getByRole("checkbox", { name: "gpt-4o · OpenAI" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(within(await openPopover("项目筛选，已选1项")).getByRole("checkbox", { name: "Workspace" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const agents = await openPopover("终端筛选，已选1项");
+    expect(within(agents).getByRole("checkbox", { name: "Codex" })).toHaveAttribute("aria-checked", "true");
+    expect(within(agents).getByText("当前范围暂无终端")).toBeInTheDocument();
+  });
+
+
+  it("waits for the first model group and then preserves group state", async () => {
+    const props = { filters: emptyFilters, optionsLoading: false, anyFilterActive: false, onChange: vi.fn(), onClear: vi.fn(), onRetryOptions: vi.fn() };
+    const { rerender } = render(<FilterControls {...props} options={{ data_revision: 1, agents: [], models: [], projects: [] }} />);
+
+    const dialog = await openPopover("模型筛选，全部");
+    expect(within(dialog).getByText("当前范围暂无模型")).toBeInTheDocument();
+    rerender(<FilterControls {...props} options={{ data_revision: 2, agents: [], models: [{ model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" }], projects: [] }} />);
+    const openAiToggle = within(screen.getByRole("dialog")).getByRole("button", { name: "OpenAI" });
     expect(openAiToggle).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(openAiToggle);
-    rerender(
-      <FilterControls
-        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
-        options={{
-          data_revision: 3,
-          agents: [],
-          models: [
-            { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
-            { model: "gemini-2.5", provider_id: "antigravity", provider_name: "Antigravity" },
-          ],
-          projects: [],
-        }}
-        optionsLoading={false}
-        optionsStale={false}
-        anyFilterActive={true}
-        onChange={vi.fn()}
-        onClear={vi.fn()}
-        onRetryOptions={vi.fn()}
-      />,
-    );
+    rerender(<FilterControls {...props} options={{
+      data_revision: 3,
+      agents: [],
+      models: [
+        { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gemini-2.5", provider_id: "antigravity", provider_name: "Antigravity" },
+      ],
+      projects: [],
+    }} />);
     const changedDialog = screen.getByRole("dialog");
-    expect(within(changedDialog).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "true");
     expect(within(changedDialog).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
     expect(within(changedDialog).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
   });
+
 
   it("selects normal, projectless, and unknown projects using their labels", async () => {
     const onChange = vi.fn();
@@ -342,7 +321,7 @@ describe("FilterControls", () => {
     const panels = Array.from(
       document.querySelectorAll<HTMLElement>("[data-multi-select-content]"),
     );
-    expect(panels).toHaveLength(2);
+    expect(panels).toHaveLength(3);
 
     const modelPanel = panels.find((panel) => panel.textContent?.includes("OpenAI"));
     if (!modelPanel) throw new Error("Model panel was not mounted");
@@ -375,18 +354,17 @@ describe("FilterControls", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false");
   });
 
-  it.each([
-    { label: "error", optionsErrorCode: "QUERY_FAILED", optionsStale: false, status: "选项加载失败" },
-    { label: "stale", optionsErrorCode: undefined, optionsStale: true, status: "选项可能已更新" },
-  ])("shows a retry action for $label options", async ({ optionsErrorCode, optionsStale, status }) => {
+  it("shows a retry action for failed options", async () => {
     const onRetryOptions = vi.fn();
-    renderControls({ optionsErrorCode, optionsStale, onRetryOptions });
+    renderControls({ optionsErrorCode: "QUERY_FAILED", onRetryOptions });
     const dialog = await openPopover("模型筛选，全部");
 
-    expect(within(dialog).getByRole("status")).toHaveTextContent(status);
+    expect(within(dialog).getByRole("status")).toHaveTextContent("选项加载失败");
+    expect(within(dialog).queryByText("当前范围暂无模型")).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "重试" }));
     expect(onRetryOptions).toHaveBeenCalledTimes(1);
   });
+
 
   it.each([
     { anyFilterActive: true, visible: true },
@@ -414,29 +392,14 @@ describe("FilterControls", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("hides the terminal filter button when options are null, empty, or have only 1 source", () => {
-    // null options
-    const firstRender = renderControls({ options: null });
-    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
-    firstRender.unmount();
-
-    // 0 sources
-    const secondRender = renderControls({ options: { data_revision: 1, agents: [], models: [], projects: [] } });
-    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
-    secondRender.unmount();
-
-    // 1 source
-    const thirdRender = renderControls({
-      options: {
-        data_revision: 1,
-        agents: [{ agent: "codex", display_name: "Codex" }],
-        models: [],
-        projects: [],
-      },
-    });
-    expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
-    thirdRender.unmount();
+  it("always shows the terminal filter, since options follow the selected range", () => {
+    for (const options of [null, { data_revision: 1, agents: [], models: [], projects: [] }, { data_revision: 1, agents: [{ agent: "codex", display_name: "Codex" }], models: [], projects: [] }]) {
+      const view = renderControls({ options });
+      expect(screen.getByRole("button", { name: "终端筛选，全部" })).toBeInTheDocument();
+      view.unmount();
+    }
   });
+
 
   it("TD-P5-TERMINAL-01 shows the terminal filter with SquareTerminal and identical geometry to Project filter", async () => {
     const onChange = vi.fn();
@@ -479,64 +442,48 @@ describe("FilterControls", () => {
     });
   });
 
-  it("TD-P5-TERMINAL-ORPHAN-01 does not append raw orphan source to menu and retains filter state", async () => {
+  it("TD-P5-TERMINAL-ORPHAN-01 pins a selected terminal missing from the range above the options", async () => {
     const onChange = vi.fn();
-    const multiSourceOptions: FilterOptionsResponse = {
-      data_revision: 1,
-      agents: [
-        { agent: "codex", display_name: "Codex" },
-        { agent: "antigravity", display_name: "Antigravity" },
-      ],
-      models: [],
-      projects: [],
-    };
-
     renderControls({
-      options: multiSourceOptions,
+      options: {
+        data_revision: 1,
+        agents: [{ agent: "codex", display_name: "Codex" }, { agent: "antigravity", display_name: "Antigravity" }],
+        models: [],
+        projects: [],
+      },
       filters: { agents: ["legacy-source"], models: [], projects: [] },
       onChange,
     });
 
-    const trigger = screen.getByRole("button", { name: "终端筛选，已选1项" });
-    expect(trigger).toHaveTextContent("终端 · 1 项");
-
+    expect(screen.getByRole("button", { name: "终端筛选，已选1项" })).toHaveTextContent("终端 · 1 项");
     const dialog = await openPopover("终端筛选，已选1项");
-    expect(within(dialog).queryByRole("checkbox", { name: "legacy-source" })).not.toBeInTheDocument();
-    expect(within(dialog).queryByText("legacy-source")).not.toBeInTheDocument();
-    expect(within(dialog).getByText("Codex")).toBeInTheDocument();
-    expect(within(dialog).getByText("Antigravity")).toBeInTheDocument();
+    const labels = within(dialog).getAllByRole("checkbox").map((node) => node.closest("label")?.textContent?.replace("Selected", ""));
+    expect(labels).toEqual(["legacy-source", "Codex", "Antigravity"]);
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "legacy-source" }));
+    expect(onChange).toHaveBeenCalledWith({ agents: [], models: [], projects: [] });
   });
 
-  it("TD-P5-MODEL-ORPHAN-01 puts orphan model into Selected group at the end, not Route-models", async () => {
-    const multiOptions: FilterOptionsResponse = {
-      data_revision: 1,
-      agents: [],
-      models: [
-        { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
-        { model: "gemini-2.5-pro", provider_id: "antigravity", provider_name: "Antigravity" },
-        { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
-      ],
-      projects: [],
-    };
 
+  it("TD-P5-MODEL-ORPHAN-01 keeps an unavailable model out of the provider groups", async () => {
     renderControls({
-      options: multiOptions,
-      filters: { agents: [], models: modelSelections("disappeared-antigravity-model"), projects: [] },
+      options: {
+        data_revision: 1,
+        agents: [],
+        models: [
+          { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+          { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
+        ],
+        projects: [],
+      },
+      filters: { agents: [], models: modelSelections("disappeared-model"), projects: [] },
     });
 
     const dialog = await openPopover("模型筛选，已选1项");
-    const groupButtons = within(dialog).getAllByRole("button", { name: /OpenAI|Antigravity|Route-models|已选/ });
-    const labels = groupButtons.map((btn) => btn.textContent?.trim() || "");
-    expect(labels).toEqual(["OpenAI", "Antigravity", "Route-models", "已选"]);
-
-    ensureModelGroupExpanded(dialog, "已选");
-    expect(within(dialog).getByRole("checkbox", { name: "disappeared-antigravity-model" })).toBeInTheDocument();
-
-    // Collapse Selected group, expand Route-models, and verify orphan is not in Route-models
-    fireEvent.click(within(dialog).getByRole("button", { name: "已选" }));
+    expect(within(dialog).getByRole("checkbox", { name: "disappeared-model · orphan-provider" })).toBeInTheDocument();
     ensureModelGroupExpanded(dialog, "Route-models");
-    expect(within(dialog).queryByRole("checkbox", { name: "disappeared-antigravity-model" })).not.toBeInTheDocument();
+    expect(within(dialog).getAllByRole("checkbox", { name: /disappeared-model/ })).toHaveLength(1);
   });
+
 
   it("TD-P5-MODEL-EXPAND-01 initially expands first active group and preserves expanded state on options change", async () => {
     const initialOptions: FilterOptionsResponse = {
@@ -554,7 +501,7 @@ describe("FilterControls", () => {
         filters={emptyFilters}
         options={initialOptions}
         optionsLoading={false}
-        optionsStale={false}
+        
         anyFilterActive={false}
         onChange={vi.fn()}
         onClear={vi.fn()}
@@ -576,7 +523,7 @@ describe("FilterControls", () => {
     expect(openAiToggle).toHaveAttribute("aria-expanded", "false");
     expect(routeModelsToggle).toHaveAttribute("aria-expanded", "true");
 
-    // Dynamic update: Antigravity model added and orphan selected model added
+    // Dynamic update: Antigravity model added
     const updatedOptions: FilterOptionsResponse = {
       data_revision: 2,
       agents: [],
@@ -593,7 +540,7 @@ describe("FilterControls", () => {
         filters={{ agents: [], models: modelSelections("new-orphan"), projects: [] }}
         options={updatedOptions}
         optionsLoading={false}
-        optionsStale={false}
+        
         anyFilterActive={true}
         onChange={vi.fn()}
         onClear={vi.fn()}
@@ -601,11 +548,10 @@ describe("FilterControls", () => {
       />,
     );
 
-    // States are preserved: OpenAI remains collapsed, Route-models remains expanded, Antigravity & Selected start collapsed
+    // States are preserved: OpenAI remains collapsed, Route-models remains expanded, Antigravity starts collapsed
     const dialogUpdated = screen.getByRole("dialog");
     expect(within(dialogUpdated).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
     expect(within(dialogUpdated).getByRole("button", { name: "Route-models" })).toHaveAttribute("aria-expanded", "true");
     expect(within(dialogUpdated).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
-    expect(within(dialogUpdated).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "false");
   });
 });

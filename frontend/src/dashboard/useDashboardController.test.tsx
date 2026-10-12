@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UsagiClient } from "../data/usagiClient";
 import { createRevisionFeed } from "../data/revisionFeed";
 import type { DashboardFilters, DashboardRange, FilterOptionsResponse, RuntimeStatusResponse, SummaryResponse } from "../data/types";
+import { UsagiClientError } from "../data/types";
 import { useDashboardController } from "./useDashboardController";
 
 const emptyFilters: DashboardFilters = { agents: [], models: [], projects: [] };
@@ -140,14 +141,14 @@ describe("useDashboardController", () => {
     expect(result.current.metrics?.input).toBe(20);
   });
 
-  it("marks Filter Options stale on data revisions and keeps missing selections until a retry succeeds", async () => {
+  it("reloads Filter Options in the background on data revisions and keeps them on failure", async () => {
     const source = fakeEvents();
     let optionCalls = 0;
     const client = clientWith({
       filterOptions: vi.fn(async () => {
         optionCalls += 1;
         if (optionCalls === 2) throw new Error("options unavailable");
-        return optionCalls === 1 ? options(1) : { data_revision: 2, agents: [], models: [], projects: [] };
+        return optionCalls === 1 ? options(1) : options(3);
       }),
       getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })),
     });
@@ -157,17 +158,59 @@ describe("useDashboardController", () => {
     await act(async () => {
       source.onmessage?.({ data: JSON.stringify({ data_revision: 2, status_revision: 1 }) } as MessageEvent<string>);
     });
-    await waitFor(() => expect(result.current.filter_options_stale).toBe(true));
+    await waitFor(() => expect(optionCalls).toBe(2));
+    // The failed background reload keeps the options on screen without an error.
     expect(result.current.filter_options).toEqual(options(1));
+    expect(result.current.filter_options_loading).toBe(false);
+    expect(result.current.filter_options_error_code).toBeUndefined();
 
-    await act(async () => result.current.retry_filter_options());
-    await waitFor(() => expect(result.current.filter_options_stale).toBe(true));
-    expect(result.current.filter_options).toEqual(options(1));
-    await act(async () => result.current.retry_filter_options());
-    await waitFor(() => expect(result.current.filter_options).toEqual({ data_revision: 2, agents: [], models: [], projects: [] }));
-    expect(result.current.filter_options_stale).toBe(false);
-    expect(optionCalls).toBe(3);
+    await act(async () => {
+      source.onmessage?.({ data: JSON.stringify({ data_revision: 3, status_revision: 1 }) } as MessageEvent<string>);
+    });
+    await waitFor(() => expect(result.current.filter_options).toEqual(options(3)));
+    expect(result.current.filter_options_loading).toBe(false);
   });
+
+  it("loads Filter Options for the selected range and reuses them when switching back", async () => {
+    const client = clientWith({
+      filterOptions: vi.fn(async (range: DashboardRange) => range.key === "year" ? options(2) : options(1)),
+    });
+    const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
+    await waitFor(() => expect(result.current.filter_options).toEqual(options(1)));
+    expect(vi.mocked(client.filterOptions).mock.calls[0][0]).toEqual({ key: "today" });
+
+    act(() => result.current.select_range({ key: "year" }));
+    expect(result.current.filter_options).toBeNull();
+    expect(result.current.filter_options_loading).toBe(true);
+    await waitFor(() => expect(result.current.filter_options).toEqual(options(2)));
+    expect(vi.mocked(client.filterOptions).mock.calls[1][0]).toEqual({ key: "year" });
+
+    act(() => result.current.select_range({ key: "today" }));
+    expect(result.current.filter_options).toEqual(options(1));
+    expect(result.current.filter_options_loading).toBe(false);
+  });
+
+  it("retries failed Filter Options once Magpie becomes ready", async () => {
+    const source = fakeEvents();
+    const client = clientWith({
+      filterOptions: vi.fn()
+        .mockRejectedValueOnce(new UsagiClientError("MAGPIE_UNAVAILABLE", 503))
+        .mockResolvedValueOnce(options(1)),
+      getStatus: vi.fn()
+        .mockResolvedValueOnce(status({ status_revision: 0, runtime_state: "starting" }))
+        .mockResolvedValueOnce(status({ status_revision: 1, runtime_state: "ready" })),
+      getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 0 })),
+    });
+    const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: () => source }));
+    await waitFor(() => expect(result.current.filter_options_error_code).toBe("MAGPIE_UNAVAILABLE"));
+    await waitFor(() => expect(source.onmessage).toBeTypeOf("function"));
+
+    // Only the status moves, so the reload comes from the runtime turning ready.
+    source.onmessage?.({ data: JSON.stringify({ data_revision: 1, status_revision: 1 }) } as MessageEvent<string>);
+    await waitFor(() => expect(result.current.filter_options).toEqual(options(1)));
+    expect(result.current.filter_options_error_code).toBeUndefined();
+  });
+
 
   it("uses the refresh icon for GET reloads of Summary and Filter Options only", async () => {
     const client = clientWith();

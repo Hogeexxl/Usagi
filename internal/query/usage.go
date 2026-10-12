@@ -87,7 +87,7 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 				continue
 			}
 			if len(filter.Models) > 0 {
-				if _, ok := modelSelections[ModelSelection{ProviderID: row.Provider, Model: row.Model}]; !ok {
+				if _, ok := modelSelections[ModelSelection{ProviderID: row.Provider, Model: ModelName(row.Model)}]; !ok {
 					continue
 				}
 			}

@@ -171,7 +171,7 @@ func TestInternalUsageEndpointsValidateMapAndClassifyErrors(t *testing.T) {
 			setError: func(p *testsupport.FakeProjectionService, err error) { p.ProjectDistributionErr = err },
 		},
 		{
-			name: "filter options", path: "/api/usage/filter-options", invalidPath: "/api/usage/filter-options?range=today",
+			name: "filter options", path: "/api/usage/filter-options?range=today", invalidPath: "/api/usage/filter-options?range=today&agent=claude",
 			setError: func(p *testsupport.FakeProjectionService, err error) { p.FilterOptionsErr = err },
 		},
 		{

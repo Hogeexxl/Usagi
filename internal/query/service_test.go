@@ -3,8 +3,10 @@ package query
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
@@ -63,44 +65,51 @@ func TestOverview(t *testing.T) {
 	}
 }
 
-func TestFilterOptions(t *testing.T) {
-	const cwd = "/workspace/notes/../Usagi/"
-	pages := []magpie.UsageRequestsPage{
-		{Total: 5000, Rows: []magpie.UsageRequest{{Agent: "row-only", Provider: "row-only-provider", Model: "row-only"}}, Agents: []magpie.UsageNamed{{ID: "z", Name: "Z"}, {ID: "a", Name: "A"}, {ID: "z", Name: "Z"}}, Providers: []magpie.UsageNamed{{ID: "provider-z", Name: "Zeta"}, {ID: "provider-a", Name: "Alpha"}}, By: map[string][]magpie.UsageShare{"modelAt": {{ID: "provider-z/gpt-x"}, {ID: ""}, {ID: "provider-a/gpt-x"}, {ID: "provider-z/gpt-x"}, {ID: "malformed"}}}},
-		{Total: 9000, Rows: []magpie.UsageRequest{{Agent: "other-row", Provider: "row-only", Model: "other-row"}}, Agents: []magpie.UsageNamed{{ID: "new-agent", Name: "New"}}, By: map[string][]magpie.UsageShare{"modelAt": {{ID: "future-provider/new-model"}}}},
+func TestFilterOptionsListOnlyChoicesInRange(t *testing.T) {
+	day := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
+	rows := []magpie.UsageRequest{
+		{Time: day, Agent: "codex", AgentName: "Codex", Provider: "openai", ProviderName: "OpenAI", Model: "gpt-x", NativeSession: "s1", Priced: true},
+		{Time: day, Agent: "codex", Provider: "openai", Model: "gpt-x", NativeSession: "s2", Priced: true},
+		{Time: day, Agent: "claude", Provider: "session-unknown", ProviderName: "Local session", Model: "", Session: "gone", Priced: true},
+		{Time: day, Agent: "rejected", Provider: "p", Model: "m", Rejected: true},
+		{Time: day.AddDate(0, 0, -1), Agent: "old", Provider: "old", Model: "old", Session: "old"},
 	}
-	stats := []magpie.SessionStats{
-		{Days: []magpie.SessionDay{{Usage: []magpie.SessionDayUsage{{Cwd: cwd}, {Cwd: "/a"}, {Cwd: ""}}}, {Usage: []magpie.SessionDayUsage{{Cwd: "/a"}, {Cwd: cwd}}}}},
-		{Days: []magpie.SessionDay{{Usage: []magpie.SessionDayUsage{{Cwd: "/new-project"}}}}},
-	}
-	requestCalls, statsCalls := 0, 0
 	u := &sessionUpstream{
 		requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
-			if q != (magpie.UsageRequestsQuery{Period: "all", Offset: 0, Limit: 1}) {
-				t.Fatalf("catalog query = %+v", q)
+			var matched []magpie.UsageRequest
+			for _, row := range rows {
+				if q.Period == row.Time.Format(time.DateOnly)+".."+row.Time.Format(time.DateOnly) {
+					matched = append(matched, row)
+				}
 			}
-			page := pages[requestCalls]
-			requestCalls++
-			return page, nil
+			return magpie.UsageRequestsPage{Rows: matched, Total: len(matched)}, nil
 		},
-		stats: func(_ context.Context, days int) (magpie.SessionStats, error) {
-			if days != 0 {
-				t.Fatalf("catalog stats days = %d, want 0", days)
-			}
-			result := stats[statsCalls]
-			statsCalls++
-			return result, nil
+		sessions: func(context.Context, int) (magpie.SessionsResponse, error) {
+			return magpie.SessionsResponse{Sessions: []magpie.Session{{Agent: "codex", ID: "s1", Cwd: "/work/usagi"}, {Agent: "codex", ID: "s2"}}}, nil
+		},
+		session: func(context.Context, string) (magpie.Session, error) {
+			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
 	s := newService(u)
-	wants := []FilterOptionsResult{
-		{Agents: []AgentOption{{Agent: "a", DisplayName: "A"}, {Agent: "z", DisplayName: "Z"}}, Models: []ModelOption{{Model: "gpt-x", ProviderID: "provider-a", ProviderName: "Alpha"}, {Model: "gpt-x", ProviderID: "provider-z", ProviderName: "Zeta"}}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/a", Name: "a"}, {Kind: ProjectKindProject, Path: cwd, Name: "Usagi"}}},
-		{Agents: []AgentOption{{Agent: "new-agent", DisplayName: "New"}}, Models: []ModelOption{{Model: "new-model", ProviderID: "future-provider", ProviderName: "future-provider"}}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/new-project", Name: "new-project"}}},
+	s.store.warmDays = 0
+	got, err := s.FilterOptions(context.Background(), DateRange{From: "2026-10-11", To: "2026-10-11"})
+	want := FilterOptionsResult{
+		Agents: []AgentOption{{Agent: "claude", DisplayName: "claude"}, {Agent: "codex", DisplayName: "Codex"}},
+		Models: []ModelOption{
+			{Model: "gpt-x", ProviderID: "openai", ProviderName: "OpenAI"},
+			{Model: UnknownModel, ProviderID: "session-unknown", ProviderName: "Local session"},
+		},
+		Projects: []ProjectRef{
+			{Kind: ProjectKindProject, Path: "/work/usagi", Name: "usagi"},
+			{Kind: ProjectKindProjectless},
+			{Kind: ProjectKindUnknown},
+		},
 	}
-	for i, want := range wants {
-		got, err := s.FilterOptions(context.Background())
-		if err != nil || !reflect.DeepEqual(got, want) || requestCalls != i+1 || statsCalls != i+1 {
-			t.Fatalf("catalog %d = %+v, %v, calls %d/%d; want %+v", i, got, err, requestCalls, statsCalls, want)
-		}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("FilterOptions = %+v, %v; want %+v", got, err, want)
+	}
+	if _, err := s.FilterOptions(context.Background(), DateRange{From: "2026-10-12", To: "2026-10-11"}); !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("reversed range error = %v", err)
 	}
 }
