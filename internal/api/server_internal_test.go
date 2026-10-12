@@ -22,6 +22,10 @@ import (
 )
 
 func newServerFixture(t *testing.T) (*Server, *testsupport.FakeProjectionService, *testsupport.FakeRuntime, *testsupport.FakeWatcherQuery) {
+	return newServerFixtureWithShutdown(t, func() {})
+}
+
+func newServerFixtureWithShutdown(t *testing.T, shutdownRequester ShutdownRequester) (*Server, *testsupport.FakeProjectionService, *testsupport.FakeRuntime, *testsupport.FakeWatcherQuery) {
 	t.Helper()
 	t.Setenv("TZ", "UTC")
 	projectionService := &testsupport.FakeProjectionService{}
@@ -35,7 +39,7 @@ func newServerFixture(t *testing.T) (*Server, *testsupport.FakeProjectionService
 	}
 	server, err := NewServer(config, Dependencies{
 		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(),
-		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{},
+		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{}, ShutdownRequester: shutdownRequester,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
@@ -46,14 +50,14 @@ func newServerFixture(t *testing.T) (*Server, *testsupport.FakeProjectionService
 func request(server http.Handler, method, target string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(method, target, nil)
-	req.Host = "127.0.0.1:3210"
+	req.Host = "127.0.0.1:37991"
 	server.ServeHTTP(recorder, req)
 	return recorder
 }
 
 func TestDefaultConfigAndServerAcceptsStartingRuntime(t *testing.T) {
 	config := DefaultConfig()
-	if config.ListenAddress != "127.0.0.1:3210" || config.UsageRefreshInterval != 30*time.Second ||
+	if config.ListenAddress != "127.0.0.1:37991" || config.UsageRefreshInterval != 30*time.Second ||
 		config.SessionRefreshInterval != 30*time.Second || config.QuotaRefreshInterval != 60*time.Second {
 		t.Fatalf("DefaultConfig() = %+v", config)
 	}
@@ -79,10 +83,10 @@ func TestNewServerRejectsNonLoopbackAndNonpositiveIntervals(t *testing.T) {
 	queryService := &testsupport.FakeWatcherQuery{}
 	dependencies := Dependencies{
 		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(),
-		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{},
+		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{}, ShutdownRequester: func() {},
 	}
 	config := DefaultConfig()
-	config.ListenAddress = "0.0.0.0:3210"
+	config.ListenAddress = "0.0.0.0:37991"
 	if _, err := NewServer(config, dependencies); err == nil {
 		t.Fatal("NewServer accepted a non-loopback listen address")
 	}
@@ -371,7 +375,7 @@ func TestInternalAPIBaseRoutesErrorsAndGuards(t *testing.T) {
 		t.Fatalf("forbidden host response = %d %s headers %v", badHost.Code, badHost.Body.String(), badHost.Header())
 	}
 	for _, origin := range []string{"https://example.test", "http://127.0.0.1:", "file:///tmp/index.html"} {
-		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:3210/api/health", nil)
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:37991/api/health", nil)
 		req.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, req)
@@ -404,7 +408,7 @@ func TestEventStreamSendsImmediateAndChangedRevisionOnly(t *testing.T) {
 	writer := newStreamWriter()
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
-	request.Host = "127.0.0.1:3210"
+	request.Host = "127.0.0.1:37991"
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -21,7 +21,6 @@ import {
   type SessionThreadDto,
   type SummaryResponse,
   type ThreadKey,
-  type UpdateStatusResponse,
 } from "./types";
 
 const API_ERROR_CODES = new Set<ApiErrorCode>([
@@ -34,9 +33,6 @@ const API_ERROR_CODES = new Set<ApiErrorCode>([
   "NOT_FOUND",
   "FORBIDDEN_HOST",
   "FORBIDDEN_ORIGIN",
-  "UPDATE_CHECK_FAILED",
-  "UPDATE_NOT_AVAILABLE",
-  "UPDATE_BROWSER_OPEN_FAILED",
 ]);
 
 type JsonRecord = Record<string, unknown>;
@@ -344,18 +340,6 @@ function parseStatus(value: unknown): RuntimeStatusResponse {
   };
 }
 
-function parseUpdateStatus(value: unknown): UpdateStatusResponse {
-  const record = requiredRecord(value);
-  return {
-    current_version: requiredString(record, "current_version"),
-    latest_version: nullableString(record, "latest_version"),
-    update_available: requiredBoolean(record, "update_available"),
-    release_url: nullableString(record, "release_url"),
-    last_checked_at_ms: nullableSafeInteger(record, "last_checked_at_ms"),
-    checking: requiredBoolean(record, "checking"),
-  };
-}
-
 async function parseError(response: Response): Promise<UsagiClientError> {
   let code: ApiErrorCode = "HTTP_ERROR";
   try {
@@ -409,15 +393,6 @@ export type UsagiClient = {
   getSessionDetail(request: { range: DashboardRange; filters: DashboardFilters; key: ThreadKey; signal?: AbortSignal }): Promise<SessionDetailResponse>;
   getStatus(signal?: AbortSignal): Promise<RuntimeStatusResponse>;
   getRevision(signal?: AbortSignal): Promise<RevisionResponse>;
-  getUpdateStatus?(signal?: AbortSignal): Promise<UpdateStatusResponse>;
-  checkUpdate?(signal?: AbortSignal): Promise<UpdateStatusResponse>;
-  openRelease?(signal?: AbortSignal): Promise<void>;
-};
-
-export type UsagiUpdateClient = {
-  getUpdateStatus(signal?: AbortSignal): Promise<UpdateStatusResponse>;
-  checkUpdate(signal?: AbortSignal): Promise<UpdateStatusResponse>;
-  openRelease(signal?: AbortSignal): Promise<void>;
 };
 
 function sortedUnique(values: readonly string[]): string[] {
@@ -508,7 +483,7 @@ export function threadKeyId(key: ThreadKey): string {
   return JSON.stringify([key.agent, key.session_id, key.thread_id]);
 }
 
-export const usagiClient: UsagiClient & UsagiUpdateClient = {
+export const usagiClient: UsagiClient = {
   async quota(signal) {
     return parseQuota(await requestJson<unknown>("/api/quota", "GET", signal));
   },
@@ -547,29 +522,5 @@ export const usagiClient: UsagiClient & UsagiUpdateClient = {
   },
   async getRevision(signal) {
     return parseRevision(await requestJson<unknown>("/api/revision", "GET", signal));
-  },
-  async getUpdateStatus(signal) {
-    return parseUpdateStatus(await requestJson<unknown>("/api/update/status", "GET", signal));
-  },
-  async checkUpdate(signal) {
-    return parseUpdateStatus(await requestJson<unknown>("/api/update/check", "POST", signal));
-  },
-  async openRelease(signal) {
-    let response: Response;
-    try {
-      response = await fetch("/api/update/open-release", {
-        method: "POST",
-        signal,
-        credentials: "same-origin",
-        headers: {
-          Accept: "application/json",
-          "X-Usagi-Request": "1",
-        },
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") throw error;
-      throw new UsagiClientError("HTTP_ERROR", 0);
-    }
-    if (!response.ok) throw await parseError(response);
   },
 };

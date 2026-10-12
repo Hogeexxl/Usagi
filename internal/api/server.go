@@ -29,7 +29,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		ListenAddress:          "127.0.0.1:3210",
+		ListenAddress:          "127.0.0.1:37991",
 		AppVersion:             "0.2.6",
 		StaticDir:              "frontend/dist",
 		UsageRefreshInterval:   30 * time.Second,
@@ -55,28 +55,33 @@ type RevisionSource interface {
 	Subscribe() (<-chan RevisionTuple, func())
 }
 
+type ShutdownRequester func()
+
 type WatcherQuery interface {
 	UsageSnapshot(context.Context) (magpie.UsageSummary, error)
 	RefreshSessions(context.Context) ([]query.SessionRefreshFact, error)
 }
 
 type Dependencies struct {
-	Projection    ProjectionService
-	Query         WatcherQuery
-	Revisions     RevisionSource
-	RuntimeStatus RuntimeStatusSource
-	QuotaSnapshot *QuotaSnapshot
+	Projection        ProjectionService
+	Query             WatcherQuery
+	Revisions         RevisionSource
+	RuntimeStatus     RuntimeStatusSource
+	QuotaSnapshot     *QuotaSnapshot
+	ShutdownRequester ShutdownRequester
 }
 
 type Server struct {
-	config     Config
-	projection ProjectionService
-	query      WatcherQuery
-	revisions  RevisionSource
-	runtime    RuntimeStatusSource
-	quotas     *QuotaSnapshot
-	static     http.Handler
-	startOnce  sync.Once
+	config            Config
+	projection        ProjectionService
+	query             WatcherQuery
+	revisions         RevisionSource
+	runtime           RuntimeStatusSource
+	quotas            *QuotaSnapshot
+	static            http.Handler
+	startOnce         sync.Once
+	shutdownOnce      sync.Once
+	shutdownRequester ShutdownRequester
 }
 
 func NewServer(config Config, dependencies Dependencies) (*Server, error) {
@@ -87,7 +92,7 @@ func NewServer(config Config, dependencies Dependencies) (*Server, error) {
 	if err := validateRefreshIntervals(config); err != nil {
 		return nil, err
 	}
-	if dependencies.Projection == nil || dependencies.Query == nil || dependencies.Revisions == nil || dependencies.RuntimeStatus == nil || dependencies.QuotaSnapshot == nil {
+	if dependencies.Projection == nil || dependencies.Query == nil || dependencies.Revisions == nil || dependencies.RuntimeStatus == nil || dependencies.QuotaSnapshot == nil || dependencies.ShutdownRequester == nil {
 		return nil, errors.New("api: server dependencies must be provided")
 	}
 	staticFS := config.StaticFS
@@ -97,7 +102,7 @@ func NewServer(config Config, dependencies Dependencies) (*Server, error) {
 	return &Server{
 		config: config, projection: dependencies.Projection, query: dependencies.Query, revisions: dependencies.Revisions,
 		runtime: dependencies.RuntimeStatus, quotas: dependencies.QuotaSnapshot,
-		static: newStaticHandler(staticFS),
+		static: newStaticHandler(staticFS), shutdownRequester: dependencies.ShutdownRequester,
 	}, nil
 }
 
@@ -296,6 +301,16 @@ func (s *Server) serveInternalAPI(w http.ResponseWriter, r *http.Request) {
 			s.handleQuotaRefresh(w, r)
 			return
 		}
+	case "/api/service":
+		if r.Method == http.MethodGet {
+			s.handleService(w, r)
+			return
+		}
+	case "/api/service/stop":
+		if r.Method == http.MethodPost {
+			s.handleServiceStop(w, r)
+			return
+		}
 	}
 	writeAPIError(w, http.StatusNotFound, ErrorNotFound)
 }
@@ -365,4 +380,33 @@ func (s *Server) ListenAndServe() error {
 	defer cancel()
 	s.Start(ctx)
 	return s.HTTPServer().ListenAndServe()
+}
+
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	s.Start(ctx)
+	httpServer := &http.Server{Addr: s.config.ListenAddress, Handler: s}
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- httpServer.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveResult:
+		return normalizeServeError(err)
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		cancel()
+		if errors.Is(shutdownErr, context.DeadlineExceeded) {
+			_ = httpServer.Close()
+		}
+		return normalizeServeError(<-serveResult)
+	}
+}
+
+func normalizeServeError(err error) error {
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }

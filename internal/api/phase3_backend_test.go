@@ -185,7 +185,7 @@ func phase3NewServer(t *testing.T, projectionService ProjectionService, querySer
 	config.QuotaRefreshInterval = 3 * time.Hour
 	server, err := NewServer(config, Dependencies{
 		Projection: projectionService, Query: queryService, RuntimeStatus: runtime,
-		Revisions: revisions, QuotaSnapshot: quotas,
+		Revisions: revisions, QuotaSnapshot: quotas, ShutdownRequester: func() {},
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
@@ -197,7 +197,7 @@ func phase3OpenStream(t *testing.T, server http.Handler, target string) (*stream
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
-	req.Host = "127.0.0.1:3210"
+	req.Host = "127.0.0.1:37991"
 	writer := newStreamWriter()
 	done := make(chan struct{})
 	go func() {

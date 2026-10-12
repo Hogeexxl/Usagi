@@ -207,15 +207,6 @@ export type RuntimeStatusResponse = {
   last_error_code: string | null;
 };
 
-export type UpdateStatusResponse = {
-  current_version: string;
-  latest_version: string | null;
-  update_available: boolean;
-  release_url: string | null;
-  last_checked_at_ms: number | null;
-  checking: boolean;
-};
-
 export type ApiErrorCode =
   | "INVALID_RANGE"
   | "INVALID_FILTER"
@@ -226,9 +217,6 @@ export type ApiErrorCode =
   | "NOT_FOUND"
   | "FORBIDDEN_HOST"
   | "FORBIDDEN_ORIGIN"
-  | "UPDATE_CHECK_FAILED"
-  | "UPDATE_NOT_AVAILABLE"
-  | "UPDATE_BROWSER_OPEN_FAILED"
   | "HTTP_ERROR";
 
 export class UsagiClientError extends Error {
@@ -244,14 +232,3 @@ export class UsagiClientError extends Error {
 }
 
 export type RevisionTuple = Pick<RevisionResponse, "data_revision" | "status_revision">;
-
-export type UpdateCheckResponse = {
-  status: "up_to_date" | "update_available";
-  current_version: string;
-  latest_version: string;
-  release_url: string | null;
-};
-
-export type UpdateOpenResponse = {
-  status: "opened";
-};

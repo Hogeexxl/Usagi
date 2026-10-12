@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-const BACKEND_DEFAULT_PORT = 3210;
+const BACKEND_DEFAULT_PORT = 37991;
 const BACKEND_PORT_SCAN_COUNT = 32;
 const BACKEND_PROBE_TIMEOUT_MS = 120;
 const BACKEND_RECHECK_MS = 2_000;

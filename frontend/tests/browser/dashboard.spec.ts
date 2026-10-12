@@ -238,14 +238,6 @@ async function routeStableDashboardData(page: Page) {
     last_scan_error_code: null,
     source_binding_status: "ready",
   }));
-  await page.route("**/api/update/status*", (route) => json(route, {
-    current_version: "0.2.0",
-    latest_version: "0.2.0",
-    update_available: false,
-    release_url: null,
-    last_checked_at_ms: null,
-    checking: false,
-  }));
   await page.route("**/api/service", (route) => json(route, { state: "running" }));
   await page.route("**/api/usage/filter-options*", (route) => json(route, {
     data_revision: REVISION,

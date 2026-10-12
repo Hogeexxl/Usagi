@@ -1,0 +1,202 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/Hogeexxl/Usagi/internal/api"
+	"github.com/Hogeexxl/Usagi/internal/projection"
+	"github.com/Hogeexxl/Usagi/internal/query"
+)
+
+const magpieRetryInterval = 5 * time.Second
+
+type BrowserOpener interface {
+	Open(string) error
+}
+
+type Dependencies struct {
+	RuntimeFactory RuntimeFactory
+	Browser        BrowserOpener
+	StaticFS       fs.FS
+}
+
+func Run(ctx context.Context, dependencies Dependencies) error {
+	return run(ctx, dependencies, RuntimePortRange())
+}
+
+func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runErr error) {
+	if dependencies.RuntimeFactory == nil || dependencies.Browser == nil || dependencies.StaticFS == nil {
+		return errors.New("app: runtime factory, browser, and static filesystem must be provided")
+	}
+
+	bound, err := BindLoopback(ports)
+	if err != nil {
+		return fmt.Errorf("app: bind runtime port: %w", err)
+	}
+	if bound.Existing != nil {
+		openDashboard(dependencies.Browser, bound.Existing.String()+"/")
+		return nil
+	}
+	listener := bound.Listener
+	defer listener.Close()
+
+	baseURL, port, err := listenerURL(listener)
+	if err != nil {
+		return err
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	supervisorCtx, cancelSupervisor := context.WithCancel(context.Background())
+	defer cancelRun()
+	defer cancelSupervisor()
+
+	supervisor := NewMagpieSupervisor(dependencies.RuntimeFactory, magpieRetryInterval)
+	queryService := query.NewRuntimeService(supervisor)
+	projectionService := projection.NewService(queryService)
+	revisions := api.NewRevisionService()
+	quotaSnapshot := &api.QuotaSnapshot{}
+
+	config := api.DefaultConfig()
+	config.ListenAddress = listener.Addr().String()
+	config.StaticFS = dependencies.StaticFS
+	server, err := api.NewServer(config, api.Dependencies{
+		Projection: projectionService, Query: queryService, Revisions: revisions,
+		RuntimeStatus: supervisor, QuotaSnapshot: quotaSnapshot, ShutdownRequester: api.ShutdownRequester(cancelRun),
+	})
+	if err != nil {
+		_ = supervisor.Close()
+		return fmt.Errorf("app: create API server: %w", err)
+	}
+
+	serveDone := make(chan struct{})
+	var serveErr error
+	go func() {
+		serveErr = server.Serve(runCtx, listener)
+		close(serveDone)
+	}()
+	go func() {
+		supervisor.Run(supervisorCtx)
+	}()
+
+	descriptorWritten := false
+	defer func() {
+		cancelRun()
+		<-serveDone
+		cancelSupervisor()
+		if err := supervisor.Close(); err != nil && runErr == nil {
+			runErr = fmt.Errorf("app: close Magpie supervisor: %w", err)
+		}
+		if descriptorWritten {
+			if err := RemoveRuntimeDescriptor(); err != nil {
+				slog.Error("remove runtime descriptor", "error", err)
+			}
+		}
+	}()
+
+	if err := waitForHealth(runCtx, baseURL, serveDone); err != nil {
+		if runCtx.Err() != nil {
+			return nil
+		}
+		if serveErr != nil {
+			return fmt.Errorf("app: HTTP server stopped before health became ready: %w", serveErr)
+		}
+		return fmt.Errorf("app: HTTP server stopped before health became ready: %w", err)
+	}
+
+	if RuntimeDescriptorEnabled() {
+		if err := WriteRuntimeDescriptor(RuntimeDescriptor{
+			SchemaVersion: 1,
+			PID:           os.Getpid(),
+			Port:          int(port),
+			BaseURL:       baseURL,
+		}); err != nil {
+			return fmt.Errorf("app: write runtime descriptor: %w", err)
+		}
+		descriptorWritten = true
+	}
+
+	openDashboard(dependencies.Browser, baseURL+"/")
+
+	select {
+	case <-runCtx.Done():
+	case <-serveDone:
+		if runCtx.Err() != nil {
+			return nil
+		}
+		if serveErr != nil {
+			return fmt.Errorf("app: HTTP server stopped unexpectedly: %w", serveErr)
+		}
+		return errors.New("app: HTTP server stopped unexpectedly")
+	}
+
+	return nil
+}
+
+func listenerURL(listener net.Listener) (string, uint16, error) {
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		return "", 0, fmt.Errorf("app: read runtime listener address: %w", err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return "", 0, fmt.Errorf("app: read runtime listener port: %w", err)
+	}
+	address := net.JoinHostPort(host, strconv.FormatUint(port, 10))
+	baseURL := (&url.URL{Scheme: "http", Host: address}).String()
+	return baseURL, uint16(port), nil
+}
+
+func waitForHealth(ctx context.Context, baseURL string, serveDone <-chan struct{}) error {
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: nil},
+		Timeout:   300 * time.Millisecond,
+	}
+	defer client.CloseIdleConnections()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-serveDone:
+			return errors.New("HTTP server stopped")
+		default:
+		}
+
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/health", nil)
+		if err != nil {
+			return err
+		}
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			marker := response.Header.Values("X-Usagi-App")
+			if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices && len(marker) == 1 && marker[0] == "Usagi" {
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-serveDone:
+			return errors.New("HTTP server stopped")
+		case <-ticker.C:
+		}
+	}
+}
+
+func openDashboard(browser BrowserOpener, target string) {
+	if err := browser.Open(target); err != nil {
+		slog.Error("open dashboard", "url", target, "error", err)
+	}
+}

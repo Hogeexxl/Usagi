@@ -366,7 +366,7 @@ func TestPublicV1EventsSendsInitialAndChangedPublicRevisionFrames(t *testing.T) 
 	writer := newStreamWriter()
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, publicV1EventsPath, nil).WithContext(ctx)
-	req.Host = "127.0.0.1:3210"
+	req.Host = "127.0.0.1:37991"
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -514,7 +514,7 @@ func TestExportPublicV1HTTPResponsesForSwiftDecode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	request := httptest.NewRequest(http.MethodGet, publicV1EventsPath, nil).WithContext(ctx)
-	request.Host = "127.0.0.1:3210"
+	request.Host = "127.0.0.1:37991"
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

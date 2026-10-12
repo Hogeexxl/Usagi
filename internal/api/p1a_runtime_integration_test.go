@@ -139,7 +139,7 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	server, err := NewServer(config, Dependencies{
 		Projection: p1aWatcherProjectionProbe{ProjectionService: projectionService, initialReadDone: initialWatcherReads},
 		Query:      p1aWatcherQueryProbe{WatcherQuery: queryService, initialReadDone: initialWatcherReads}, Revisions: revisions,
-		RuntimeStatus: runtime, QuotaSnapshot: quotaSnapshot,
+		RuntimeStatus: runtime, QuotaSnapshot: quotaSnapshot, ShutdownRequester: func() {},
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
@@ -164,7 +164,7 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	streamWriter := newStreamWriter()
 	streamCtx, stopStream := context.WithCancel(ctx)
 	streamRequest := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(streamCtx)
-	streamRequest.Host = "127.0.0.1:3210"
+	streamRequest.Host = "127.0.0.1:37991"
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)

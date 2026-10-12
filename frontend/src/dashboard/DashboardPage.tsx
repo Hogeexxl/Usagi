@@ -17,7 +17,6 @@ import { SessionSection } from "./session/SessionSection";
 import { createAgentDisplayLookup } from "./shared/agentDisplay";
 import { useSessionDetailController } from "./session/useSessionDetailController";
 import { useSessionTableController } from "./session/useSessionTableController";
-import { UpdateButton } from "./UpdateButton";
 import { useDashboardQuotaController } from "./useDashboardQuotaController";
 import { useDashboardController, type DashboardControllerOptions } from "./useDashboardController";
 
@@ -87,7 +86,6 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           <header className="dashboard-header">
             <div className="flex min-w-0 items-center gap-3">
               <h1 className="text-foreground">Usagi</h1>
-              <UpdateButton client={options?.client} />
             </div>
             <div className="dashboard-sync-group">
               <Button

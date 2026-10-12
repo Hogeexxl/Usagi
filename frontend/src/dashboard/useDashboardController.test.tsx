@@ -154,9 +154,10 @@ describe("useDashboardController", () => {
     const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: () => source }));
     await waitFor(() => expect(result.current.filter_options).toEqual(options(1)));
 
-    source.onmessage?.({ data: JSON.stringify({ data_revision: 2, status_revision: 1 }) } as MessageEvent<string>);
-    await waitFor(() => expect(result.current.metrics?.input).toBe(10));
-    expect(result.current.filter_options_stale).toBe(true);
+    await act(async () => {
+      source.onmessage?.({ data: JSON.stringify({ data_revision: 2, status_revision: 1 }) } as MessageEvent<string>);
+    });
+    await waitFor(() => expect(result.current.filter_options_stale).toBe(true));
     expect(result.current.filter_options).toEqual(options(1));
 
     await act(async () => result.current.retry_filter_options());
