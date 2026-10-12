@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -145,11 +146,11 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	server.Start(ctx)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		select {
 		case <-initialWatcherReads:
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for initial usage, sessions, and quota watcher reads")
+			t.Fatal("timed out waiting for initial usage and session watcher reads")
 		}
 	}
 
@@ -187,6 +188,11 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	waitFor(t, func() bool {
 		return strings.Contains(streamWriter.bodyString(), `data: {"data_revision":1,"status_revision":1}`)
 	})
+	waitFor(t, func() bool {
+		requestMu.Lock()
+		defer requestMu.Unlock()
+		return len(quotaAsked) == 1
+	})
 
 	watcher.refreshUsage(ctx)
 	watcher.refreshSessions(ctx)
@@ -203,9 +209,9 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 		requestMu.Unlock()
 		t.Fatalf("session endpoint calls from two manual watcher ticks = %d, want exactly 2", sessionCalls)
 	}
-	if len(quotaAsked) != 0 {
+	if !reflect.DeepEqual(quotaAsked, []string{""}) {
 		requestMu.Unlock()
-		t.Fatalf("quota calls before manual quota tick = %v, want none", quotaAsked)
+		t.Fatalf("quota calls after Runtime became ready = %v, want one background request", quotaAsked)
 	}
 	requestMu.Unlock()
 

@@ -67,6 +67,8 @@ type watchers struct {
 	sessionHasBaseline bool
 }
 
+const quotaReadingPollInterval = time.Second
+
 func newWatchers(queryService watcherQuery, quotaService watcherQuotaService, revisions RevisionService, quotaSnapshot *QuotaSnapshot, usageInterval, sessionInterval, quotaInterval time.Duration) *watchers {
 	return &watchers{
 		query:           queryService,
@@ -79,10 +81,10 @@ func newWatchers(queryService watcherQuery, quotaService watcherQuotaService, re
 	}
 }
 
-func (w *watchers) start(ctx context.Context) {
+func (w *watchers) start(ctx context.Context, runtime RuntimeStatusSource) {
 	go w.run(ctx, w.usageInterval, w.refreshUsage)
 	go w.run(ctx, w.sessionInterval, w.refreshSessions)
-	go w.run(ctx, w.quotaInterval, w.refreshQuota)
+	go w.runQuota(ctx, runtime, quotaReadingPollInterval)
 }
 
 func (w *watchers) run(ctx context.Context, interval time.Duration, refresh func(context.Context)) {
@@ -143,15 +145,77 @@ func (w *watchers) refreshSessions(ctx context.Context) {
 	}
 }
 
-func (w *watchers) refreshQuota(ctx context.Context) {
+func (w *watchers) runQuota(ctx context.Context, runtime RuntimeStatusSource, readingInterval time.Duration) {
+	statuses, cancel := runtime.Subscribe()
+	defer cancel()
+
+	var status magpie.RuntimeStatus
+	var hasStatus bool
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	stopTimer := func() {
+		if timer != nil && !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerC = nil
+	}
+	defer stopTimer()
+	schedule := func(interval time.Duration) {
+		if timer == nil {
+			timer = time.NewTimer(interval)
+		} else {
+			stopTimer()
+			timer.Reset(interval)
+		}
+		timerC = timer.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case state, ok := <-statuses:
+			if !ok {
+				return
+			}
+			if hasStatus && state == status {
+				continue
+			}
+			status = state
+			hasStatus = true
+			if state == magpie.RuntimeStatusReady {
+				schedule(0)
+			} else {
+				stopTimer()
+			}
+		case <-timerC:
+			timerC = nil
+			if !hasStatus || status != magpie.RuntimeStatusReady {
+				continue
+			}
+			if w.refreshQuota(ctx) {
+				schedule(readingInterval)
+			} else {
+				schedule(w.quotaInterval)
+			}
+		}
+	}
+}
+
+func (w *watchers) refreshQuota(ctx context.Context) bool {
 	view, err := w.quotaService.Quotas(ctx, false)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.quotaSnapshot.RecordError(err)
 		}
-		return
+		view, loaded, _ := w.quotaSnapshot.Current()
+		return !loaded || view.Reading
 	}
 	w.quotaSnapshot.Replace(view)
+	return view.Reading
 }
 
 func usageFingerprint(summary magpie.UsageSummary) ([32]byte, error) {

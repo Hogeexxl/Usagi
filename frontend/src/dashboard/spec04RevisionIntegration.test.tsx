@@ -106,11 +106,15 @@ function setupHttpWire(initial: {
   revision?: RevisionTuple;
   runtimeState?: "starting" | "ready" | "unavailable";
   summaryFailures?: number;
+  quotaReading?: boolean;
+  quotaItems?: unknown[];
 } = {}) {
   const backend = {
     revision: initial.revision ?? { data_revision: 80, status_revision: 12 },
     runtimeState: initial.runtimeState ?? "ready",
     summaryFailures: initial.summaryFailures ?? 0,
+    quotaReading: initial.quotaReading ?? true,
+    quotaItems: initial.quotaItems ?? [],
     holdApplicationReads: false,
   };
   const requests: Array<{ path: string; method: string; signal: AbortSignal | null | undefined }> = [];
@@ -121,7 +125,9 @@ function setupHttpWire(initial: {
     const statusRevision = backend.revision.status_revision;
     if (path === "/api/revision") return { body: backend.revision, status: 200 };
     if (path === "/api/status") return { body: { status_revision: statusRevision, runtime_state: backend.runtimeState, last_error_code: null }, status: 200 };
-    if (path === "/api/quota" || path === "/api/quota/refresh") return { body: { reading: true, items: [] }, status: 200 };
+    if (path === "/api/quota" || path === "/api/quota/refresh") {
+      return { body: { reading: backend.quotaReading, items: backend.quotaItems }, status: 200 };
+    }
     if (path === "/api/usage/summary") {
       if (backend.summaryFailures > 0) {
         backend.summaryFailures -= 1;
@@ -353,7 +359,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     feed.dispose();
   });
 
-  it("keeps one cached Quota GET per 60 seconds, posts manual refresh, and does not poll a closed Detail", async () => {
+  it("polls cached Quota while reading, resumes 60 seconds after ready, and keeps manual refresh isolated", async () => {
     vi.useFakeTimers();
     const api = setupHttpWire();
     const source = eventSource();
@@ -369,19 +375,44 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     const detailGets = api.requests.filter((request) => request.path === "/api/usage/session-detail").length;
     const summaryGets = api.requests.filter((request) => request.path === "/api/usage/summary").length;
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(1);
-    await act(async () => { await vi.advanceTimersByTimeAsync(58_999); });
+    expect(result.current.quota.quota.reading).toBe(true);
+    api.backend.quotaReading = false;
+    api.backend.quotaItems = [{
+      provider: "codex",
+      name: "Codex",
+      plan: "Pro",
+      user: "quota-user",
+      windows: [],
+      balance: "",
+      error: "",
+      as_of_ms: 80,
+      read_at_ms: 81,
+    }];
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await flushMicrotasks();
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(2);
-    expect(result.current.quota.quota.reading).toBe(true);
+    expect(result.current.quota.quota).toEqual({ reading: false, items: api.backend.quotaItems });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await flushMicrotasks();
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);
+    expect(result.current.quota.quota.reading).toBe(false);
 
     await act(async () => result.current.quota.refresh());
+    await flushMicrotasks();
     expect(api.requests.filter((request) => request.path === "/api/quota/refresh" && request.method === "POST")).toHaveLength(1);
+    expect(result.current.quota.quota.reading).toBe(false);
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);
     expect(api.requests.filter((request) => request.path === "/api/usage/summary")).toHaveLength(summaryGets);
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);
+    await flushMicrotasks();
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(4);
+    expect(api.requests.filter((request) => request.path === "/api/quota/refresh" && request.method === "POST")).toHaveLength(1);
     expect(api.requests.filter((request) => request.path === "/api/usage/session-detail")).toHaveLength(detailGets);
     expect(api.requests.filter((request) => request.path === "/api/usage/summary")).toHaveLength(summaryGets);
     unmount();

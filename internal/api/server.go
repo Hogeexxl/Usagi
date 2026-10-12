@@ -157,7 +157,7 @@ func validateRefreshIntervals(config Config) error {
 func (s *Server) Start(ctx context.Context) {
 	s.startOnce.Do(func() {
 		startRuntimeStatusSubscription(ctx, s.runtime, s.revisions)
-		newWatchers(s.query, s.projection, s.revisions, s.quotas, s.config.UsageRefreshInterval, s.config.SessionRefreshInterval, s.config.QuotaRefreshInterval).start(ctx)
+		newWatchers(s.query, s.projection, s.revisions, s.quotas, s.config.UsageRefreshInterval, s.config.SessionRefreshInterval, s.config.QuotaRefreshInterval).start(ctx, s.runtime)
 	})
 }
 
