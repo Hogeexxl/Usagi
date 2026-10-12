@@ -76,6 +76,7 @@ type storeFixture struct {
 	digestsOn []string
 	block     chan struct{}
 	fail      error
+	failures  int // when set, only this many requests fail
 }
 
 func newStoreFixture() *storeFixture {
@@ -96,6 +97,12 @@ func (f *storeFixture) upstream() *sessionUpstream {
 		requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
 			f.mu.Lock()
 			block, fail := f.block, f.fail
+			if f.failures > 0 {
+				f.failures--
+				if f.failures == 0 {
+					f.fail = nil
+				}
+			}
 			f.fetches = append(f.fetches, q.Period)
 			f.mu.Unlock()
 			if block != nil {
@@ -370,6 +377,49 @@ func TestStoreFetchFailureIsNotCached(t *testing.T) {
 	buckets, err := store.rows(ctx, "2026-10-12", "2026-10-12")
 	if err != nil || !reflect.DeepEqual(bucketInputs(buckets), [][]int{{1}}) {
 		t.Fatalf("retry after failure = %v, %v", bucketInputs(buckets), err)
+	}
+}
+
+func TestStoreRetriesTransientFetchFailures(t *testing.T) {
+	ctx := context.Background()
+	f := newStoreFixture()
+	f.set("2026-10-11", 2)
+	f.set("2026-10-12", 1)
+	f.fail = &magpie.WebError{Err: &magpie.HTTPError{StatusCode: 503}}
+	f.failures = 1
+	store := newFixtureStore(f, "2026-10-12", 0)
+	buckets, err := store.rows(ctx, "2026-10-12", "2026-10-12")
+	if err != nil || !reflect.DeepEqual(bucketInputs(buckets), [][]int{{1}}) {
+		t.Fatalf("rows after transient failure = %v, %v", bucketInputs(buckets), err)
+	}
+	if got := f.fetched(); len(got) != 2 {
+		t.Fatalf("fetched = %v, want one retry", got)
+	}
+
+	rejected := &magpie.WebError{Err: &magpie.HTTPError{StatusCode: 400}}
+	f.fail = rejected
+	if _, err := store.rows(ctx, "2026-10-11", "2026-10-11"); !errors.Is(err, rejected) {
+		t.Fatalf("rejected fetch = %v, want %v", err, rejected)
+	}
+	if got := f.fetched(); len(got) != 1 {
+		t.Fatalf("rejected fetch retried: %v", got)
+	}
+}
+
+func TestStoreSkipsDaysAfterToday(t *testing.T) {
+	ctx := context.Background()
+	f := newStoreFixture()
+	f.set("2026-10-12", 1)
+	store := newFixtureStore(f, "2026-10-12", 0)
+	buckets, err := store.rows(ctx, "2026-10-12", "2026-12-31")
+	if err != nil || !reflect.DeepEqual(bucketInputs(buckets), [][]int{{1}}) {
+		t.Fatalf("rows = %v, %v", bucketInputs(buckets), err)
+	}
+	f.mu.Lock()
+	digestsOn := slices.Clone(f.digestsOn)
+	f.mu.Unlock()
+	if want := []string{"2026-10-12..2026-10-12"}; !reflect.DeepEqual(digestsOn, want) {
+		t.Fatalf("digests read for %v, want %v", digestsOn, want)
 	}
 }
 

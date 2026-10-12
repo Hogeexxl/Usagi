@@ -202,16 +202,17 @@ func groupOf(row magpie.UsageRequest, project ProjectRef, by UsageGroupBy) ([3]s
 		key[0] = row.Agent
 		group.Agent, group.AgentName = row.Agent, row.AgentName
 	case GroupModel:
-		key[0] = row.Model
-		group.Model = row.Model
+		key[0] = ModelName(row.Model)
+		group.Model = key[0]
 	case GroupModelEffort:
-		key[0], key[1] = row.Model, row.Effort
-		group.Model, group.Effort = row.Model, row.Effort
+		key[0], key[1] = ModelName(row.Model), row.Effort
+		group.Model, group.Effort = key[0], row.Effort
 	case GroupProject, GroupProjectModel, GroupProjectEffort:
 		key[0], key[1] = string(project.Kind), project.Path
 		group.Project = project
 		if by == GroupProjectModel {
-			key[2], group.Model = row.Model, row.Model
+			key[2] = ModelName(row.Model)
+			group.Model = key[2]
 		}
 		if by == GroupProjectEffort {
 			key[2], group.Effort = row.Effort, row.Effort

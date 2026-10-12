@@ -46,7 +46,7 @@ func (u *threadUsage) addRow(row query.UsageRow) {
 			u.last = row.Time
 		}
 	}
-	key := modelEffortKey{Model: row.Model, Effort: row.Effort}
+	key := modelEffortKey{Model: query.ModelName(row.Model), Effort: row.Effort}
 	if u.models == nil {
 		u.models = make(map[modelEffortKey]*usageAccumulator)
 	}
@@ -105,7 +105,7 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 	for _, row := range rows.Rows {
 		if row.Agent == "codex" && row.ResolvedSession.ID != "" {
 			sessionKey := threadSessionKey{Agent: row.ResolvedSession.Agent, SessionID: row.ResolvedSession.ID}
-			groupKey := modelEffortKey{Model: row.Model, Effort: row.Effort}
+			groupKey := modelEffortKey{Model: query.ModelName(row.Model), Effort: row.Effort}
 			groups := compactions[sessionKey]
 			if groups == nil {
 				groups = make(map[modelEffortKey]compactionUsage)

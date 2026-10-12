@@ -382,3 +382,25 @@ func testUsageRow(agent, sessionID, subagent, parent string, at time.Time, model
 		Input:           input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite, Priced: true,
 	}
 }
+
+func TestSessionProjectionMatchesCompactionOnUnknownModel(t *testing.T) {
+	session := query.SessionUsage{
+		Agent: "codex", ID: "A", LastUsage: testTime(12, 0),
+		ModelEffort: []query.ModelEffortUsage{{Model: query.UnknownModel, Totals: query.UsageTotals{Calls: 2, Input: 5}}},
+	}
+	service := newService(&fakeQuery{
+		sessions: query.SessionResult{Sessions: []query.SessionUsage{session}},
+		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+			testUsageRow("codex", "A", "", "", testTime(10, 0), "", "", 3, 0, 0, 0, "", "gateway"),
+			testUsageRow("codex", "A", "", "", testTime(11, 0), "", "", 2, 0, 0, 0, "compact", "gateway"),
+		}},
+	})
+	list, err := service.Sessions(context.Background(), ScopeQuery{})
+	if err != nil || len(list.Items) != 1 {
+		t.Fatalf("Sessions() = %+v, %v", list, err)
+	}
+	groups := list.Items[0].Thread.ModelEffort
+	if len(groups) != 1 || groups[0].Model != query.UnknownModel || groups[0].CompactionTokens == nil || *groups[0].CompactionTokens != 2 {
+		t.Fatalf("unknown model group = %+v, want compaction matched from model-less rows", groups)
+	}
+}

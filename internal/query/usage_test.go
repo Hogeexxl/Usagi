@@ -43,6 +43,42 @@ func TestUsageValidation(t *testing.T) {
 	}
 }
 
+func TestUsageGroupsMissingModelAsUnknown(t *testing.T) {
+	rows := []magpie.UsageRequest{
+		{Agent: "codex", Provider: "p", Model: "", Session: "s", Input: 2, Priced: true},
+		{Agent: "codex", Provider: "p", Model: "m", Session: "s", Input: 3, Priced: true},
+	}
+	u := &sessionUpstream{
+		requests: func(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
+			return magpie.UsageRequestsPage{Rows: rows, Total: len(rows)}, nil
+		},
+		sessions: func(context.Context, int) (magpie.SessionsResponse, error) { return magpie.SessionsResponse{}, nil },
+		session: func(context.Context, string) (magpie.Session, error) {
+			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
+		},
+	}
+	s := newService(u)
+	s.store.warmDays = 0
+	r := DateRange{From: "2026-10-11", To: "2026-10-11"}
+	for _, by := range []UsageGroupBy{GroupModel, GroupModelEffort, GroupProjectModel} {
+		got, err := s.Usage(context.Background(), UsageQuery{Range: r, GroupBy: by})
+		if err != nil || len(got.Groups) != 2 || got.Groups[0].Model != "m" || got.Groups[1].Model != UnknownModel || got.Groups[1].Totals.Input != 2 {
+			t.Fatalf("Usage(%q) = %+v, %v; want missing model grouped as %q", by, got.Groups, err, UnknownModel)
+		}
+	}
+	sessions, err := s.Sessions(context.Background(), SessionQuery{Range: r})
+	if err != nil || len(sessions.Sessions) != 1 {
+		t.Fatalf("Sessions = %+v, %v", sessions, err)
+	}
+	var models []string
+	for _, group := range sessions.Sessions[0].ModelEffort {
+		models = append(models, group.Model)
+	}
+	if want := []string{"m", UnknownModel}; !reflect.DeepEqual(models, want) {
+		t.Fatalf("session model groups = %v, want %v", models, want)
+	}
+}
+
 func TestUsageRequestsAndGroups(t *testing.T) {
 	ctx := context.Background()
 	r := DateRange{From: "2026-10-11", To: "2026-10-11"}

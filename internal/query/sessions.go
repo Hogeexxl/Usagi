@@ -50,7 +50,7 @@ func (s *Service) Sessions(ctx context.Context, q SessionQuery) (SessionResult, 
 		if row.Time.After(group.usage.LastUsage) {
 			group.usage.LastUsage = row.Time
 		}
-		modelKey := [2]string{row.Model, row.Effort}
+		modelKey := [2]string{ModelName(row.Model), row.Effort}
 		modelTotals := group.models[modelKey]
 		modelTotals.add(totals)
 		group.models[modelKey] = modelTotals

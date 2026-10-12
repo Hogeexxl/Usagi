@@ -185,6 +185,18 @@ type ModelOption struct {
 	ProviderName string
 }
 
+// UnknownModel names the model group of request rows Magpie recorded without
+// a model, so they still aggregate and display as their own group.
+const UnknownModel = "未知模型"
+
+// ModelName returns the model a row aggregates under.
+func ModelName(model string) string {
+	if model == "" {
+		return UnknownModel
+	}
+	return model
+}
+
 var (
 	ErrInvalidRange   = errors.New("query: invalid range")
 	ErrInvalidFilter  = errors.New("query: invalid filter")

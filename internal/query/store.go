@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ const (
 	storeFetchWorkers    = 4
 	storeFetchAttempts   = 3
 	storeFetchTimeout    = 2 * time.Minute
+	storeRetryDelay      = 500 * time.Millisecond
 	// The warm window always stays cached; other days are evicted once idle.
 	storeWarmDays = 30
 	storeIdleTTL  = 30 * time.Minute
@@ -88,11 +90,14 @@ func (s *usageStore) rows(ctx context.Context, from, to string) ([]*dayBucket, e
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	now := s.now()
+	// Days after today hold no rows yet, so ranges such as "year" stop at today.
+	today := now.Format(time.DateOnly)
+	days = slices.DeleteFunc(days, func(day string) bool { return day > today })
 	slices.Reverse(days)
 	buckets := make([]*dayBucket, len(days))
 	var missing []string
-	s.mu.Lock()
-	now := s.now()
 	for i, day := range days {
 		s.lastUsed[day] = now
 		if bucket, ok := s.days[day]; ok {
@@ -242,16 +247,18 @@ func (s *usageStore) start(day string, digest dayDigest) *dayFetch {
 var errDayFetchAborted = errors.New("query: usage day fetch aborted")
 
 // fetchDay pages through one day. Rows landing mid-scan shift offsets, so a
-// scan whose total moved is retried.
+// scan whose total moved is retried, as is a scan hit by a transient error.
 func (s *usageStore) fetchDay(ctx context.Context, day string, digest [32]byte) (*dayBucket, error) {
 	for attempt := 1; ; attempt++ {
 		q := magpie.UsageRequestsQuery{Period: day + ".." + day, Limit: storePageLimit}
 		var rows []magpie.UsageRequest
 		total, stable := -1, true
+		var err error
 		for {
-			page, err := s.upstream.UsageRequests(ctx, q)
+			var page magpie.UsageRequestsPage
+			page, err = s.upstream.UsageRequests(ctx, q)
 			if err != nil {
-				return nil, fmt.Errorf("query: usage requests %s: %w", day, err)
+				break
 			}
 			if total >= 0 && page.Total != total {
 				stable = false
@@ -263,10 +270,35 @@ func (s *usageStore) fetchDay(ctx context.Context, day string, digest [32]byte) 
 				break
 			}
 		}
+		if err != nil {
+			if attempt == storeFetchAttempts || !isTransientFetchError(err) {
+				return nil, fmt.Errorf("query: usage requests %s: %w", day, err)
+			}
+			select {
+			case <-time.After(storeRetryDelay * time.Duration(attempt)):
+				continue
+			case <-ctx.Done():
+				return nil, fmt.Errorf("query: usage requests %s: %w", day, err)
+			}
+		}
 		if stable || attempt == storeFetchAttempts {
 			return &dayBucket{rows: rows, digest: digest}, nil
 		}
 	}
+}
+
+// isTransientFetchError reports whether a failed Magpie request is worth
+// retrying: network failures and server errors, not rejected requests.
+func isTransientFetchError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *magpie.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	var webErr *magpie.WebError
+	return errors.As(err, &webErr)
 }
 
 // digests reads Magpie's per-day digests for days, in windows Magpie still
