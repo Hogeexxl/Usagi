@@ -36,12 +36,12 @@ const compactUsage: UsageDto = {
   unpriced: 0,
 };
 
-const tokenBarLabel = "Token 构成：输入、缓存读、缓存写和输出；推理 Token 包含在输出 Token 中";
+const tokenBarLabel = "Token 分布：输入、缓存读和输出；推理 Token 包含在输出 Token 中";
 const resetAt = Date.UTC(2026, 7, 12, 4, 23);
 
-function quotaWindow(name: string, used: number, resetsAt = resetAt): QuotaWindowDto {
+function quotaWindow(name: string, used: number, resetsAt = resetAt, unlimited = false): QuotaWindowDto {
   return {
-    unlimited: false,
+    unlimited,
     name,
     used,
     resets_at_ms: resetsAt,
@@ -76,14 +76,14 @@ function provider(
 
 const quota: QuotaResponse = {
   reading: false,
-  items: [provider("codex", "Codex", [quotaWindow("Weekly", 0.55)], "hoge@example.com")],
+  items: [provider("codex", "Codex", [quotaWindow("Weekly", 55)], "hoge@example.com")],
 };
 
 const manyProviders: QuotaResponse = {
   reading: false,
   items: [
-    provider("codex", "Codex", [quotaWindow("5H", 0.12), quotaWindow("Weekly", 0.55)], "hoge@example.com"),
-    provider("gemini", "Gemini", [quotaWindow("5H", 0.2), quotaWindow("Weekly", 0.65)], "gemini@example.com"),
+    provider("codex", "Codex", [quotaWindow("5H", 12), quotaWindow("Weekly", 55)], "hoge@example.com"),
+    provider("gemini", "Gemini", [quotaWindow("5H", 20), quotaWindow("Weekly", 65)], "gemini@example.com"),
   ],
 };
 
@@ -160,22 +160,27 @@ describe("MetricGrid Spec04", () => {
     expect(screen.queryByText("会话数量")).not.toBeInTheDocument();
   });
 
-  it("lays out disjoint token fields against projection total and nests reasoning within output", () => {
+  it("shows visible token fields as a normalized bar and keeps reasoning nested within output", () => {
     render(<MetricGridFixture usage={usage} quota={quota} />);
+    const card = cardByTitle("总 Token");
     const bar = screen.getByLabelText(tokenBarLabel) as HTMLElement;
     const input = segmentByClass(bar, "bg-[#68c0e8]");
     const cacheRead = segmentByClass(bar, "bg-[#be506e]");
-    const cacheWrite = segmentByClass(bar, "bg-[#8660a8]");
     const output = segmentByClass(bar, "bg-[#be753e]");
     const reasoning = segmentByClass(bar, "bg-[#a6333d]");
+    const visibleTotal = usage.input + usage.cache_read + usage.output;
 
-    expect(bar.children).toHaveLength(5);
-    expect(input).toHaveStyle({ left: "", width: "30%" });
-    expect(cacheRead).toHaveStyle({ left: "30%", width: "20%" });
-    expect(cacheWrite).toHaveStyle({ left: "50%", width: "15%" });
-    expect(output).toHaveStyle({ left: "65%", width: "35%" });
-    expect(reasoning).toHaveStyle({ left: "93.75%", width: "6.25%" });
-    expect(Number.parseFloat(input.style.width) + Number.parseFloat(cacheRead.style.width) + Number.parseFloat(cacheWrite.style.width) + Number.parseFloat(output.style.width)).toBeCloseTo(100);
+    expect(within(card).getByTitle("2,000")).toHaveTextContent("2K");
+    expect(within(card).queryByText("缓存写")).not.toBeInTheDocument();
+    expect(within(card).queryByTitle("300")).not.toBeInTheDocument();
+    expect(within(card).queryByLabelText(/缓存写/)).not.toBeInTheDocument();
+    expect(bar.children).toHaveLength(4);
+    expect(input).toHaveStyle({ left: "", width: `${(usage.input / visibleTotal) * 100}%` });
+    expect(cacheRead).toHaveStyle({ left: `${(usage.input / visibleTotal) * 100}%`, width: `${(usage.cache_read / visibleTotal) * 100}%` });
+    expect(output).toHaveStyle({ left: `${((usage.input + usage.cache_read) / visibleTotal) * 100}%`, width: `${(usage.output / visibleTotal) * 100}%` });
+    expect(Number.parseFloat(reasoning.style.left)).toBeCloseTo(((visibleTotal - usage.reasoning) / visibleTotal) * 100);
+    expect(Number.parseFloat(reasoning.style.width)).toBeCloseTo((usage.reasoning / visibleTotal) * 100);
+    expect(Number.parseFloat(input.style.width) + Number.parseFloat(cacheRead.style.width) + Number.parseFloat(output.style.width)).toBeCloseTo(100);
     expect(screen.getByRole("button", { name: /推理 125，包含在输出 Token 中/ })).toBeInTheDocument();
 
     const widths = Array.from(bar.children, (segment) => (segment as HTMLElement).style.width);
@@ -186,19 +191,22 @@ describe("MetricGrid Spec04", () => {
     }
   });
 
-  it("uses the cache hit rate denominator of input plus cache read and cache write", () => {
+  it("keeps the cache hit headline and shows a normalized bar for visible cache fields", () => {
     render(<CacheHitMetric usage={usage} glare={false} />);
-    const display = screen.getByTitle("30.8%");
+    const card = screen.getByText("缓存命中").closest(".h-36") as HTMLElement;
+    const display = within(card).getByTitle("30.8%");
     expect(display).toHaveTextContent("30.8%");
+    expect(within(card).queryByText("缓存写")).not.toBeInTheDocument();
+    expect(within(card).queryByTitle("300")).not.toBeInTheDocument();
+    expect(within(card).queryByLabelText(/缓存写/)).not.toBeInTheDocument();
 
-    const bar = screen.getByLabelText("缓存命中率分母包括输入、缓存读和缓存写");
+    const bar = screen.getByLabelText("缓存读与输入 Token 分布");
     const cached = segmentByClass(bar, "bg-[#be506e]");
     const input = segmentByClass(bar, "bg-[#4057a5]");
-    const cacheWrite = segmentByClass(bar, "bg-[#8660a8]");
-    expect(cached).toHaveStyle({ width: `${(400 / 1300) * 100}%` });
-    expect(input).toHaveStyle({ left: `${(400 / 1300) * 100}%`, width: `${(600 / 1300) * 100}%` });
-    expect(cacheWrite).toHaveStyle({ width: `${(300 / 1300) * 100}%` });
-    expect(Number.parseFloat(cached.style.width) + Number.parseFloat(input.style.width) + Number.parseFloat(cacheWrite.style.width)).toBeCloseTo(100);
+    expect(Array.from(bar.children)).toHaveLength(2);
+    expect(cached).toHaveStyle({ width: "40%" });
+    expect(input).toHaveStyle({ left: "40%", width: "60%" });
+    expect(Number.parseFloat(cached.style.width) + Number.parseFloat(input.style.width)).toBeCloseTo(100);
   });
 
   it("shows cost per million from cost / total and warns using the unpriced count", async () => {
@@ -251,6 +259,24 @@ describe("MetricGrid Spec04", () => {
     fireEvent.pointerEnter(planTrigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
     expect(await screen.findByText("hoge@example.com")).toBeInTheDocument();
     expect(screen.getByText("$12.00 balance")).toBeInTheDocument();
+  });
+
+  it("converts provider used percentages to remaining quota and keeps unlimited windows unlimited", () => {
+    const { rerender } = render(<MetricGridFixture usage={usage} quota={quota} />);
+
+    for (const { used, remaining } of [{ used: 25, remaining: 75 }, { used: 22, remaining: 78 }, { used: 100, remaining: 0 }]) {
+      rerender(<MetricGridFixture usage={usage} quota={{ reading: false, items: [provider("codex", "Codex", [quotaWindow("5H", used)])] }} />);
+      const windowCard = screen.getByText("Codex·5H").closest(".absolute") as HTMLElement;
+      expect(within(windowCard).getByLabelText(`${remaining}%`)).toBeInTheDocument();
+
+      const remainingBar = within(windowCard).getByLabelText("剩余与已使用配额");
+      expect((remainingBar.children[0] as HTMLElement).style.width).toBe(`${remaining}%`);
+      expect((remainingBar.children[1] as HTMLElement).style.width).toBe(`${used}%`);
+    }
+
+    rerender(<MetricGridFixture usage={usage} quota={{ reading: false, items: [provider("codex", "Codex", [quotaWindow("5H", 25, resetAt, true)])] }} />);
+    const unlimitedCard = screen.getByText("Codex·5H").closest(".absolute") as HTMLElement;
+    expect(within(unlimitedCard).getByText("∞")).toBeInTheDocument();
   });
 
   it("keeps the quota stack open while moving into overflow and supports keyboard controls", () => {
