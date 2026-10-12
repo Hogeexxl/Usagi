@@ -2,7 +2,7 @@ import type { UsagiClient } from "../../data/usagiClient";
 import type {
   DashboardFilters,
   DashboardRange,
-  SessionItemDto,
+  SessionListItemDto,
   SessionSortField,
   SessionSortOrder,
 } from "../../data/types";
@@ -14,7 +14,7 @@ export type SessionPageState = "idle" | "loading" | "error";
 export type SessionTableViewModel = {
   range: DashboardRange;
   filters: DashboardFilters;
-  rows: SessionItemDto[];
+  rows: SessionListItemDto[];
   timezone: string;
   load_state: SessionLoadState;
   page_state: SessionPageState;
@@ -38,4 +38,5 @@ export type SessionTableViewModel = {
 export type SessionControllerOptions = {
   client?: UsagiClient;
   revisionFeed?: RevisionFeed;
+  reloadKey?: number;
 };

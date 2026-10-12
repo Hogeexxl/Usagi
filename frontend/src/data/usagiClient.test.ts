@@ -1,876 +1,196 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { appendRangeParams, canonicalDashboardFilters, dashboardQueryKey, usagiClient } from "./usagiClient";
-import { UsagiClientError, type DashboardFilters } from "./types";
+import { appendRangeParams, canonicalDashboardFilters, dashboardQueryKey, modelSelectionKey, threadKeyId, usagiClient } from "./usagiClient";
+import { UsagiClientError, type DashboardFilters, type ThreadKey, type UsageDto } from "./types";
 
-const emptyFilters: DashboardFilters = { sources: [], models: [], projects: [] };
-const range = { key: "today", start_ms: 1, end_ms: 2, timezone: "Asia/Shanghai" };
-const usage = {
-  input_tokens: 10,
-  cached_tokens: 4,
-  cache_write_tokens: null,
-  uncached_input_tokens: null,
-  output_tokens: 20,
-  reasoning_tokens: 0,
-  other_output_tokens: 20,
-  total_tokens: 30,
-  cache_hit_rate: null,
-  estimated_cost: null,
-  estimated_cost_status: "unknown",
-  session_count: 1,
-  cost_incomplete_session_count: 1,
-  complete_session_cost_per_million_tokens: null,
-  session_health: {
-    total_sessions: 1,
-    complete_sessions: 0,
-    incomplete_sessions: 1,
-    error_sessions: 0,
-  },
+const emptyFilters: DashboardFilters = { agents: [], models: [], projects: [] };
+const usage: UsageDto = {
+  calls: 2,
+  errors: 1,
+  input: 10,
+  output: 20,
+  cache_read: 4,
+  cache_write: 2,
+  cache_write_1h: 1,
+  reasoning: 5,
+  total: 36,
+  cache_hit_rate: 0.25,
+  cost: 1.25,
+  unpriced: 1,
 };
 
-const sessionUsage = {
-  input_tokens: 10,
-  cached_tokens: 4,
-  cache_write_tokens: null,
-  uncached_input_tokens: 6,
-  output_tokens: 20,
-  reasoning_tokens: 2,
-  other_output_tokens: 18,
-  total_tokens: 30,
-  cache_hit_rate: 0.4,
-  estimated_cost: null,
-  estimated_cost_status: "unknown",
+const thread = {
+  key: { agent: "claude", session_id: "session-1", thread_id: "thread-1" },
+  type: "main" as const,
+  parent_thread_id: null,
+  title: "Session one",
+  project: { kind: "project" as const, path: "/work/Usagi", name: "Usagi" },
+  first_usage_ms: 100,
+  last_usage_ms: 200,
+  model_effort: [{ model: "gpt-6", effort: "high", usage, compaction_tokens: 5 }],
+  usage,
 };
 
-const sessionItem = (root_session_id = "root-1") => ({
-  source: "codex",
-  native_session_id: root_session_id,
-  root_session_id,
-  title: "A session",
-  project_name: "Usagi",
-  project_path: "/work/Usagi",
-  last_activity_at_ms: 1_700_000_000_000,
-  models_used: ["gpt-5"],
-  model_efforts: [{ model: "gpt-5", reasoning_effort: "high" }],
-  subagent_count: 1,
-  inclusive_usage: sessionUsage,
-  self_usage: sessionUsage,
-  subagent_usage: sessionUsage,
-  data_status: "incomplete",
-  error_code: null,
-});
+function mockJson(body: unknown, status = 200) {
+  const fetchMock = vi.fn((..._args: Parameters<typeof fetch>) => Promise.resolve(
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }),
+  ));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => vi.unstubAllGlobals());
 
-describe("usagiClient DTO seam", () => {
-  it("T-Q-SW-002 parses weekly-only and session-plus-weekly quota contracts", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          status: "ready",
-          account_email: "hoge@example.com",
-          plan_type: "prolite",
-          session: null,
-          weekly: {
-            used_percent: 55,
-            remaining_percent: 45,
-            limit_window_seconds: 604800,
-            reset_at_ms: 1_786_508_580_000,
-          },
-          reset_credits_available: 2,
-          fetched_at_ms: 1_786_076_580_000,
-        }),
-        { status: 200 },
-      ),
-    );
+describe("Usagi Spec04 HTTP client", () => {
+  it("uses unified quota GET and explicit quota refresh POST", async () => {
+    const quota = {
+      reading: false,
+      items: [{
+        provider: "codex",
+        name: "Codex",
+        plan: "Pro",
+        user: "user@example.test",
+        windows: [{ unlimited: false, name: "5H", used: 0.2, resets_at_ms: null, reset_secs: 0, display: "", amount: 2, limit: 10, unit: "calls", family: "usage", pool: "primary" }],
+        balance: "",
+        error: "",
+        as_of_ms: 100,
+        read_at_ms: 101,
+      }],
+    };
+    const fetchMock = mockJson(quota);
 
-    await expect(usagiClient.codexQuota()).resolves.toEqual({
-      status: "ready",
-      account_email: "hoge@example.com",
-      plan_type: "prolite",
-      session: null,
-      weekly: {
-        used_percent: 55,
-        remaining_percent: 45,
-        limit_window_seconds: 604800,
-        reset_at_ms: 1_786_508_580_000,
-      },
-      reset_credits_available: 2,
-      fetched_at_ms: 1_786_076_580_000,
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/codex/quota",
-      expect.objectContaining({ method: "GET", credentials: "same-origin" }),
-    );
+    await expect(usagiClient.quota()).resolves.toEqual(quota);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/quota");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "GET", credentials: "same-origin" });
 
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          status: "ready",
-          account_email: "hoge@example.com",
-          plan_type: "prolite",
-          session: {
-            used_percent: 12,
-            remaining_percent: 88,
-            limit_window_seconds: 18000,
-            reset_at_ms: 1_786_100_000_000,
-          },
-          weekly: {
-            used_percent: 55,
-            remaining_percent: 45,
-            limit_window_seconds: 604800,
-            reset_at_ms: 1_786_508_580_000,
-          },
-          reset_credits_available: 2,
-          fetched_at_ms: 1_786_076_580_000,
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(usagiClient.codexQuota()).resolves.toMatchObject({
-      session: {
-        used_percent: 12,
-        remaining_percent: 88,
-        limit_window_seconds: 18000,
-        reset_at_ms: 1_786_100_000_000,
-      },
-      weekly: {
-        used_percent: 55,
-        remaining_percent: 45,
-        limit_window_seconds: 604800,
-        reset_at_ms: 1_786_508_580_000,
-      },
-    });
-
-    for (const [session, weekly] of [
-      [null, { used_percent: 101, remaining_percent: 0, limit_window_seconds: 604800, reset_at_ms: null }],
-      [null, { used_percent: 55, remaining_percent: 45, limit_window_seconds: 18000, reset_at_ms: null }],
-      [{ used_percent: 12, remaining_percent: 88, limit_window_seconds: 604800, reset_at_ms: null }, { used_percent: 55, remaining_percent: 45, limit_window_seconds: 604800, reset_at_ms: null }],
-      [{ used_percent: 12, remaining_percent: 88, limit_window_seconds: 18000, reset_at_ms: null }, { used_percent: 55, remaining_percent: 45, limit_window_seconds: 18000, reset_at_ms: null }],
-    ]) {
-      fetchMock.mockResolvedValueOnce(
-        new Response(JSON.stringify({
-          status: "ready",
-          account_email: null,
-          plan_type: null,
-          session,
-          weekly,
-          reset_credits_available: null,
-          fetched_at_ms: null,
-        }), { status: 200 }),
-      );
-      await expect(usagiClient.codexQuota()).rejects.toBeInstanceOf(UsagiClientError);
-    }
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(quota), { status: 200 }));
+    await usagiClient.refreshQuota();
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/quota/refresh");
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "POST", headers: { "X-Usagi-Request": "1" } });
   });
 
-  it("reads Antigravity quota and accepts both quota refresh snapshots", async () => {
-    const antigravity = {
-      status: "ready",
-      account_email: "gemini@example.com",
-      plan_type: "google_ai_pro",
-      session: { used_percent: 20, remaining_percent: 80, limit_window_seconds: 18000, reset_at_ms: 1_786_100_000_000 },
-      weekly: { used_percent: 65, remaining_percent: 35, limit_window_seconds: 604800, reset_at_ms: 1_786_508_580_000 },
-      fetched_at_ms: 1_786_076_580_000,
-    };
-    const codex = {
-      status: "ready",
-      account_email: "hoge@example.com",
-      plan_type: "prolite",
-      session: null,
-      weekly: { used_percent: 55, remaining_percent: 45, limit_window_seconds: 604800, reset_at_ms: 1_786_508_580_000 },
-      reset_credits_available: 2,
-      fetched_at_ms: 1_786_076_580_000,
-    };
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify(antigravity), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(codex), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(antigravity), { status: 200 }));
-
-    await expect(usagiClient.antigravityQuota()).resolves.toEqual(antigravity);
-    await expect(usagiClient.refreshCodexQuota()).resolves.toEqual(codex);
-    await expect(usagiClient.refreshAntigravityQuota()).resolves.toEqual(antigravity);
-    expect(fetchMock.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
-      ["/api/antigravity/quota", "GET"],
-      ["/api/codex/quota/refresh", "POST"],
-      ["/api/antigravity/quota/refresh", "POST"],
-    ]);
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: "same-origin", headers: { Accept: "application/json", "X-Usagi-Request": "1" } });
+  it("parses SummaryResponse with top-level session_count and the new Usage DTO", async () => {
+    const fetchMock = mockJson({ data_revision: 8, usage, session_count: 3 });
+    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toEqual({
+      data_revision: 8,
+      usage,
+      session_count: 3,
+    });
+    const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/usage/summary");
+    expect(url.searchParams.get("range")).toBe("today");
+    expect(url.searchParams.has("session_count")).toBe(false);
+    expect(url.searchParams.has("source")).toBe(false);
   });
 
-  it("t_s07_001 parses typed options and canonicalizes every summary filter shape", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          data_revision: 7,
-          sources: [
-            { source: "codex", display_name: "Codex" },
-            { source: "antigravity", display_name: "Antigravity" },
-          ],
-          models: [
-            { model: "gpt-5.6-sol", provider: "openai" },
-            { model: "gemini-2.5-flash", provider: "antigravity" },
-            { model: "gpt-5.6", provider: "route-models" },
-          ],
-          projects: [
-            { kind: "project", project_name: "Usagi", project_path: "/work/Usagi" },
-            { kind: "projectless" },
-            { kind: "unknown" },
-          ],
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(usagiClient.filterOptions()).resolves.toEqual({
-      data_revision: 7,
-      sources: [
-        { source: "codex", display_name: "Codex" },
-        { source: "antigravity", display_name: "Antigravity" },
-      ],
-      models: [
-        { model: "gpt-5.6-sol", provider: "openai" },
-        { model: "gemini-2.5-flash", provider: "antigravity" },
-        { model: "gpt-5.6", provider: "route-models" },
-      ],
-      projects: [
-        { kind: "project", project_name: "Usagi", project_path: "/work/Usagi" },
-        { kind: "projectless" },
-        { kind: "unknown" },
-      ],
-    });
-
-    for (const invalid of [
-      { data_revision: 1, models: [], projects: [{ kind: "projectless", project_path: "/fake" }] },
-      { data_revision: 1, sources: [], models: [], projects: [{ kind: "projectless", project_path: "/fake" }] },
-      { data_revision: 1, sources: [], models: [], projects: [{ kind: "project", project_name: "Usagi" }] },
-      { data_revision: 1, sources: [], models: [""], projects: [] },
-      { data_revision: 1, sources: [], models: [{ model: "gpt-a", provider: "unknown" }], projects: [] },
-      { data_revision: 1, sources: [], models: [{ model: "gpt-a" }], projects: [] },
-      { data_revision: 1, sources: [], models: [{ model: "gpt-a", provider: "openai", extra: true }], projects: [] },
-      { data_revision: 1, sources: "not-an-array", models: [], projects: [] },
-      { data_revision: 1, sources: [{ source: "" }], models: [], projects: [] },
-      { data_revision: 1, sources: [{ source: "codex" }], models: [], projects: [] },
-      { data_revision: 1, sources: [{ source: "codex", display_name: "Codex", extra: true }], models: [], projects: [] },
-      { data_revision: 1, sources: [{ source: "codex\x00", display_name: "Codex" }], models: [], projects: [] },
-      { data_revision: 1, sources: [{ source: "codex", display_name: "Codex\n" }], models: [], projects: [] },
-    ]) {
-      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(invalid), { status: 200 }));
-      await expect(usagiClient.filterOptions()).rejects.toBeInstanceOf(UsagiClientError);
-    }
+  it("uses dynamic agents and provider/model pairs in filter options, query keys, and wire filters", async () => {
+    const options = {
+      data_revision: 8,
+      agents: [{ agent: "aider", display_name: "Aider" }],
+      models: [{ model: "same-model", provider_id: "provider-a", provider_name: "Provider A" }, { model: "same-model", provider_id: "provider-b", provider_name: "Provider B" }],
+      projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+    };
+    const fetchMock = mockJson(options);
+    await expect(usagiClient.filterOptions()).resolves.toEqual(options);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/usage/filter-options");
 
     const filters: DashboardFilters = {
-      sources: ["codex", "antigravity", "codex"],
-      models: ["gpt-b", "gpt-a", "gpt-b"],
-      projects: [
-        { kind: "unknown" as const },
-        { kind: "projectless" as const },
-        { kind: "project", project_path: "/a & b" },
-        { kind: "project", project_path: "/a & b" },
+      agents: ["aider", "aider"],
+      models: [
+        { provider_id: "provider-b", model: "same-model" },
+        { provider_id: "provider-a", model: "same-model" },
+        { provider_id: "provider-a", model: "same-model" },
       ],
+      projects: [{ kind: "unknown" }, { kind: "projectless" }, { kind: "project", path: "/work/Usagi" }],
     };
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 1, usage }), { status: 200 }));
-    await usagiClient.summary({ key: "today" }, filters);
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/summary?range=today&source=antigravity&source=codex&model=gpt-a&model=gpt-b&project_path=%2Fa+%26+b&include_projectless=1&include_unknown_project=1",
-      expect.objectContaining({ method: "GET" }),
-    );
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 1, usage }), { status: 200 }));
-    await usagiClient.summary({ key: "today" }, { sources: [], models: [], projects: [] });
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/summary?range=today",
-      expect.objectContaining({ method: "GET" }),
-    );
-  });
-
-  it("T-022-A2 serializes custom ranges into URLs and query identities", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ range: { ...range, key: "custom" }, data_revision: 1, usage }), { status: 200 }),
-    );
-    const custom = { key: "custom" as const, from: "2026-08-01", to: "2026-08-03" };
-    await usagiClient.summary(custom, emptyFilters);
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/summary?range=custom&from=2026-08-01&to=2026-08-03",
-      expect.objectContaining({ method: "GET" }),
-    );
-    expect(dashboardQueryKey(custom, emptyFilters)).not.toBe(
-      dashboardQueryKey({ key: "custom", from: "2026-08-10", to: "2026-08-12" }, emptyFilters),
-    );
-    const params = appendRangeParams(new URLSearchParams({ from: "stale", to: "stale" }), { key: "7d" });
-    expect(params.toString()).toBe("range=7d");
-  });
-
-  it("validates summary/status/revision and keeps exact nullable fields through the public client", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 3, usage }), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data_revision: 3,
-            status_revision: 4,
-            scan_state: "idle",
-            active_scan_id: null,
-            last_finished_scan_id: null,
-            last_finished_scan_result: null,
-            followup: null,
-            target_scan: null,
-            last_scan_started_at_ms: null,
-            last_scan_completed_at_ms: null,
-            last_scan_failed_at_ms: null,
-            last_scan_error_code: null,
-            sources: [],
-          }),
-          { status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 3, status_revision: 4 }), { status: 200 }));
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toEqual({
-      range,
-      data_revision: 3,
-      usage,
+    expect(canonicalDashboardFilters(filters)).toEqual({
+      agents: ["aider"],
+      models: [{ provider_id: "provider-a", model: "same-model" }, { provider_id: "provider-b", model: "same-model" }],
+      projects: [{ kind: "project", path: "/work/Usagi" }, { kind: "projectless" }, { kind: "unknown" }],
     });
-    const status = await usagiClient.getStatus();
-    expect(status.sources).toEqual([]);
-    await expect(usagiClient.getRevision()).resolves.toEqual({ data_revision: 3, status_revision: 4 });
+    expect(modelSelectionKey({ provider_id: "provider-a", model: "same-model" })).not.toBe(modelSelectionKey({ provider_id: "provider-b", model: "same-model" }));
+    expect(dashboardQueryKey({ key: "today" }, filters)).not.toBe(dashboardQueryKey({ key: "today" }, {
+      ...filters,
+      models: [{ provider_id: "provider-b", model: "same-model" }],
+    }));
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, usage, session_count: 3 }), { status: 200 }));
+    await usagiClient.summary({ key: "custom", from: "2026-09-01", to: "2026-09-03" }, filters);
+    const url = new URL(String(fetchMock.mock.calls[1][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/usage/summary");
+    expect(url.searchParams.getAll("agent")).toEqual(["aider"]);
+    expect(url.searchParams.getAll("model_at")).toEqual(["provider-a/same-model", "provider-b/same-model"]);
+    expect(url.searchParams.get("project_path")).toBe("/work/Usagi");
+    expect(url.searchParams.get("include_projectless")).toBe("1");
+    expect(url.searchParams.get("include_unknown_project")).toBe("1");
+    expect(url.searchParams.get("from")).toBe("2026-09-01");
+    expect(url.searchParams.get("to")).toBe("2026-09-03");
   });
 
-  it("T-S03-004 parser accepts cost-incomplete roots beyond healthy sessions only within health total", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    const acceptedUsage = {
-      ...usage,
-      session_count: 1,
-      cost_incomplete_session_count: 2,
-      session_health: {
-        total_sessions: 2,
-        complete_sessions: 0,
-        incomplete_sessions: 1,
-        error_sessions: 1,
-      },
+  it("requests model and project distribution from Usage endpoints", async () => {
+    const fetchMock = mockJson({ data_revision: 8, items: [{ model: "gpt-6", usage }] });
+    await expect(usagiClient.modelDistribution({ key: "7d" }, emptyFilters)).resolves.toEqual({ data_revision: 8, items: [{ model: "gpt-6", usage }] });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/usage/model-distribution?");
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, items: [{ kind: "project", path: "/work/Usagi", name: "Usagi", usage }] }), { status: 200 }));
+    await expect(usagiClient.projectDistribution({ key: "7d" }, emptyFilters)).resolves.toMatchObject({ items: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }] });
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/usage/projects?");
+  });
+
+  it("loads SessionListItemView and sends the full ThreadKey for on-demand Detail", async () => {
+    const listResponse = {
+      data_revision: 8,
+      items: [{ thread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, subagent_count: 2 }],
     };
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ range, data_revision: 0, usage: acceptedUsage }), { status: 200 }),
-    );
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toMatchObject({ usage: acceptedUsage });
+    const fetchMock = mockJson(listResponse);
+    await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).resolves.toEqual(listResponse);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/usage/sessions?");
 
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 0,
-          usage: { ...acceptedUsage, cost_incomplete_session_count: 3 },
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toBeInstanceOf(UsagiClientError);
-  });
-
-  it("rejects unsafe integers, invalid ratios, and legacy-field-only responses", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: Number.MAX_SAFE_INTEGER + 1, usage }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 0, usage: { ...usage, cache_hit_rate: 1.1 } }), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            range,
-            data_revision: 0,
-            usage: {
-              input_tokens: 10,
-              output_tokens: 20,
-              total_tokens: 30,
-              reasoning_output_tokens: 0,
-              cached_input_tokens: 4,
-              cache_write_input_tokens: null,
-              cache_write_status: "unknown_missing",
-              cache_tokens: null,
-              cache_hit_rate: null,
-              estimated_cost: null,
-              session_count: 1,
-            },
-          }),
-          { status: 200 },
-        ),
-      );
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toBeInstanceOf(UsagiClientError);
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toBeInstanceOf(UsagiClientError);
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toBeInstanceOf(UsagiClientError);
-  });
-
-  it("preserves cache-write null and zero as distinct canonical values", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 0, usage }), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            range,
-            data_revision: 0,
-            usage: { ...usage, cache_write_tokens: 0, uncached_input_tokens: 6 },
-          }),
-          { status: 200 },
-        ),
-      );
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toMatchObject({ usage });
-    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toMatchObject({
-      usage: { cache_write_tokens: 0, uncached_input_tokens: 6 },
-    });
-  });
-
-  it("uses relative API URLs, validates refresh acknowledgement, and maps errors without body text", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ http_status: 202, disposition: "started", scan_id: "scan", status_revision: 2 }), {
-        status: 202,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    await expect(usagiClient.refresh()).resolves.toMatchObject({ disposition: "started", http_status: 202 });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/refresh",
-      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "X-Usagi-Request": "1" }) }),
-    );
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: "SOURCE_CHANGED", message: "secret path" } }), { status: 409 }),
-    );
-    const error = await usagiClient.getRevision().catch((value: unknown) => value);
-    expect(error).toBeInstanceOf(UsagiClientError);
-    expect((error as UsagiClientError).code).toBe("SOURCE_CHANGED");
-    expect(String(error)).not.toContain("secret path");
-  });
-
-  it("T-S04-001 parses snapshot/index, bounded repeated-ID rows, detail fields, and stale revision errors", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    const sortIndex = {
-      source: "codex",
-      native_session_id: "root-1",
-      root_session_id: "root-1",
-      last_activity_at_ms: 1_700_000_000_000,
-      project_sort_key: "/work/Usagi",
-      model_sort_key: "gpt-5",
-      total_tokens: 30,
-      combined_total_tokens: 30,
-      combined_estimated_cost: null,
-      cache_hit_rate: 0.4,
-      data_status: "incomplete",
-      error_code: null,
+    const threadKey: ThreadKey = { agent: "claude", session_id: "session-1", thread_id: "subagent-1" };
+    const child = { ...thread, key: threadKey, type: "subagent" as const, parent_thread_id: "thread-1" };
+    const detailResponse = {
+      data_revision: 8,
+      thread,
+      self_usage: usage,
+      subagent_usage: usage,
+      inclusive_usage: usage,
+      children: [child],
     };
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ range, data_revision: 4, total_items: 1, sort_index: [sortIndex], items: [sessionItem()] }),
-        { status: 200 },
-      ),
-    );
-    await expect(usagiClient.getSessionSnapshot({ range: { key: "today" }, filters: emptyFilters })).resolves.toEqual({
-      range,
-      data_revision: 4,
-      total_items: 1,
-      sort_index: [sortIndex],
-      items: [sessionItem()],
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/usage/sessions?range=today",
-      expect.objectContaining({ method: "GET" }),
-    );
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ range, data_revision: 4, items: [sessionItem()] }), { status: 200 }),
-    );
-    await expect(
-      usagiClient.getSessionRows({
-        range: { key: "today" },
-        filters: { sources: [], models: ["gpt-b", "gpt-a", "gpt-b"], projects: [{ kind: "projectless" }] },
-        root_session_ids: ["root-1", "root-1"],
-        expected_data_revision: 4,
-      }),
-    ).resolves.toEqual({ range, data_revision: 4, items: [sessionItem()] });
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/session-rows?range=today&model=gpt-a&model=gpt-b&include_projectless=1&expected_data_revision=4&root_session_id=root-1",
-      expect.objectContaining({ method: "GET" }),
-    );
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({
-        range,
-        data_revision: 4,
-        source: "codex",
-        native_session_id: "root-1",
-        root_session_id: "root-1",
-        last_activity_at_ms: 1_700_000_000_000,
-        main: {
-          source: "codex",
-          native_session_id: "root-1",
-          title: "A session",
-          project_name: "Usagi",
-          project_path: "/workspace/usagi",
-          thread_id: "root-1",
-          root_session_id: "root-1",
-          models_used: ["gpt-5"],
-          model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 31, usage: sessionUsage }],
-          self_usage: sessionUsage,
-          subagent_count: 1,
-          inclusive_usage: sessionUsage,
-        },
-        subagents: [{
-          source: "codex",
-          native_session_id: "child-1",
-          thread_id: "child-1",
-          parent_thread_id: null,
-          root_session_id: "root-1",
-          title: null,
-          last_activity_at_ms: 1_700_000_000_000,
-          model_usage: [{
-            model: "o4-mini",
-            reasoning_effort: null,
-            compaction_tokens: 42,
-            last_activity_at_ms: 1_700_000_000_000,
-            usage: {
-              ...sessionUsage,
-              cache_write_tokens: 0,
-              estimated_cost: 1.25,
-              estimated_cost_status: "complete",
-              reasoning_tokens: 9,
-            },
-          }],
-        }],
-      }), { status: 200 }),
-    );
-    await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1", expected_data_revision: 4 })).resolves.toMatchObject({
-      source: "codex",
-      native_session_id: "root-1",
-      last_activity_at_ms: 1_700_000_000_000,
-      main: {
-        source: "codex",
-        native_session_id: "root-1",
-        project_name: "Usagi",
-        project_path: "/workspace/usagi",
-        model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 31 }],
-        self_usage: sessionUsage,
-        inclusive_usage: sessionUsage,
-      },
-      subagents: [{
-        source: "codex",
-        native_session_id: "child-1",
-        parent_thread_id: null,
-        model_usage: [{
-          model: "o4-mini",
-          reasoning_effort: null,
-          compaction_tokens: 42,
-          last_activity_at_ms: 1_700_000_000_000,
-          usage: { reasoning_tokens: 9, cache_write_tokens: 0, estimated_cost: 1.25 },
-        }],
-      }],
-    });
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/usage/sessions/root-1/detail?range=today&expected_data_revision=4",
-      expect.objectContaining({ method: "GET" }),
-    );
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: "STALE_DATA_REVISION" } }), { status: 409 }),
-    );
-    await expect(usagiClient.getSessionRows({ range: { key: "today" }, filters: emptyFilters, root_session_ids: ["root-1"], expected_data_revision: 4 })).rejects.toMatchObject({ code: "STALE_DATA_REVISION" });
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ range, data_revision: 4, items: Array.from({ length: 61 }, () => sessionItem()) }), { status: 200 }));
-    await expect(usagiClient.getSessionRows({ range: { key: "today" }, filters: emptyFilters, root_session_ids: ["root-1"] })).rejects.toBeInstanceOf(UsagiClientError);
-    await expect(usagiClient.getSessionRows({ range: { key: "today" }, filters: emptyFilters, root_session_ids: Array.from({ length: 61 }, (_, index) => `root-${index}`) })).rejects.toMatchObject({ code: "INVALID_SESSION_IDS" });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detailResponse), { status: 200 }));
+    await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, key: threadKey })).resolves.toEqual(detailResponse);
+    const url = new URL(String(fetchMock.mock.calls[1][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/usage/session-detail");
+    expect(url.searchParams.get("agent")).toBe("claude");
+    expect(url.searchParams.get("session_id")).toBe("session-1");
+    expect(url.searchParams.get("thread_id")).toBe("subagent-1");
+    expect(threadKeyId(threadKey)).toBe(JSON.stringify(["claude", "session-1", "subagent-1"]));
+    expect(detailResponse.children).toEqual([child]);
   });
 
-  it("T-MU04-C03 validates cost status combinations across summary, session, and detail DTOs", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    const validCosts = [
-      { estimated_cost: 1.25, estimated_cost_status: "complete" },
-      { estimated_cost: 1.25, estimated_cost_status: "partial" },
-      { estimated_cost: null, estimated_cost_status: "unknown" },
-    ] as const;
-    for (const cost of validCosts) {
-      fetchMock.mockResolvedValueOnce(
-        new Response(JSON.stringify({ range, data_revision: 0, usage: { ...usage, ...cost } }), { status: 200 }),
-      );
-      await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toMatchObject({ usage: cost });
-    }
-
-    for (const invalidUsage of [
-      { ...usage, complete_session_cost_per_million_tokens: undefined },
-      { ...usage, complete_session_cost_per_million_tokens: -1 },
-      { ...usage, estimated_cost_status: undefined },
-      { ...usage, estimated_cost_status: "invalid" },
-      { ...usage, estimated_cost: null, estimated_cost_status: "complete" },
-      { ...usage, estimated_cost: null, estimated_cost_status: "partial" },
-      { ...usage, estimated_cost: 1.25, estimated_cost_status: "unknown" },
-    ]) {
-      fetchMock.mockResolvedValueOnce(
-        new Response(JSON.stringify({ range, data_revision: 0, usage: invalidUsage }), { status: 200 }),
-      );
-      await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toBeInstanceOf(UsagiClientError);
-    }
-
-    const sortIndex = {
-      source: "codex",
-      native_session_id: "root-1",
-      root_session_id: "root-1",
-      last_activity_at_ms: 1_700_000_000_000,
-      project_sort_key: "/work/Usagi",
-      model_sort_key: "gpt-5",
-      total_tokens: 30,
-      combined_total_tokens: 30,
-      combined_estimated_cost: null,
-      cache_hit_rate: 0.4,
-      data_status: "incomplete",
-      error_code: null,
-    };
-    const partialSessionUsage = { ...sessionUsage, estimated_cost: 1.25, estimated_cost_status: "partial" };
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 0,
-          total_items: 1,
-          sort_index: [sortIndex],
-          items: [{
-            ...sessionItem("root-1"),
-            inclusive_usage: partialSessionUsage,
-            self_usage: partialSessionUsage,
-            subagent_usage: partialSessionUsage,
-          }],
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(usagiClient.getSessionSnapshot({ range: { key: "today" }, filters: emptyFilters })).resolves.toMatchObject({
-      items: [{ inclusive_usage: partialSessionUsage, self_usage: partialSessionUsage, subagent_usage: partialSessionUsage }],
-    });
-
-    const detailUsage = { ...sessionUsage, estimated_cost: 1.25, estimated_cost_status: "partial" };
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 0,
-          source: "codex",
-          native_session_id: "root-1",
-          root_session_id: "root-1",
-          last_activity_at_ms: 1_700_000_000_000,
-          main: {
-            source: "codex",
-            native_session_id: "root-1",
-            title: "A session",
-            project_name: null,
-            project_path: null,
-            thread_id: "root-1",
-            root_session_id: "root-1",
-            models_used: ["gpt-5"],
-            model_usage: [{ model: "gpt-5", reasoning_effort: "high", compaction_tokens: 0, usage: detailUsage }],
-            self_usage: detailUsage,
-            subagent_count: 1,
-            inclusive_usage: detailUsage,
-          },
-          subagents: [{
-            source: "codex",
-            native_session_id: "child-1",
-            thread_id: "child-1",
-            parent_thread_id: null,
-            root_session_id: "root-1",
-            title: null,
-            last_activity_at_ms: 1_700_000_000_000,
-            model_usage: [{
-              model: "o4-mini",
-              reasoning_effort: null,
-              compaction_tokens: null,
-              last_activity_at_ms: 1_700_000_000_000,
-              usage: detailUsage,
-            }],
-          }],
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(
-      usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1" }),
-    ).resolves.toMatchObject({
-      main: {
-        project_name: null,
-        project_path: null,
-        model_usage: [{ compaction_tokens: 0, usage: detailUsage }],
-        self_usage: detailUsage,
-        inclusive_usage: detailUsage,
-      },
-      subagents: [{ model_usage: [{ compaction_tokens: null, usage: detailUsage }] }],
-    });
+  it("uses the internal Status and Revision routes and accepts only the new status fields", async () => {
+    const fetchMock = mockJson({ status_revision: 3, runtime_state: "starting", last_error_code: null });
+    await expect(usagiClient.getStatus()).resolves.toEqual({ status_revision: 3, runtime_state: "starting", last_error_code: null });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/status");
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, status_revision: 3 }), { status: 200 }));
+    await expect(usagiClient.getRevision()).resolves.toEqual({ data_revision: 8, status_revision: 3 });
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/revision");
   });
 
-  it("requires nullable non-negative safe compaction integers on both model DTOs", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    const detailPayload = (mainCompaction: unknown, subagentCompaction: unknown) => ({
-      range,
-      data_revision: 1,
-      source: "codex",
-      native_session_id: "root-1",
-      root_session_id: "root-1",
-      last_activity_at_ms: 1_700_000_000_000,
-      main: {
-        source: "codex",
-        native_session_id: "root-1",
-        title: null,
-        project_name: null,
-        project_path: null,
-        thread_id: "root-1",
-        root_session_id: "root-1",
-        models_used: ["gpt-5"],
-        model_usage: [{ model: "gpt-5", reasoning_effort: null, compaction_tokens: mainCompaction, usage: sessionUsage }],
-        self_usage: sessionUsage,
-        subagent_count: 1,
-        inclusive_usage: sessionUsage,
-      },
-      subagents: [{
-        source: "codex",
-        native_session_id: "child-1",
-        thread_id: "child-1",
-        parent_thread_id: "root-1",
-        root_session_id: "root-1",
-        title: null,
-        last_activity_at_ms: 1_700_000_000_000,
-        model_usage: [{
-          model: "o4-mini",
-          reasoning_effort: "high",
-          compaction_tokens: subagentCompaction,
-          last_activity_at_ms: 1_700_000_000_000,
-          usage: sessionUsage,
-        }],
-      }],
-    });
-    const parseDetail = (mainCompaction: unknown, subagentCompaction: unknown) => {
-      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detailPayload(mainCompaction, subagentCompaction)), { status: 200 }));
-      return usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, root_session_id: "root-1" });
-    };
+  it("rejects malformed Usage DTO data and preserves structured API errors", async () => {
+    mockJson({ data_revision: 8, usage: { ...usage, total: -1 }, session_count: 3 });
+    await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toMatchObject({ code: "HTTP_ERROR", status: 200 });
 
-    for (const compactionTokens of [0, 42, Number.MAX_SAFE_INTEGER, null]) {
-      const result = await parseDetail(compactionTokens, compactionTokens);
-      expect(result.main.model_usage[0].compaction_tokens).toBe(compactionTokens);
-      expect(result.subagents[0].model_usage[0].compaction_tokens).toBe(compactionTokens);
-    }
-
-    const invalidValues = [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "42", true, [], {}];
-    for (const invalidValue of invalidValues) {
-      await expect(parseDetail(invalidValue, 1)).rejects.toBeInstanceOf(UsagiClientError);
-      await expect(parseDetail(1, invalidValue)).rejects.toBeInstanceOf(UsagiClientError);
-    }
+    mockJson({ error: { code: "UPSTREAM_FAILED" } }, 503);
+    await expect(usagiClient.getRevision()).rejects.toBeInstanceOf(UsagiClientError);
+    await expect(usagiClient.getRevision()).rejects.toMatchObject({ code: "UPSTREAM_FAILED", status: 503 });
   });
 
-  it("parses main.project_name and main.project_path, rejecting top-level fields", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    // Case 1: project_name and project_path inside main
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 1,
-          source: "antigravity",
-          native_session_id: "root-ag",
-          root_session_id: "root-ag",
-          last_activity_at_ms: 100,
-          main: {
-            source: "antigravity",
-            native_session_id: "root-ag",
-            title: null,
-            project_name: "Antigravity Workspace",
-            project_path: "/home/user/project",
-            thread_id: "root-ag",
-            root_session_id: "root-ag",
-            models_used: ["model-ag"],
-            model_usage: [],
-            self_usage: sessionUsage,
-            subagent_count: 0,
-            inclusive_usage: sessionUsage,
-          },
-          subagents: [],
-        }),
-        { status: 200 },
-      ),
-    );
-    const result = await usagiClient.getSessionDetail({
-      range: { key: "today" },
-      filters: emptyFilters,
-      root_session_id: "root-ag",
-    });
-    expect(result.main.project_name).toBe("Antigravity Workspace");
-    expect(result.main.project_path).toBe("/home/user/project");
-
-    // Case 2: top-level project_name is NOT read into main if missing from main
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 1,
-          source: "antigravity",
-          native_session_id: "root-ag",
-          root_session_id: "root-ag",
-          last_activity_at_ms: 100,
-          project_name: "Top Level Name",
-          main: {
-            source: "antigravity",
-            native_session_id: "root-ag",
-            title: null,
-            thread_id: "root-ag",
-            root_session_id: "root-ag",
-            models_used: ["model-ag"],
-            model_usage: [],
-            self_usage: sessionUsage,
-            subagent_count: 0,
-            inclusive_usage: sessionUsage,
-          },
-          subagents: [],
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(
-      usagiClient.getSessionDetail({
-        range: { key: "today" },
-        filters: emptyFilters,
-        root_session_id: "root-ag",
-      }),
-    ).rejects.toBeInstanceOf(UsagiClientError);
-
-    // Case 3: a top-level duplicate is rejected even when the canonical main fields exist
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          range,
-          data_revision: 1,
-          source: "antigravity",
-          native_session_id: "root-ag",
-          root_session_id: "root-ag",
-          last_activity_at_ms: 100,
-          project_name: "Top Level Name",
-          project_path: "/top-level",
-          main: {
-            source: "antigravity",
-            native_session_id: "root-ag",
-            title: null,
-            project_name: "Main Name",
-            project_path: "/main",
-            thread_id: "root-ag",
-            root_session_id: "root-ag",
-            models_used: ["model-ag"],
-            model_usage: [],
-            self_usage: sessionUsage,
-            subagent_count: 0,
-            inclusive_usage: sessionUsage,
-          },
-          subagents: [],
-        }),
-        { status: 200 },
-      ),
-    );
-    await expect(
-      usagiClient.getSessionDetail({
-        range: { key: "today" },
-        filters: emptyFilters,
-        root_session_id: "root-ag",
-      }),
-    ).rejects.toBeInstanceOf(UsagiClientError);
+  it("does not mutate range query parameters when switching to a preset", () => {
+    const params = new URLSearchParams("from=old&to=old&agent=agent-a");
+    appendRangeParams(params, { key: "today" });
+    expect(params.get("range")).toBe("today");
+    expect(params.has("from")).toBe(false);
+    expect(params.has("to")).toBe(false);
+    expect(params.get("agent")).toBe("agent-a");
   });
-
 });

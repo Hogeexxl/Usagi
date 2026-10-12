@@ -1,8 +1,8 @@
-import { CircleAlert, CircleX } from "lucide-react";
-import type { SessionItemDto, SessionSortField, SessionSortOrder } from "../../data/types";
+import type { SessionListItemDto, SessionSortField, SessionSortOrder } from "../../data/types";
+import { threadKeyId } from "../../data/usagiClient";
 import { Table, type SortState, type TableColumn } from "../../ui/beui/table";
-import { Tooltip } from "../../ui/beui/tooltip";
 import { formatCost, formatRatio } from "../format";
+import { projectDisplay } from "../shared/projectDisplay";
 import {
   formatSessionModel,
   formatSessionProject,
@@ -12,16 +12,16 @@ import {
 } from "./sessionFormat";
 
 type SessionTableProps = {
-  rows: SessionItemDto[];
+  rows: SessionListItemDto[];
   timezone: string;
-  selectedRootSessionId?: string | null;
-  onOpenSession?: (row: SessionItemDto) => void;
+  selectedThreadKeyId?: string | null;
+  onOpenSession?: (row: SessionListItemDto) => void;
   loadState: "initial" | "loading" | "ready" | "refreshing" | "error";
   pageState: "idle" | "loading" | "error";
   sortBy: SessionSortField;
   sortOrder: SessionSortOrder;
   onSort: (sortBy: SessionSortField) => void;
-  sourceDisplay?: (source: string) => string;
+  agentDisplay?: (agent: string) => string;
 };
 
 const TABLE_ROW_HEIGHT = 48;
@@ -33,22 +33,22 @@ export const sortableColumns: Array<{ field: SessionSortField; label: string }> 
   { field: "last_activity", label: "最后活动" },
   { field: "project", label: "项目" },
   { field: "model", label: "模型" },
-  { field: "combined_total_tokens", label: "合计 Token" },
+  { field: "total_tokens", label: "合计 Token" },
   { field: "cache_hit_rate", label: "缓存率" },
-  { field: "combined_estimated_cost", label: "合计费用" },
+  { field: "cost", label: "合计费用" },
 ];
 
 export function SessionTable({
   rows,
   timezone,
-  selectedRootSessionId = null,
+  selectedThreadKeyId = null,
   onOpenSession,
   loadState,
   pageState,
   sortBy,
   sortOrder,
   onSort,
-  sourceDisplay,
+  agentDisplay,
 }: SessionTableProps) {
   const loading =
     loadState === "initial" ||
@@ -61,23 +61,24 @@ export function SessionTable({
         ? TABLE_INITIAL_LOADING_HEIGHT
         : TABLE_EMPTY_HEIGHT
       : TABLE_ROW_HEIGHT * (Math.min(rows.length, TABLE_PAGE_SIZE) + 1);
-  const columns: TableColumn<SessionItemDto>[] = [
+  const columns: TableColumn<SessionListItemDto>[] = [
     {
       key: "last_activity",
       header: "最后活动",
       width: "128px",
       sortable: true,
       cell: (item) => {
-        const value = formatSessionTime(item.last_activity_at_ms, timezone);
+        const value = formatSessionTime(item.thread.last_usage_ms, timezone);
         return <span className="block truncate" title={value.title}>{value.text}</span>;
       },
     },
     {
-      key: "source",
+      key: "agent",
       header: "终端",
       width: "98pt",
       cell: (item) => {
-        const name = sourceDisplay ? sourceDisplay(item.source) : item.source;
+        const agent = item.thread.key.agent;
+        const name = agentDisplay ? agentDisplay(agent) : agent;
         return <span className="block truncate" title={name}>{name}</span>;
       },
     },
@@ -85,20 +86,9 @@ export function SessionTable({
       key: "title",
       header: "标题",
       cell: (item) => {
-        const title = formatSessionTitle(item.title);
-        const status =
-          item.data_status === "incomplete"
-            ? { label: "数据不完整", icon: <CircleAlert className="h-4 w-4 text-warning" /> }
-            : item.data_status === "error"
-              ? { label: "数据计算异常", icon: <CircleX className="h-4 w-4 text-destructive" /> }
-              : null;
+        const title = formatSessionTitle(item.thread.title);
         return (
           <span className="flex min-w-0 items-center gap-1.5">
-            {status ? (
-              <Tooltip content={status.label} side="top">
-                <span aria-label={status.label} className="inline-flex shrink-0">{status.icon}</span>
-              </Tooltip>
-            ) : null}
             <span className="min-w-0 truncate" title={title}>{title}</span>
           </span>
         );
@@ -110,8 +100,9 @@ export function SessionTable({
       width: "150px",
       sortable: true,
       cell: (item) => {
-        const project = formatSessionProject(item.project_name);
-        return <span className="block truncate" title={item.project_path ?? project}>{project}</span>;
+        const project = item.thread.project.kind === "project" ? item.thread.project.name : projectDisplay(item.thread.project);
+        const projectPath = item.thread.project.kind === "project" ? item.thread.project.path : project;
+        return <span className="block truncate" title={projectPath}>{formatSessionProject(project)}</span>;
       },
     },
     {
@@ -120,19 +111,17 @@ export function SessionTable({
       width: "215px",
       sortable: true,
       cell: (item) => {
-        const model = formatSessionModel(item.model_efforts);
+        const model = formatSessionModel(item.thread.model_effort);
         return <span className="block truncate" title={model.title} aria-label={model.accessibleName}>{model.text}</span>;
       },
     },
     {
-      key: "combined_total_tokens",
+      key: "total_tokens",
       header: "合计 Token",
       width: "150px",
       sortable: true,
       align: "right",
-      cell: (item) => item.inclusive_usage
-        ? <span className="tabular-nums" title={String(item.inclusive_usage.total_tokens)}>{formatSessionTokenInteger(item.inclusive_usage.total_tokens).text}</span>
-        : <span className="tabular-nums">—</span>,
+      cell: (item) => <span className="tabular-nums" title={String(item.inclusive_usage.total)}>{formatSessionTokenInteger(item.inclusive_usage.total).text}</span>,
     },
     {
       key: "subagent_count",
@@ -147,19 +136,15 @@ export function SessionTable({
       width: "127px",
       sortable: true,
       align: "right",
-      cell: (item) => item.inclusive_usage
-        ? <span className="tabular-nums" title={formatRatio(item.inclusive_usage.cache_hit_rate).title}>{formatRatio(item.inclusive_usage.cache_hit_rate).text}</span>
-        : <span className="tabular-nums">—</span>,
+      cell: (item) => <span className="tabular-nums" title={formatRatio(item.inclusive_usage.cache_hit_rate).title}>{formatRatio(item.inclusive_usage.cache_hit_rate).text}</span>,
     },
     {
-      key: "combined_estimated_cost",
+      key: "cost",
       header: "合计费用",
       width: "120px",
       sortable: true,
       align: "right",
-      cell: (item) => item.data_status === "error"
-        ? <span className="tabular-nums">—</span>
-        : <span className="tabular-nums" title={formatCost(item.inclusive_usage?.estimated_cost ?? null).title}>{formatCost(item.inclusive_usage?.estimated_cost ?? null).text}</span>,
+      cell: (item) => <span className="tabular-nums" title={formatCost(item.inclusive_usage.cost).title}>{formatCost(item.inclusive_usage.cost).text}</span>,
     },
   ];
 
@@ -169,7 +154,7 @@ export function SessionTable({
     <Table
       data={rows}
       columns={columns}
-      getRowId={(row) => row.root_session_id}
+      getRowId={(row) => threadKeyId(row.thread.key)}
       rowHeight={TABLE_ROW_HEIGHT}
       height={tableHeight}
       loading={loading}
@@ -183,17 +168,14 @@ export function SessionTable({
       reorderable={false}
       className="rounded-2xl"
       getRowProps={(item) => {
-        const error = item.data_status === "error";
-        const activate = () => {
-          if (!error) onOpenSession?.(item);
-        };
+        const keyId = threadKeyId(item.thread.key);
+        const activate = () => onOpenSession?.(item);
         return {
-          "data-session-root-id": item.root_session_id,
-          tabIndex: onOpenSession && !error ? 0 : -1,
-          "aria-disabled": error || undefined,
-          "aria-selected": item.root_session_id === selectedRootSessionId,
-          onClick: onOpenSession && !error ? activate : undefined,
-          onKeyDown: onOpenSession && !error
+          "data-session-thread-key-id": keyId,
+          tabIndex: onOpenSession ? 0 : -1,
+          "aria-selected": keyId === selectedThreadKeyId,
+          onClick: onOpenSession ? activate : undefined,
+          onKeyDown: onOpenSession
             ? (event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
@@ -201,7 +183,7 @@ export function SessionTable({
                 }
               }
             : undefined,
-          className: error ? "cursor-default" : onOpenSession ? "cursor-pointer" : undefined,
+          className: onOpenSession ? "cursor-pointer" : undefined,
         };
       }}
     />

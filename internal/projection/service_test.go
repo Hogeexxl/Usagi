@@ -57,7 +57,7 @@ func (q *fakeQuery) Quota(ctx context.Context, asked bool) (magpie.QuotasRespons
 func TestSummary(t *testing.T) {
 	scope := ScopeQuery{
 		Range:  query.DateRange{From: "2026-10-01", To: "2026-10-11"},
-		Filter: query.UsageFilter{Agents: []string{"claude", "codex"}, Models: []string{"m"}},
+		Filter: query.UsageFilter{Agents: []string{"claude", "codex"}, Models: []query.ModelSelection{{ProviderID: "openai", Model: "m"}}},
 	}
 	wantUsageQuery := query.UsageQuery{Range: scope.Range, Filter: scope.Filter, GroupBy: query.GroupNone}
 	wantSessionQuery := query.SessionQuery{Range: scope.Range, Filter: scope.Filter}
@@ -93,7 +93,7 @@ func TestSummary(t *testing.T) {
 			return query.UsageRowsResult{Rows: []query.UsageRow{
 				{Time: testTime(12, 0), Agent: "claude", ResolvedSession: query.SessionRef{Agent: "claude", ID: "A"}, Input: 2, Priced: true},
 				{Time: testTime(11, 0), Agent: "claude", ResolvedSession: query.SessionRef{Agent: "claude", ID: "A"}, Subagent: "B", Input: 3, Priced: true},
-				{Time: testTime(10, 0), Agent: "claude", ResolvedSession: query.SessionRef{Agent: "claude", ID: "A"}, Subagent: "C", ParentAgent: "B", Input: 4, Priced: true},
+				{Time: testTime(10, 0), Agent: "claude", ResolvedSession: query.SessionRef{Agent: "claude", ID: "A"}, Subagent: "C", ParentAgent: "B", Input: 4},
 			}}, nil
 		},
 	}
@@ -103,19 +103,22 @@ func TestSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summary() error = %v", err)
 	}
+	if usageCalls != 1 || sessionCalls != 1 || rowCalls != 1 {
+		t.Fatalf("Summary query calls = usage %d, sessions %d, rows %d; want one each", usageCalls, sessionCalls, rowCalls)
+	}
 	wantUsage := usageFromTotals(query.UsageTotals{
 		Calls: 4, Errors: 1, Input: 20, Output: 10, CacheRead: 20, CacheWrite: 50,
 		CacheWrite1h: 30, Reasoning: 5, Cost: 0.75, Unpriced: 2,
 	})
-	if !reflect.DeepEqual(got.Usage, wantUsage) || got.SessionCount != 4 {
-		t.Fatalf("Summary() = %+v; want usage %+v and projected thread count 4", got, wantUsage)
+	if !reflect.DeepEqual(got.Usage, wantUsage) || got.RootSessionCount != 2 || got.RootUnpricedSessionCount != 1 {
+		t.Fatalf("Summary() = %+v; want usage %+v and two roots with one unpriced root", got, wantUsage)
 	}
 	list, err := service.Sessions(context.Background(), scope)
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if got.SessionCount != int64(len(list.Threads)) || len(list.Threads) != 4 {
-		t.Fatalf("Summary SessionCount = %d, Sessions thread count = %d", got.SessionCount, len(list.Threads))
+	if got.RootSessionCount != int64(len(list.Items)) || len(list.Items) != 2 {
+		t.Fatalf("Summary RootSessionCount = %d, Sessions item count = %d", got.RootSessionCount, len(list.Items))
 	}
 	if usageCalls != 1 || sessionCalls != 2 || rowCalls != 2 {
 		t.Fatalf("query calls = usage %d, sessions %d, rows %d", usageCalls, sessionCalls, rowCalls)

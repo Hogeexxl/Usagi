@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCompact, formatCost, formatCostPerMillionTokens, formatInteger, formatLastSyncTime, formatRatio } from "./format";
+import { formatCompact, formatCost, formatCostPerMillionTokens, formatInteger, formatQuotaResetTime, formatRatio } from "./format";
 
 describe("dashboard formatters", () => {
   it.each([
@@ -33,16 +33,16 @@ describe("dashboard formatters", () => {
     expect(cost).toBe(1.2);
   });
 
-  it("formats complete-session cost per MToken with quantity-based precision", () => {
+  it("formats usage cost per MToken with quantity-based precision", () => {
     expect(formatCostPerMillionTokens(23.4567).text).toBe("$23.46 / MToken");
     expect(formatCostPerMillionTokens(6.2354).text).toBe("$6.235 / MToken");
     expect(formatCostPerMillionTokens(0.3474).text).toBe("$0.347 / MToken");
     expect(formatCostPerMillionTokens(null).text).toBe("— / MToken");
   });
 
-  it("formats a completed sync timestamp as HH:mm:ss", () => {
-    const value = Date.UTC(2026, 0, 2, 3, 4, 5);
-    expect(formatLastSyncTime(value)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
-    expect(formatLastSyncTime(null)).toBe("—");
+  it("formats quota reset time using the local timezone", () => {
+    const value = new Date(2026, 0, 2, 3, 4).getTime();
+    expect(formatQuotaResetTime(value)).toBe("01/02 03:04");
+    expect(formatQuotaResetTime(null)).toBe("—");
   });
 });

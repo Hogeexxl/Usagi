@@ -9,30 +9,37 @@ import { FilterControls } from "./FilterControls";
 
 const modelOptions: FilterOptionsResponse = {
   data_revision: 1,
-  sources: [],
+  agents: [],
   models: [
-    { model: "gpt-4o", provider: "openai" },
-    { model: "gpt-4o-mini", provider: "openai" },
-    { model: "codex-auto-review", provider: "openai" },
-    { model: "claude-3", provider: "route-models" },
-    { model: "github-copilot/gpt-5.6-luna", provider: "route-models" },
-    { model: "gemini-2.5", provider: "route-models" },
+    { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+    { model: "gpt-4o-mini", provider_id: "openai", provider_name: "OpenAI" },
+    { model: "codex-auto-review", provider_id: "openai", provider_name: "OpenAI" },
+    { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
+    { model: "github-copilot/gpt-5.6-luna", provider_id: "route-models", provider_name: "Route-models" },
+    { model: "gemini-2.5", provider_id: "route-models", provider_name: "Route-models" },
   ],
   projects: [],
 };
 
 const projectOptions: FilterOptionsResponse = {
   data_revision: 1,
-  sources: [],
+  agents: [],
   models: [],
   projects: [
-    { kind: "project", project_name: "Workspace", project_path: "/workspace" },
+    { kind: "project", name: "Workspace", path: "/workspace" },
     { kind: "projectless" },
     { kind: "unknown" },
   ],
 };
 
-const emptyFilters: DashboardFilters = { sources: [], models: [], projects: [] };
+function modelSelections(...models: string[]) {
+  return models.map((model) => ({
+    provider_id: model.startsWith("claude-") ? "route-models" : model.startsWith("gemini-") ? "antigravity" : model.startsWith("gpt-") || model.startsWith("codex-") ? "openai" : "orphan-provider",
+    model,
+  }));
+}
+
+const emptyFilters: DashboardFilters = { agents: [], models: [], projects: [] };
 
 type RenderOverrides = {
   filters?: DashboardFilters;
@@ -73,33 +80,33 @@ function ensureModelGroupExpanded(dialog: HTMLElement, name: string) {
 }
 
 describe("FilterControls", () => {
-  it("sorts each provider by release date while keeping group and raw model identities", async () => {
+  it("sorts models lexicographically within backend-ordered dynamic providers", async () => {
     renderControls({ options: {
       ...modelOptions,
       models: [
-        { model: "gpt-5.4", provider: "openai" },
-        { model: "gpt-5.4-mini", provider: "openai" },
-        { model: "gpt-6.1-sol", provider: "openai" },
-        { model: "gpt-6-sol", provider: "openai" },
-        { model: "gpt-6-luna", provider: "openai" },
-        { model: "unknown-10", provider: "openai" },
-        { model: "unknown-2", provider: "openai" },
-        { model: "claude-opus-4-6-thinking", provider: "antigravity" },
-        { model: "gemini-3.8-flash", provider: "antigravity" },
-        { model: "copilot/claude-opus-5.5", provider: "route-models" },
-        { model: "copiLot/cLaude-sonnet-5.5", provider: "route-models" },
-        { model: "claude-fable-5-1", provider: "route-models" },
-        { model: "custom/gemini-3.8-flash-high", provider: "route-models" },
-        { model: "github-copilot/gpt-5.6-luna", provider: "route-models" },
+        { model: "gpt-5.4", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gpt-5.4-mini", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gpt-6.1-sol", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gpt-6-sol", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gpt-6-luna", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "unknown-10", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "unknown-2", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "claude-opus-4-6-thinking", provider_id: "antigravity", provider_name: "Antigravity" },
+        { model: "gemini-3.8-flash", provider_id: "antigravity", provider_name: "Antigravity" },
+        { model: "copilot/claude-opus-5.5", provider_id: "route-models", provider_name: "Route-models" },
+        { model: "copiLot/cLaude-sonnet-5.5", provider_id: "route-models", provider_name: "Route-models" },
+        { model: "claude-fable-5-1", provider_id: "route-models", provider_name: "Route-models" },
+        { model: "custom/gemini-3.8-flash-high", provider_id: "route-models", provider_name: "Route-models" },
+        { model: "github-copilot/gpt-5.6-luna", provider_id: "route-models", provider_name: "Route-models" },
       ],
     } });
     const dialog = await openPopover("模型筛选，全部");
     ensureModelGroupExpanded(dialog, "Antigravity");
     ensureModelGroupExpanded(dialog, "Route-models");
     expect(within(dialog).getAllByRole("checkbox").map(node => node.getAttribute("aria-label") ?? node.closest("label")?.textContent)).toEqual([
-      "OpenAI", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-sol", "gpt-5.4-mini", "gpt-5.4", "unknown-2", "unknown-10",
-      "Antigravity", "gemini-3.8-flash", "claude-opus-4-6-thinking",
-      "Route-models", "copiLot/cLaude-sonnet-5.5", "copilot/claude-opus-5.5", "custom/gemini-3.8-flash-high", "claude-fable-5-1", "github-copilot/gpt-5.6-luna",
+      "OpenAI", "gpt-5.4", "gpt-5.4-mini", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "unknown-2", "unknown-10",
+      "Antigravity", "claude-opus-4-6-thinking", "gemini-3.8-flash",
+      "Route-models", "claude-fable-5-1", "copilot/claude-opus-5.5", "copiLot/cLaude-sonnet-5.5", "custom/gemini-3.8-flash-high", "github-copilot/gpt-5.6-luna",
     ]);
   });
 
@@ -111,7 +118,7 @@ describe("FilterControls", () => {
   });
 
   it("uses the primary one-item trigger when one model is selected", () => {
-    renderControls({ filters: { sources: [], models: ["claude-3"], projects: [] } });
+    renderControls({ filters: { agents: [], models: modelSelections("claude-3"), projects: [] } });
     const trigger = screen.getByRole("button", { name: "模型筛选，已选1项" });
     expect(trigger).toHaveTextContent("模型 · 1 项");
     expect(trigger).toHaveClass("bg-primary");
@@ -126,7 +133,7 @@ describe("FilterControls", () => {
 
     fireEvent.click(checkbox);
 
-    expect(onChange).toHaveBeenCalledWith({ sources: [], models: ["claude-3"], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ agents: [], models: modelSelections("claude-3"), projects: [] });
   });
 
   it("toggles an ordinary model when its label text is clicked", async () => {
@@ -137,15 +144,15 @@ describe("FilterControls", () => {
 
     fireEvent.click(within(dialog).getByText("claude-3"));
 
-    expect(onChange).toHaveBeenCalledWith({ sources: [], models: ["claude-3"], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ agents: [], models: modelSelections("claude-3"), projects: [] });
   });
 
   it.each([
     { name: "0/N", selected: [], ariaChecked: "false" },
-    { name: "partial", selected: ["gpt-4o"], ariaChecked: "mixed" },
-    { name: "N/N", selected: ["gpt-4o", "gpt-4o-mini", "codex-auto-review"], ariaChecked: "true" },
+    { name: "partial", selected: modelSelections("gpt-4o"), ariaChecked: "mixed" },
+    { name: "N/N", selected: modelSelections("gpt-4o", "gpt-4o-mini", "codex-auto-review"), ariaChecked: "true" },
   ])("exposes OpenAI $name state", async ({ selected, ariaChecked }) => {
-    renderControls({ filters: { sources: [], models: selected, projects: [] } });
+    renderControls({ filters: { agents: [], models: selected, projects: [] } });
     const triggerName = selected.length
       ? `模型筛选，已选${selected.length}项`
       : "模型筛选，全部";
@@ -197,24 +204,24 @@ describe("FilterControls", () => {
   it("keeps a selected orphan model cancellable in the Selected fallback group", async () => {
     const onChange = vi.fn();
     renderControls({
-      filters: { sources: [], models: ["orphan-rollout"], projects: [] },
+      filters: { agents: [], models: modelSelections("orphan-rollout"), projects: [] },
       onChange,
     });
     const dialog = await openPopover("模型筛选，已选1项");
-    ensureModelGroupExpanded(dialog, "Selected");
+    ensureModelGroupExpanded(dialog, "已选");
     const orphan = within(dialog).getByRole("checkbox", { name: "orphan-rollout" });
 
-    expect(within(dialog).getByRole("button", { name: "Selected" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "已选" })).toBeInTheDocument();
     fireEvent.click(orphan);
 
-    expect(onChange).toHaveBeenCalledWith({ sources: [], models: [], projects: [] });
+    expect(onChange).toHaveBeenCalledWith({ agents: [], models: [], projects: [] });
   });
 
   it("waits for the first active model group and then preserves group state", async () => {
     const { rerender } = render(
       <FilterControls
-        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
-        options={{ data_revision: 1, sources: [], models: [], projects: [] }}
+        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
+        options={{ data_revision: 1, agents: [], models: [], projects: [] }}
         optionsLoading={false}
         optionsStale={false}
         anyFilterActive={true}
@@ -225,7 +232,7 @@ describe("FilterControls", () => {
     );
 
     const dialog = await openPopover("模型筛选，已选1项");
-    const selectedToggle = within(dialog).getByRole("button", { name: "Selected" });
+    const selectedToggle = within(dialog).getByRole("button", { name: "已选" });
     expect(selectedToggle).toHaveAttribute("aria-expanded", "false");
     expect(within(dialog).queryByRole("checkbox", { name: "orphan-rollout" })).not.toBeInTheDocument();
 
@@ -233,11 +240,11 @@ describe("FilterControls", () => {
     expect(selectedToggle).toHaveAttribute("aria-expanded", "true");
     rerender(
       <FilterControls
-        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
+        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
         options={{
           data_revision: 2,
-          sources: [],
-          models: [{ model: "gpt-4o", provider: "openai" }],
+          agents: [],
+          models: [{ model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" }],
           projects: [],
         }}
         optionsLoading={false}
@@ -249,20 +256,20 @@ describe("FilterControls", () => {
       />,
     );
     const updatedDialog = screen.getByRole("dialog");
-    expect(within(updatedDialog).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(updatedDialog).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "true");
     const openAiToggle = within(updatedDialog).getByRole("button", { name: "OpenAI" });
     expect(openAiToggle).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(openAiToggle);
     rerender(
       <FilterControls
-        filters={{ sources: [], models: ["orphan-rollout"], projects: [] }}
+        filters={{ agents: [], models: modelSelections("orphan-rollout"), projects: [] }}
         options={{
           data_revision: 3,
-          sources: [],
+          agents: [],
           models: [
-            { model: "gpt-4o", provider: "openai" },
-            { model: "gemini-2.5", provider: "antigravity" },
+            { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+            { model: "gemini-2.5", provider_id: "antigravity", provider_name: "Antigravity" },
           ],
           projects: [],
         }}
@@ -275,7 +282,7 @@ describe("FilterControls", () => {
       />,
     );
     const changedDialog = screen.getByRole("dialog");
-    expect(within(changedDialog).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(changedDialog).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "true");
     expect(within(changedDialog).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
     expect(within(changedDialog).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
   });
@@ -287,21 +294,21 @@ describe("FilterControls", () => {
 
     fireEvent.click(within(dialog).getByText("Workspace"));
     expect(onChange).toHaveBeenLastCalledWith({
-      sources: [],
+      agents: [],
       models: [],
-      projects: [{ kind: "project", project_path: "/workspace" }],
+      projects: [{ kind: "project", path: "/workspace" }],
     });
 
     fireEvent.click(within(dialog).getByText("无项目会话"));
     expect(onChange).toHaveBeenLastCalledWith({
-      sources: [],
+      agents: [],
       models: [],
       projects: [{ kind: "projectless" }],
     });
 
     fireEvent.click(within(dialog).getByText("未识别项目"));
     expect(onChange).toHaveBeenLastCalledWith({
-      sources: [],
+      agents: [],
       models: [],
       projects: [{ kind: "unknown" }],
     });
@@ -320,7 +327,7 @@ describe("FilterControls", () => {
 
   it("shows the selected project count and primary trigger semantics", () => {
     renderControls({
-      filters: { sources: [], models: [], projects: [{ kind: "project", project_path: "/workspace" }] },
+      filters: { agents: [], models: [], projects: [{ kind: "project", path: "/workspace" }] },
       options: projectOptions,
       anyFilterActive: true,
     });
@@ -395,7 +402,7 @@ describe("FilterControls", () => {
     const onClear = vi.fn();
     const onChange = vi.fn();
     renderControls({
-      filters: { sources: [], models: ["claude-3"], projects: [{ kind: "projectless" }] },
+      filters: { agents: [], models: modelSelections("claude-3"), projects: [{ kind: "projectless" }] },
       anyFilterActive: true,
       onClear,
       onChange,
@@ -414,7 +421,7 @@ describe("FilterControls", () => {
     firstRender.unmount();
 
     // 0 sources
-    const secondRender = renderControls({ options: { data_revision: 1, sources: [], models: [], projects: [] } });
+    const secondRender = renderControls({ options: { data_revision: 1, agents: [], models: [], projects: [] } });
     expect(screen.queryByRole("button", { name: /终端/ })).not.toBeInTheDocument();
     secondRender.unmount();
 
@@ -422,7 +429,7 @@ describe("FilterControls", () => {
     const thirdRender = renderControls({
       options: {
         data_revision: 1,
-        sources: [{ source: "codex", display_name: "Codex" }],
+        agents: [{ agent: "codex", display_name: "Codex" }],
         models: [],
         projects: [],
       },
@@ -435,9 +442,9 @@ describe("FilterControls", () => {
     const onChange = vi.fn();
     const multiSourceOptions: FilterOptionsResponse = {
       data_revision: 1,
-      sources: [
-        { source: "codex", display_name: "Codex" },
-        { source: "antigravity", display_name: "Antigravity" },
+      agents: [
+        { agent: "codex", display_name: "Codex" },
+        { agent: "antigravity", display_name: "Antigravity" },
       ],
       models: [],
       projects: [],
@@ -445,7 +452,7 @@ describe("FilterControls", () => {
 
     renderControls({
       options: multiSourceOptions,
-      filters: { sources: [], models: [], projects: [] },
+      filters: { agents: [], models: [], projects: [] },
       onChange,
     });
 
@@ -466,7 +473,7 @@ describe("FilterControls", () => {
     fireEvent.click(antigravityCheckbox);
 
     expect(onChange).toHaveBeenCalledWith({
-      sources: ["antigravity"],
+      agents: ["antigravity"],
       models: [],
       projects: [],
     });
@@ -476,9 +483,9 @@ describe("FilterControls", () => {
     const onChange = vi.fn();
     const multiSourceOptions: FilterOptionsResponse = {
       data_revision: 1,
-      sources: [
-        { source: "codex", display_name: "Codex" },
-        { source: "antigravity", display_name: "Antigravity" },
+      agents: [
+        { agent: "codex", display_name: "Codex" },
+        { agent: "antigravity", display_name: "Antigravity" },
       ],
       models: [],
       projects: [],
@@ -486,7 +493,7 @@ describe("FilterControls", () => {
 
     renderControls({
       options: multiSourceOptions,
-      filters: { sources: ["legacy-source"], models: [], projects: [] },
+      filters: { agents: ["legacy-source"], models: [], projects: [] },
       onChange,
     });
 
@@ -503,30 +510,30 @@ describe("FilterControls", () => {
   it("TD-P5-MODEL-ORPHAN-01 puts orphan model into Selected group at the end, not Route-models", async () => {
     const multiOptions: FilterOptionsResponse = {
       data_revision: 1,
-      sources: [],
+      agents: [],
       models: [
-        { model: "gpt-4o", provider: "openai" },
-        { model: "gemini-2.5-pro", provider: "antigravity" },
-        { model: "claude-3", provider: "route-models" },
+        { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gemini-2.5-pro", provider_id: "antigravity", provider_name: "Antigravity" },
+        { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
       ],
       projects: [],
     };
 
     renderControls({
       options: multiOptions,
-      filters: { sources: [], models: ["disappeared-antigravity-model"], projects: [] },
+      filters: { agents: [], models: modelSelections("disappeared-antigravity-model"), projects: [] },
     });
 
     const dialog = await openPopover("模型筛选，已选1项");
-    const groupButtons = within(dialog).getAllByRole("button", { name: /OpenAI|Antigravity|Route-models|Selected/ });
-    const labels = groupButtons.map((btn) => btn.textContent?.replace(/[^\w-]/g, "") || "");
-    expect(labels).toEqual(["OpenAI", "Antigravity", "Route-models", "Selected"]);
+    const groupButtons = within(dialog).getAllByRole("button", { name: /OpenAI|Antigravity|Route-models|已选/ });
+    const labels = groupButtons.map((btn) => btn.textContent?.trim() || "");
+    expect(labels).toEqual(["OpenAI", "Antigravity", "Route-models", "已选"]);
 
-    ensureModelGroupExpanded(dialog, "Selected");
+    ensureModelGroupExpanded(dialog, "已选");
     expect(within(dialog).getByRole("checkbox", { name: "disappeared-antigravity-model" })).toBeInTheDocument();
 
     // Collapse Selected group, expand Route-models, and verify orphan is not in Route-models
-    fireEvent.click(within(dialog).getByRole("button", { name: "Selected" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "已选" }));
     ensureModelGroupExpanded(dialog, "Route-models");
     expect(within(dialog).queryByRole("checkbox", { name: "disappeared-antigravity-model" })).not.toBeInTheDocument();
   });
@@ -534,10 +541,10 @@ describe("FilterControls", () => {
   it("TD-P5-MODEL-EXPAND-01 initially expands first active group and preserves expanded state on options change", async () => {
     const initialOptions: FilterOptionsResponse = {
       data_revision: 1,
-      sources: [],
+      agents: [],
       models: [
-        { model: "gpt-4o", provider: "openai" },
-        { model: "claude-3", provider: "route-models" },
+        { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
       ],
       projects: [],
     };
@@ -572,18 +579,18 @@ describe("FilterControls", () => {
     // Dynamic update: Antigravity model added and orphan selected model added
     const updatedOptions: FilterOptionsResponse = {
       data_revision: 2,
-      sources: [],
+      agents: [],
       models: [
-        { model: "gpt-4o", provider: "openai" },
-        { model: "gemini-2.5-flash", provider: "antigravity" },
-        { model: "claude-3", provider: "route-models" },
+        { model: "gpt-4o", provider_id: "openai", provider_name: "OpenAI" },
+        { model: "gemini-2.5-flash", provider_id: "antigravity", provider_name: "Antigravity" },
+        { model: "claude-3", provider_id: "route-models", provider_name: "Route-models" },
       ],
       projects: [],
     };
 
     rerender(
       <FilterControls
-        filters={{ sources: [], models: ["new-orphan"], projects: [] }}
+        filters={{ agents: [], models: modelSelections("new-orphan"), projects: [] }}
         options={updatedOptions}
         optionsLoading={false}
         optionsStale={false}
@@ -599,6 +606,6 @@ describe("FilterControls", () => {
     expect(within(dialogUpdated).getByRole("button", { name: "OpenAI" })).toHaveAttribute("aria-expanded", "false");
     expect(within(dialogUpdated).getByRole("button", { name: "Route-models" })).toHaveAttribute("aria-expanded", "true");
     expect(within(dialogUpdated).getByRole("button", { name: "Antigravity" })).toHaveAttribute("aria-expanded", "false");
-    expect(within(dialogUpdated).getByRole("button", { name: "Selected" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialogUpdated).getByRole("button", { name: "已选" })).toHaveAttribute("aria-expanded", "false");
   });
 });

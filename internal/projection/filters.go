@@ -47,7 +47,7 @@ func (s *Service) FilterOptions(ctx context.Context) (FilterOptionsView, error) 
 	orderedProjects := append(concrete, projects[projectlessKey], projects[unknownKey])
 	return FilterOptionsView{
 		Agents:   append([]query.AgentOption(nil), result.Agents...),
-		Models:   append([]string(nil), result.Models...),
+		Models:   append([]query.ModelOption(nil), result.Models...),
 		Projects: orderedProjects,
 	}, nil
 }

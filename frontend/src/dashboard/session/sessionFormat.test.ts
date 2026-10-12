@@ -24,22 +24,22 @@ describe("Session presentation contract", () => {
     expect(formatSessionProject(null)).toBe("未识别项目");
     expect(formatSessionModel([])).toMatchObject({ text: "unknown", accessibleName: "unknown" });
     expect(formatSessionModel([
-      { model: "gpt-5", reasoning_effort: "high" },
-      { model: "o4-mini", reasoning_effort: null },
+      { model: "gpt-5", effort: "high" },
+      { model: "o4-mini", effort: null },
     ])).toMatchObject({
       text: "gpt-5 (high) +1",
       title: "gpt-5 (high), o4-mini (—)",
       accessibleName: "gpt-5 (high), o4-mini (—)",
     });
     expect(formatSessionModel([
-      { model: "gpt-5", reasoning_effort: "high" },
-      { model: "gpt-5", reasoning_effort: "medium" },
+      { model: "gpt-5", effort: "high" },
+      { model: "gpt-5", effort: "medium" },
     ])).toMatchObject({
       text: "gpt-5 (high) +1",
       title: "gpt-5 (high), gpt-5 (medium)",
       accessibleName: "gpt-5 (high), gpt-5 (medium)",
     });
-    expect(formatSessionModel([{ model: "o4-mini", reasoning_effort: null }]).text).toBe("o4-mini (—)");
+    expect(formatSessionModel([{ model: "o4-mini", effort: null }]).text).toBe("o4-mini (—)");
   });
 
   it("formats same-day, same-year, and cross-year timestamps in the API timezone", () => {

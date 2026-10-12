@@ -1,0 +1,11 @@
+{
+  "data_revision": 41,
+  "status_revision": 9,
+  "scan_state": "idle",
+  "source_binding_status": "ready",
+  "last_finished_scan_result": "completed",
+  "last_scan_started_at_ms": 1737000000000,
+  "last_scan_completed_at_ms": 1737000000002,
+  "last_scan_failed_at_ms": null,
+  "last_scan_error_code": null
+}

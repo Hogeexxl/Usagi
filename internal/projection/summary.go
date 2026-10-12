@@ -18,5 +18,15 @@ func (s *Service) Summary(ctx context.Context, q ScopeQuery) (SummaryView, error
 	if err != nil {
 		return SummaryView{}, err
 	}
-	return SummaryView{Usage: usageFromTotals(usage.Totals), SessionCount: int64(len(threads.Threads))}, nil
+	result := SummaryView{Usage: usageFromTotals(usage.Totals)}
+	for index, thread := range threads.Threads {
+		if thread.Type != ThreadMain {
+			continue
+		}
+		result.RootSessionCount++
+		if threads.inclusiveRollup(index).inclusiveUsage.Unpriced > 0 {
+			result.RootUnpricedSessionCount++
+		}
+	}
+	return result, nil
 }

@@ -13,7 +13,7 @@ func TestFilterOptions(t *testing.T) {
 	results := []query.FilterOptionsResult{
 		{
 			Agents: []query.AgentOption{{Agent: "z", DisplayName: "Z"}, {Agent: "a", DisplayName: "A"}},
-			Models: []string{"z-model", "a-model"},
+			Models: []query.ModelOption{{Model: "z-model", ProviderID: "z", ProviderName: "Z"}, {Model: "a-model", ProviderID: "a", ProviderName: "A"}},
 			Projects: []query.ProjectRef{
 				{Kind: query.ProjectKindProject, Path: "/z", Name: "z"},
 				{Kind: query.ProjectKindProjectless},
@@ -39,7 +39,7 @@ func TestFilterOptions(t *testing.T) {
 	}
 	want := FilterOptionsView{
 		Agents: []query.AgentOption{{Agent: "z", DisplayName: "Z"}, {Agent: "a", DisplayName: "A"}},
-		Models: []string{"z-model", "a-model"},
+		Models: []query.ModelOption{{Model: "z-model", ProviderID: "z", ProviderName: "Z"}, {Model: "a-model", ProviderID: "a", ProviderName: "A"}},
 		Projects: []query.ProjectRef{
 			{Kind: query.ProjectKindProject, Path: "/a", Name: "a"},
 			{Kind: query.ProjectKindProject, Path: "/z", Name: "z"},

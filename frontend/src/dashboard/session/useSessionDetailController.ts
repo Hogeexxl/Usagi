@@ -1,52 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createRevisionFeed, type RevisionFeed } from "../../data/revisionFeed";
-import { canonicalDashboardFilters, dashboardQueryKey, type UsagiClient, usagiClient } from "../../data/usagiClient";
+import { canonicalDashboardFilters, dashboardQueryKey, threadKeyId, usagiClient, type UsagiClient } from "../../data/usagiClient";
 import {
   UsagiClientError,
   type DashboardFilters,
   type DashboardRange,
-  type RevisionTuple,
   type SessionDetailResponse,
-  type SessionItemDto,
+  type SessionListItemDto,
+  type ThreadKey,
 } from "../../data/types";
 
-export type SessionDetailLoadState = "closed" | "loading" | "ready" | "refreshing" | "error";
-
-export type SessionDetailControllerOptions = {
-  client?: UsagiClient;
-  revisionFeed?: RevisionFeed;
-  /** The revision backing the currently visible Session snapshot. */
-  dataRevision?: number;
-  /** Refresh the Session snapshot after a detail request reports stale data. */
-  onStaleRevision?: () => void;
-};
+export type SessionDetailLoadState = "closed" | "loading" | "refreshing" | "ready" | "error";
 
 export type SessionDetailControllerViewModel = {
   open: boolean;
-  selected_root_session_id: string | null;
-  selected_row: SessionItemDto | null;
+  selected_thread_key_id: string | null;
+  selected_row: SessionListItemDto | null;
   detail: SessionDetailResponse | null;
   data_revision?: number;
   load_state: SessionDetailLoadState;
   error_code?: string;
   refresh_error_code?: string;
-  open_detail: (row: SessionItemDto) => void;
-  select_session: (row: SessionItemDto) => void;
+  open_detail: (row: SessionListItemDto) => void;
+  select_session: (row: SessionListItemDto) => void;
   close_detail: () => void;
   retry_detail: () => void;
 };
 
-type DetailCacheEntry = {
-  key: string;
-  revision: number;
-  value: SessionDetailResponse;
-};
+type CacheEntry = { revision: number; value: SessionDetailResponse };
 
-type DetailState = {
+type State = {
   open: boolean;
-  selected_root_session_id: string | null;
-  selected_row: SessionItemDto | null;
+  selected_thread_key_id: string | null;
+  selected_key: ThreadKey | null;
+  selected_row: SessionListItemDto | null;
   detail: SessionDetailResponse | null;
   data_revision?: number;
   load_state: SessionDetailLoadState;
@@ -54,26 +42,24 @@ type DetailState = {
   refresh_error_code?: string;
 };
 
-type Scope = {
-  range: DashboardRange;
-  filters: DashboardFilters;
-  revision: number;
+export type SessionDetailControllerOptions = {
+  client?: UsagiClient;
+  revisionFeed?: RevisionFeed;
+  dataRevision?: number;
+  sessionsReady?: boolean;
+  onStaleRevision?: () => void;
 };
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
-}
 
 function errorCode(error: unknown): string {
   return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
 
-function detailCacheKey(scope: Scope, rootSessionId: string, revision = scope.revision): string {
-  return JSON.stringify([dashboardQueryKey(scope.range, scope.filters), rootSessionId, revision]);
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
-function revisionFromFeed(feed: RevisionFeed | undefined): number {
-  return feed?.get_snapshot()?.data_revision ?? 0;
+function detailCacheKey(scopeKey: string, key: ThreadKey, revision: number): string {
+  return `${scopeKey}|${threadKeyId(key)}|${revision}`;
 }
 
 export function useSessionDetailController(
@@ -82,37 +68,35 @@ export function useSessionDetailController(
   options: SessionDetailControllerOptions = {},
 ): SessionDetailControllerViewModel {
   const client = options.client ?? usagiClient;
-  const canonicalFilters = canonicalDashboardFilters(filters);
-  const feedRef = useRef<RevisionFeed | null>(null);
   const ownedFeedRef = useRef<RevisionFeed | null>(null);
+  const feedRef = useRef<RevisionFeed | null>(null);
   if (!feedRef.current) {
     feedRef.current = options.revisionFeed ?? createRevisionFeed({ client });
     if (!options.revisionFeed) ownedFeedRef.current = feedRef.current;
   }
-
-  const initialRevision = options.dataRevision ?? revisionFromFeed(feedRef.current);
-  const scopeRef = useRef<Scope>({ range, filters: canonicalFilters, revision: initialRevision });
-  const suppliedRevision = options.dataRevision ?? revisionFromFeed(feedRef.current);
-  scopeRef.current = { range, filters: canonicalFilters, revision: Math.max(scopeRef.current.revision, suppliedRevision) };
-  const stateRef = useRef<DetailState>({
+  const scopeKey = dashboardQueryKey(range, filters);
+  const latestScopeRef = useRef({ range, filters: canonicalDashboardFilters(filters) });
+  latestScopeRef.current = { range, filters: canonicalDashboardFilters(filters) };
+  const scopeRef = useRef({ range, filters: canonicalDashboardFilters(filters), revision: options.dataRevision ?? 0 });
+  const cacheRef = useRef(new Map<string, CacheEntry>());
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const requestGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const awaitingEpochSnapshotRef = useRef(false);
+  const staleRetryRef = useRef(false);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const stateRef = useRef<State>({
     open: false,
-    selected_root_session_id: null,
+    selected_thread_key_id: null,
+    selected_key: null,
     selected_row: null,
     detail: null,
-    data_revision: initialRevision || undefined,
+    data_revision: options.dataRevision,
     load_state: "closed",
   });
-  const [state, setState] = useState<DetailState>(stateRef.current);
-  const mountedRef = useRef(true);
-  const requestGenerationRef = useRef(0);
-  const requestAbortRef = useRef<AbortController | null>(null);
-  const cacheRef = useRef(new Map<string, DetailCacheEntry>());
-  const previousFocusRef = useRef<HTMLElement | null>(null);
-  const staleCallbackRef = useRef(options.onStaleRevision);
-  staleCallbackRef.current = options.onStaleRevision;
+  const [state, setState] = useState<State>(stateRef.current);
 
-  const commit = useCallback((next: DetailState | ((current: DetailState) => DetailState)) => {
-    if (!mountedRef.current) return;
+  const commit = useCallback((next: State | ((current: State) => State)) => {
     const value = typeof next === "function" ? next(stateRef.current) : next;
     stateRef.current = value;
     setState(value);
@@ -128,106 +112,91 @@ export function useSessionDetailController(
     document.querySelector<HTMLElement>(".session-table-scroll")?.focus();
   }, []);
 
-  const loadDetail = useCallback(
-    (row: SessionItemDto, requestedRevision: number, bypassCache: boolean) => {
-      const scope = scopeRef.current;
-      const rootSessionId = row.root_session_id;
-      const cacheKey = detailCacheKey(scope, rootSessionId, requestedRevision);
-      const cached = !bypassCache ? cacheRef.current.get(cacheKey) : undefined;
-      requestAbortRef.current?.abort();
-      const generation = ++requestGenerationRef.current;
+  const loadDetail = useCallback((row: SessionListItemDto, requestedRevision: number, bypassCache: boolean) => {
+    const scope = scopeRef.current;
+    const key = row.thread.key;
+    const keyId = threadKeyId(key);
+    const scopeKey = dashboardQueryKey(scope.range, scope.filters);
+    const cacheKey = detailCacheKey(scopeKey, key, requestedRevision);
+    const cached = !bypassCache ? cacheRef.current.get(cacheKey) : undefined;
+    requestAbortRef.current?.abort();
+    const generation = ++requestGenerationRef.current;
 
-      commit((current) => ({
-        ...current,
-        open: true,
-        selected_root_session_id: rootSessionId,
-        selected_row: row,
-        data_revision: requestedRevision || current.data_revision,
-        detail: cached?.value ?? (current.selected_root_session_id === rootSessionId ? current.detail : null),
-        load_state: cached ? "ready" : current.detail && current.selected_root_session_id === rootSessionId ? "refreshing" : "loading",
-        error_code: undefined,
-        refresh_error_code: undefined,
-      }));
-      if (cached) return;
+    commit((current) => ({
+      ...current,
+      open: true,
+      selected_thread_key_id: keyId,
+      selected_key: key,
+      selected_row: row,
+      data_revision: requestedRevision,
+      detail: cached?.value ?? (current.selected_thread_key_id === keyId ? current.detail : null),
+      load_state: cached ? "ready" : current.detail && current.selected_thread_key_id === keyId ? "refreshing" : "loading",
+      error_code: undefined,
+      refresh_error_code: undefined,
+    }));
+    if (cached) return;
 
-      const controller = new AbortController();
-      requestAbortRef.current = controller;
-      const expectedRevision = requestedRevision > 0 ? requestedRevision : undefined;
-      void client
-        .getSessionDetail({
-          range: scope.range,
-          filters: scope.filters,
-          root_session_id: rootSessionId,
-          expected_data_revision: expectedRevision,
-          signal: controller.signal,
-        })
-        .then((response) => {
-          if (
-            controller.signal.aborted ||
-            generation !== requestGenerationRef.current ||
-            !mountedRef.current ||
-            !stateRef.current.open ||
-            stateRef.current.selected_root_session_id !== rootSessionId
-          ) {
-            return;
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
+    void client.getSessionDetail({ range: scope.range, filters: scope.filters, key, signal: controller.signal }).then(
+      (response) => {
+        if (
+          controller.signal.aborted ||
+          generation !== requestGenerationRef.current ||
+          !mountedRef.current ||
+          !stateRef.current.open ||
+          stateRef.current.selected_thread_key_id !== keyId
+        ) return;
+        const currentRevision = scopeRef.current.revision;
+        if (response.data_revision < currentRevision) {
+          options.onStaleRevision?.();
+          if (!staleRetryRef.current) {
+            staleRetryRef.current = true;
+            loadDetail(row, currentRevision, true);
           }
-          const currentRevision = scopeRef.current.revision;
-          if (currentRevision > 0 && response.data_revision !== currentRevision) {
-            if (response.data_revision < currentRevision) {
-              loadDetail(row, currentRevision, true);
-            }
-            return;
-          }
-          const responseKey = detailCacheKey(scopeRef.current, rootSessionId, response.data_revision);
-          cacheRef.current.set(responseKey, { key: responseKey, revision: response.data_revision, value: response });
-          for (const [key, entry] of cacheRef.current) {
-            if (entry.revision < response.data_revision) cacheRef.current.delete(key);
-          }
-          commit((current) => ({
-            ...current,
-            detail: response,
-            data_revision: response.data_revision,
-            load_state: "ready",
-            error_code: undefined,
-            refresh_error_code: undefined,
-          }));
-        })
-        .catch((error: unknown) => {
-          if (controller.signal.aborted || generation !== requestGenerationRef.current || !mountedRef.current) return;
-          const code = errorCode(error);
-          if (code === "STALE_DATA_REVISION") {
-            staleCallbackRef.current?.();
-            const currentRevision = scopeRef.current.revision;
-            if (currentRevision > requestedRevision) {
-              loadDetail(row, currentRevision, true);
-              return;
-            }
-          }
-          commit((current) => ({
-            ...current,
-            load_state: current.detail ? "ready" : "error",
-            error_code: current.detail ? undefined : code,
-            refresh_error_code: current.detail ? code : undefined,
-          }));
-        })
-        .finally(() => {
-          if (requestAbortRef.current === controller) requestAbortRef.current = null;
-        });
-    },
-    [client, commit],
-  );
+          return;
+        }
+        staleRetryRef.current = false;
+        const responseKey = detailCacheKey(dashboardQueryKey(scopeRef.current.range, scopeRef.current.filters), key, response.data_revision);
+        cacheRef.current.set(responseKey, { revision: response.data_revision, value: response });
+        for (const [entryKey, entry] of cacheRef.current) {
+          if (entry.revision < response.data_revision) cacheRef.current.delete(entryKey);
+        }
+        scopeRef.current = { ...scopeRef.current, revision: response.data_revision };
+        commit((current) => ({
+          ...current,
+          detail: response,
+          data_revision: response.data_revision,
+          load_state: "ready",
+          error_code: undefined,
+          refresh_error_code: undefined,
+        }));
+      },
+      (error: unknown) => {
+        if (controller.signal.aborted || generation !== requestGenerationRef.current || !mountedRef.current || isAbortError(error)) return;
+        const code = errorCode(error);
+        if (code === "STALE_DATA_REVISION") options.onStaleRevision?.();
+        commit((current) => ({
+          ...current,
+          load_state: current.detail ? "ready" : "error",
+          error_code: current.detail ? undefined : code,
+          refresh_error_code: current.detail ? code : undefined,
+        }));
+      },
+    ).finally(() => {
+      if (requestAbortRef.current === controller) requestAbortRef.current = null;
+    });
+  }, [client, commit, options.onStaleRevision]);
 
-  const openDetail = useCallback(
-    (row: SessionItemDto) => {
-      if (!stateRef.current.open) {
-        const active = document.activeElement;
-        previousFocusRef.current = active instanceof HTMLElement ? active : null;
-      }
-      const requestedRevision = scopeRef.current.revision;
-      loadDetail(row, requestedRevision, false);
-    },
-    [loadDetail],
-  );
+  const openDetail = useCallback((row: SessionListItemDto) => {
+    if (!stateRef.current.open) {
+      const active = document.activeElement;
+      previousFocusRef.current = active instanceof HTMLElement ? active : null;
+    }
+    const requestedRevision = scopeRef.current.revision;
+    staleRetryRef.current = false;
+    loadDetail(row, requestedRevision, false);
+  }, [loadDetail]);
 
   const closeDetail = useCallback(() => {
     requestAbortRef.current?.abort();
@@ -235,10 +204,11 @@ export function useSessionDetailController(
     requestGenerationRef.current += 1;
     commit({
       open: false,
-      selected_root_session_id: null,
+      selected_thread_key_id: null,
+      selected_key: null,
       selected_row: null,
       detail: null,
-      data_revision: scopeRef.current.revision || undefined,
+      data_revision: scopeRef.current.revision,
       load_state: "closed",
     });
     restoreFocus();
@@ -246,32 +216,80 @@ export function useSessionDetailController(
 
   const refreshDetail = useCallback(() => {
     const current = stateRef.current;
-    const row = current.selected_row;
-    if (!current.open || !row) return;
-    loadDetail(row, scopeRef.current.revision, true);
+    if (!current.open || !current.selected_row) return;
+    staleRetryRef.current = false;
+    loadDetail(current.selected_row, scopeRef.current.revision, true);
   }, [loadDetail]);
 
   useEffect(() => {
-    const feed = feedRef.current;
-    if (!feed) return undefined;
-    const unsubscribe = feed.subscribe((tuple: RevisionTuple) => {
+    scopeRef.current = { ...latestScopeRef.current, revision: scopeRef.current.revision };
+    cacheRef.current.clear();
+    if (stateRef.current.open && stateRef.current.selected_row) loadDetail(stateRef.current.selected_row, scopeRef.current.revision, true);
+  }, [loadDetail, scopeKey]);
+
+  useEffect(() => {
+    const unsubscribe = feedRef.current!.subscribe((event) => {
       const current = stateRef.current;
-      if (tuple.data_revision <= (scopeRef.current.revision || 0)) return;
-      scopeRef.current = { ...scopeRef.current, revision: tuple.data_revision };
+      if (event.kind === "epoch_reset") {
+        scopeRef.current = { ...scopeRef.current, revision: event.tuple.data_revision };
+        awaitingEpochSnapshotRef.current = true;
+        staleRetryRef.current = false;
+        cacheRef.current.clear();
+        requestAbortRef.current?.abort();
+        requestGenerationRef.current += 1;
+        if (current.open && current.selected_row) {
+          commit((value) => ({
+            ...value,
+            detail: null,
+            data_revision: event.tuple.data_revision,
+            load_state: "loading",
+            error_code: undefined,
+            refresh_error_code: undefined,
+          }));
+          loadDetail(current.selected_row, event.tuple.data_revision, true);
+        } else commit((value) => ({ ...value, data_revision: event.tuple.data_revision }));
+        return;
+      }
+      if (event.tuple.data_revision <= scopeRef.current.revision) return;
+      scopeRef.current = { ...scopeRef.current, revision: event.tuple.data_revision };
       cacheRef.current.clear();
-      if (current.open && current.selected_row) loadDetail(current.selected_row, tuple.data_revision, true);
-      else commit((value) => ({ ...value, data_revision: tuple.data_revision }));
+      staleRetryRef.current = false;
+      if (current.open && current.selected_row) loadDetail(current.selected_row, event.tuple.data_revision, true);
+      else commit((value) => ({ ...value, data_revision: event.tuple.data_revision }));
     });
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      requestAbortRef.current?.abort();
+      requestAbortRef.current = null;
+      ownedFeedRef.current?.dispose();
+    };
   }, [commit, loadDetail]);
 
   useEffect(() => {
-    if (stateRef.current.open && stateRef.current.selected_row && options.dataRevision !== undefined && options.dataRevision > (stateRef.current.data_revision ?? 0)) {
-      scopeRef.current = { ...scopeRef.current, revision: options.dataRevision };
-      cacheRef.current.clear();
-      loadDetail(stateRef.current.selected_row, options.dataRevision, true);
+    const suppliedRevision = options.dataRevision;
+    if (suppliedRevision === undefined) return;
+    if (awaitingEpochSnapshotRef.current) {
+      awaitingEpochSnapshotRef.current = false;
+      if (!options.sessionsReady) {
+        awaitingEpochSnapshotRef.current = true;
+        return;
+      }
+      if (suppliedRevision !== scopeRef.current.revision) {
+        scopeRef.current = { ...scopeRef.current, revision: suppliedRevision };
+        cacheRef.current.clear();
+        const current = stateRef.current;
+        if (current.open && current.selected_row) loadDetail(current.selected_row, suppliedRevision, true);
+        else commit((value) => ({ ...value, data_revision: suppliedRevision }));
+      }
+      return;
     }
-  }, [loadDetail, options.dataRevision]);
+    if (suppliedRevision <= scopeRef.current.revision) return;
+    scopeRef.current = { ...scopeRef.current, revision: suppliedRevision };
+    cacheRef.current.clear();
+    staleRetryRef.current = false;
+    const current = stateRef.current;
+    if (current.open && current.selected_row) loadDetail(current.selected_row, suppliedRevision, true);
+  }, [commit, loadDetail, options.dataRevision, options.sessionsReady]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -279,13 +297,12 @@ export function useSessionDetailController(
       mountedRef.current = false;
       requestAbortRef.current?.abort();
       requestAbortRef.current = null;
-      feedRef.current && ownedFeedRef.current?.dispose();
     };
   }, []);
 
   return {
     open: state.open,
-    selected_root_session_id: state.selected_root_session_id,
+    selected_thread_key_id: state.selected_thread_key_id,
     selected_row: state.selected_row,
     detail: state.detail,
     data_revision: state.data_revision,

@@ -59,8 +59,16 @@ type SessionThreadView struct {
 	Usage          UsageView
 }
 
+type SessionListItemView struct {
+	Thread         SessionThreadView
+	SelfUsage      UsageView
+	SubagentUsage  UsageView
+	InclusiveUsage UsageView
+	SubagentCount  int64
+}
+
 type SessionListView struct {
-	Threads []SessionThreadView
+	Items []SessionListItemView
 }
 
 type SessionDetailView struct {
@@ -72,8 +80,9 @@ type SessionDetailView struct {
 }
 
 type SummaryView struct {
-	Usage        UsageView
-	SessionCount int64
+	Usage                    UsageView
+	RootSessionCount         int64
+	RootUnpricedSessionCount int64
 }
 
 type ModelDistributionItem struct {
@@ -96,7 +105,7 @@ type ProjectDistributionView struct {
 
 type FilterOptionsView struct {
 	Agents   []query.AgentOption
-	Models   []string
+	Models   []query.ModelOption
 	Projects []query.ProjectRef
 }
 

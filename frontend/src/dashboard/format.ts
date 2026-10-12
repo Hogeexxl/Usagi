@@ -86,24 +86,7 @@ export function formatCostPerMillionTokens(value: number | null): FormattedValue
   return { text, title: text, accessibleName: text };
 }
 
-export function formatLastSyncTime(value: number | null): string {
-  if (value === null) return "—";
-  const date = new Date(value);
-  return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
-}
-
-export function formatCodexPlanType(planType: string | null): string {
-  if (!planType) return "—";
-  if (planType === "prolite") return "Pro 5x";
-  if (planType === "pro") return "Pro 20x";
-  return planType
-    .split("_")
-    .filter((part) => part.length > 0)
-    .map((part) => `${part[0].toUpperCase()}${part.slice(1).toLowerCase()}`)
-    .join(" ") || "—";
-}
-
-export function formatCodexResetTime(value: number | null): string {
+export function formatQuotaResetTime(value: number | null): string {
   if (value === null) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";

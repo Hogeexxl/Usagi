@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
-  CodexQuotaResponse,
-  CodexQuotaWindowDto,
+  QuotaProviderDto,
+  QuotaResponse,
+  QuotaWindowDto,
   DashboardRange,
-  SummaryUsageDto,
+  UsageDto,
 } from "../data/types";
 import type { DashboardQuotaControllerView } from "../dashboard/useDashboardQuotaController";
 import { TrayPanelView, type TrayPanelViewModel } from "./TrayPanelPage";
@@ -33,116 +34,82 @@ type MeasureFatal = {
 
 const SCENARIOS: readonly Scenario[] = ["M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M09"];
 
-const ZERO_USAGE: SummaryUsageDto = {
-  input_tokens: 0,
-  cached_tokens: 0,
-  cache_write_tokens: 0,
-  uncached_input_tokens: 0,
-  output_tokens: 0,
-  reasoning_tokens: 0,
-  other_output_tokens: 0,
-  total_tokens: 0,
+const ZERO_USAGE: UsageDto = {
+  calls: 0,
+  errors: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  cache_write_1h: 0,
+  reasoning: 0,
+  total: 0,
   cache_hit_rate: null,
-  estimated_cost: null,
-  estimated_cost_status: "unknown",
-  session_count: 0,
-  cost_incomplete_session_count: 0,
-  complete_session_cost_per_million_tokens: null,
-  session_health: {
-    total_sessions: 0,
-    complete_sessions: 0,
-    incomplete_sessions: 0,
-    error_sessions: 0,
-  },
+  cost: 0,
+  unpriced: 0,
 };
 
-const LARGE_USAGE: SummaryUsageDto = {
+const LARGE_USAGE: UsageDto = {
   ...ZERO_USAGE,
-  input_tokens: 8_765_432_109_876,
-  cached_tokens: 7_654_321_098_765,
-  output_tokens: 987_654_321_098,
-  reasoning_tokens: 876_543_210_987,
-  other_output_tokens: 111_111_110_111,
-  total_tokens: 9_753_086_430_974,
+  input: 8_765_432_109_876,
+  cache_read: 7_654_321_098_765,
+  output: 987_654_321_098,
+  reasoning: 876_543_210_987,
+  total: 9_753_086_430_974,
   cache_hit_rate: 0.873,
-  estimated_cost: 123_456.78,
-  estimated_cost_status: "complete",
-  session_count: 999_999,
-  complete_session_cost_per_million_tokens: 12.3456,
-  session_health: {
-    total_sessions: 999_999,
-    complete_sessions: 999_999,
-    incomplete_sessions: 0,
-    error_sessions: 0,
-  },
+  cost: 123_456.78,
+  unpriced: 0,
 };
 
-const WEEKLY: CodexQuotaWindowDto = {
-  used_percent: 2,
-  remaining_percent: 98,
-  limit_window_seconds: 604_800,
-  reset_at_ms: 1_800_000_000_000,
+const WEEKLY: QuotaWindowDto = {
+  unlimited: false,
+  name: "Weekly",
+  used: 0.02,
+  resets_at_ms: 1_800_000_000_000,
+  reset_secs: 604_800,
+  display: "",
+  amount: 0,
+  limit: 0,
+  unit: "",
+  family: "",
+  pool: "",
 };
 
-const SESSION: CodexQuotaWindowDto = {
-  used_percent: 11,
-  remaining_percent: 89,
-  limit_window_seconds: 18_000,
-  reset_at_ms: 1_800_000_000_000,
+const SESSION: QuotaWindowDto = {
+  ...WEEKLY,
+  name: "5H",
+  used: 0.11,
+  reset_secs: 18_000,
 };
 
 const LONG_ACCOUNT_EMAIL = "tray-height-measurement-account-with-intentionally-long-name-0123456789@example-subdomain.example.com";
 const MEASUREMENT_ACCOUNT_EMAIL = "tray-height-measurement@example.com";
 
-const LOADING_CODEX_QUOTA: CodexQuotaResponse = {
-  status: "loading",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  reset_credits_available: null,
-  fetched_at_ms: null,
-};
-
-const UNAVAILABLE_CODEX_QUOTA: CodexQuotaResponse = {
-  status: "unavailable",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  reset_credits_available: null,
-  fetched_at_ms: null,
-};
-
-const UNAVAILABLE_ANTIGRAVITY_QUOTA: DashboardQuotaControllerView["antigravity"] = {
-  status: "unavailable",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  fetched_at_ms: null,
-};
-
-function readyQuota(session: CodexQuotaWindowDto | null, accountEmail = MEASUREMENT_ACCOUNT_EMAIL): CodexQuotaResponse {
+function readyQuota(windows: QuotaWindowDto[], user = MEASUREMENT_ACCOUNT_EMAIL): QuotaProviderDto {
   return {
-    status: "ready",
-    account_email: accountEmail,
-    plan_type: "pro",
-    session,
-    weekly: WEEKLY,
-    reset_credits_available: 999,
-    fetched_at_ms: 1_800_000_000_000,
+    provider: "codex",
+    name: "Codex",
+    plan: "Pro 20x",
+    user,
+    windows,
+    balance: "",
+    error: "",
+    as_of_ms: 1_800_000_000_000,
+    read_at_ms: 1_800_000_000_000,
   };
 }
 
-function quotaFor(codex: CodexQuotaResponse): DashboardQuotaControllerView {
+function quotaFor(
+  quota: QuotaResponse,
+  overrides: Partial<DashboardQuotaControllerView> = {},
+): DashboardQuotaControllerView {
   return {
-    codex,
-    antigravity: UNAVAILABLE_ANTIGRAVITY_QUOTA,
+    quota,
     refreshing: false,
     refresh_error: false,
     refresh_available: true,
     refresh: noop,
+    ...overrides,
   };
 }
 
@@ -150,61 +117,60 @@ const noopRange = (_range: DashboardRange) => undefined;
 const noop = () => undefined;
 
 function viewFor(
-  metrics: SummaryUsageDto | null,
+  metrics: UsageDto | null,
   loadState: TrayPanelViewModel["load_state"],
-  refreshState: TrayPanelViewModel["refresh_state"],
+  refreshing: boolean = false,
   errorCode?: string,
 ): TrayPanelViewModel {
   return {
     range: { key: "today" },
     metrics,
+    session_count: 0,
     load_state: loadState,
-    last_scan_completed_at_ms: null,
-    refresh_state: refreshState,
+    refreshing,
     error_code: errorCode,
     select_range: noopRange,
     request_refresh: noop,
     retry_load: noop,
-    retry_refresh_status: noop,
   };
 }
 
 const SPECIMENS: Record<Scenario, { view: TrayPanelViewModel; quota: DashboardQuotaControllerView }> = {
   M01: {
-    view: viewFor(null, "loading", "idle"),
-    quota: quotaFor(LOADING_CODEX_QUOTA),
+    view: viewFor(null, "loading"),
+    quota: quotaFor({ reading: true, items: [] }),
   },
   M02: {
-    view: viewFor(ZERO_USAGE, "ready", "idle"),
-    quota: quotaFor(UNAVAILABLE_CODEX_QUOTA),
+    view: viewFor(ZERO_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([])] }),
   },
   M03: {
-    view: viewFor(null, "error", "idle", "HTTP_ERROR"),
-    quota: quotaFor(readyQuota(null)),
+    view: viewFor(null, "error", false, "HTTP_ERROR"),
+    quota: quotaFor({ reading: false, items: [{ ...readyQuota([]), error: "额度读取失败" }] }),
   },
   M04: {
-    view: viewFor(ZERO_USAGE, "ready", "tracking_error", "HTTP_ERROR"),
-    quota: quotaFor(readyQuota(null)),
+    view: viewFor(ZERO_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([])] }, { refresh_error: true }),
   },
   M05: {
-    view: viewFor(null, "error", "tracking_error", "HTTP_ERROR"),
-    quota: quotaFor(readyQuota(SESSION)),
+    view: viewFor(null, "error", false, "HTTP_ERROR"),
+    quota: quotaFor({ reading: false, items: [readyQuota([SESSION])] }, { refreshing: true }),
   },
   M06: {
-    view: viewFor(ZERO_USAGE, "ready", "source_changed", "SOURCE_CHANGED"),
-    quota: quotaFor(readyQuota(SESSION)),
+    view: viewFor(ZERO_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([WEEKLY])] }),
   },
   M07: {
-    view: viewFor(ZERO_USAGE, "ready", "failed", "HTTP_ERROR"),
-    quota: quotaFor(readyQuota(SESSION)),
+    view: viewFor(ZERO_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([SESSION])] }, { refresh_error: true }),
   },
   M08: {
-    view: viewFor(LARGE_USAGE, "ready", "idle"),
-    quota: quotaFor(readyQuota(SESSION)),
+    view: viewFor(LARGE_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([SESSION, WEEKLY])] }),
   },
   M09: {
-    view: viewFor(ZERO_USAGE, "ready", "idle"),
-    quota: quotaFor(readyQuota(SESSION, LONG_ACCOUNT_EMAIL)),
+    view: viewFor(ZERO_USAGE, "ready"),
+    quota: quotaFor({ reading: false, items: [readyQuota([SESSION, WEEKLY], LONG_ACCOUNT_EMAIL)] }),
   },
 };
 
@@ -283,7 +249,7 @@ function m09ExpandedStack(): HTMLElement {
 function m09LastCodexTrigger(): HTMLButtonElement {
   const stack = m09ExpandedStack();
   const triggers = Array.from(
-    stack.querySelectorAll<HTMLButtonElement>('button[aria-label="Codex 计划：Pro 20x"]'),
+    stack.querySelectorAll<HTMLButtonElement>('button[aria-label="Codex 账户信息"]'),
   );
   if (triggers.length !== 2) throw new Error(`M09 expected two Codex plan badges, got ${triggers.length}`);
 

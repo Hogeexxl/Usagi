@@ -2,16 +2,76 @@ package projection
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
+	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
+
+func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
+	rows := []magpie.UsageRequest{
+		{Agent: "codex", Provider: "provider-a", Model: "gpt-x", Input: 1, Priced: true},
+		{Agent: "codex", Provider: "provider-b", Model: "gpt-x", Input: 10, Priced: true},
+	}
+	var requests []magpie.UsageRequestsQuery
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/usage/requests" {
+			t.Errorf("unexpected Magpie path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		provider, model := r.URL.Query().Get("provider"), r.URL.Query().Get("model")
+		requests = append(requests, magpie.UsageRequestsQuery{
+			Provider: provider, Model: model, Period: r.URL.Query().Get("period"),
+		})
+		var matching []magpie.UsageRequest
+		for _, row := range rows {
+			if row.Provider == provider && row.Model == model {
+				matching = append(matching, row)
+			}
+		}
+		if err := json.NewEncoder(w).Encode(magpie.UsageRequestsPage{Rows: matching, Total: len(matching)}); err != nil {
+			t.Errorf("encode usage page: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	client := magpie.NewClient(upstream.URL, upstream.Client())
+	service := NewService(query.NewService(client))
+	rangeValue := query.DateRange{From: "2026-10-01", To: "2026-10-11"}
+	for _, test := range []struct {
+		provider string
+		input    int64
+	}{
+		{provider: "provider-a", input: 1},
+		{provider: "provider-b", input: 10},
+	} {
+		view, err := service.ModelDistribution(context.Background(), ScopeQuery{
+			Range:  rangeValue,
+			Filter: query.UsageFilter{Models: []query.ModelSelection{{ProviderID: test.provider, Model: "gpt-x"}}},
+		})
+		if err != nil || len(view.Items) != 1 || view.Items[0].Model != "gpt-x" || view.Items[0].Usage.Input != test.input {
+			t.Fatalf("ModelDistribution(%s/gpt-x) = %+v, %v", test.provider, view, err)
+		}
+	}
+	if len(requests) != 2 {
+		t.Fatalf("UsageRequests query count = %d, want 2", len(requests))
+	}
+	for index, provider := range []string{"provider-a", "provider-b"} {
+		if requests[index].Provider != provider || requests[index].Model != "gpt-x" || requests[index].Period != "2026-10-01..2026-10-11" {
+			t.Fatalf("UsageRequests query %d = %+v", index, requests[index])
+		}
+	}
+}
 
 func TestDistribution(t *testing.T) {
 	scope := ScopeQuery{
 		Range:  query.DateRange{From: "2026-10-01", To: "2026-10-11"},
-		Filter: query.UsageFilter{Agents: []string{"codex"}, Models: []string{"gpt"}},
+		Filter: query.UsageFilter{Agents: []string{"codex"}, Models: []query.ModelSelection{{ProviderID: "openai", Model: "gpt"}}},
 	}
 	call := 0
 	fake := &fakeQuery{onUsage: func(_ context.Context, got query.UsageQuery) (query.UsageResult, error) {

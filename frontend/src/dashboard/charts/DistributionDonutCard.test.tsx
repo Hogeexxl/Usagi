@@ -5,13 +5,13 @@ import type { DistributionItem } from "./distribution";
 import { chartSeriesColor } from "./chartPalette";
 import { DistributionDonutCard } from "./DistributionDonutCard";
 
-function item(id: string, totalTokens: number, estimatedCost = totalTokens / 100): DistributionItem {
+function item(id: string, totalTokens: number, cost = totalTokens / 100): DistributionItem {
   return {
     id,
     label: id,
     totalTokens,
-    estimatedCost,
-    estimatedCostStatus: "complete",
+    cost,
+    unpriced: 0,
   };
 }
 

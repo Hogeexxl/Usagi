@@ -66,8 +66,8 @@ func TestOverview(t *testing.T) {
 func TestFilterOptions(t *testing.T) {
 	const cwd = "/workspace/notes/../Usagi/"
 	pages := []magpie.UsageRequestsPage{
-		{Total: 5000, Rows: []magpie.UsageRequest{{Agent: "row-only", Model: "row-only"}}, Agents: []magpie.UsageNamed{{ID: "z", Name: "Z"}, {ID: "a", Name: "A"}, {ID: "z", Name: "Z"}}, By: map[string][]magpie.UsageShare{"model": {{ID: "z"}, {ID: ""}, {ID: "a"}, {ID: "z"}}}},
-		{Total: 9000, Rows: []magpie.UsageRequest{{Agent: "other-row", Model: "other-row"}}, Agents: []magpie.UsageNamed{{ID: "new-agent", Name: "New"}}, By: map[string][]magpie.UsageShare{"model": {{ID: "new-model"}}}},
+		{Total: 5000, Rows: []magpie.UsageRequest{{Agent: "row-only", Provider: "row-only-provider", Model: "row-only"}}, Agents: []magpie.UsageNamed{{ID: "z", Name: "Z"}, {ID: "a", Name: "A"}, {ID: "z", Name: "Z"}}, Providers: []magpie.UsageNamed{{ID: "provider-z", Name: "Zeta"}, {ID: "provider-a", Name: "Alpha"}}, By: map[string][]magpie.UsageShare{"modelAt": {{ID: "provider-z/gpt-x"}, {ID: ""}, {ID: "provider-a/gpt-x"}, {ID: "provider-z/gpt-x"}, {ID: "malformed"}}}},
+		{Total: 9000, Rows: []magpie.UsageRequest{{Agent: "other-row", Provider: "row-only", Model: "other-row"}}, Agents: []magpie.UsageNamed{{ID: "new-agent", Name: "New"}}, By: map[string][]magpie.UsageShare{"modelAt": {{ID: "future-provider/new-model"}}}},
 	}
 	stats := []magpie.SessionStats{
 		{Days: []magpie.SessionDay{{Usage: []magpie.SessionDayUsage{{Cwd: cwd}, {Cwd: "/a"}, {Cwd: ""}}}, {Usage: []magpie.SessionDayUsage{{Cwd: "/a"}, {Cwd: cwd}}}}},
@@ -94,8 +94,8 @@ func TestFilterOptions(t *testing.T) {
 	}
 	s := newService(u)
 	wants := []FilterOptionsResult{
-		{Agents: []AgentOption{{Agent: "a", DisplayName: "A"}, {Agent: "z", DisplayName: "Z"}}, Models: []string{"a", "z"}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/a", Name: "a"}, {Kind: ProjectKindProject, Path: cwd, Name: "Usagi"}}},
-		{Agents: []AgentOption{{Agent: "new-agent", DisplayName: "New"}}, Models: []string{"new-model"}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/new-project", Name: "new-project"}}},
+		{Agents: []AgentOption{{Agent: "a", DisplayName: "A"}, {Agent: "z", DisplayName: "Z"}}, Models: []ModelOption{{Model: "gpt-x", ProviderID: "provider-a", ProviderName: "Alpha"}, {Model: "gpt-x", ProviderID: "provider-z", ProviderName: "Zeta"}}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/a", Name: "a"}, {Kind: ProjectKindProject, Path: cwd, Name: "Usagi"}}},
+		{Agents: []AgentOption{{Agent: "new-agent", DisplayName: "New"}}, Models: []ModelOption{{Model: "new-model", ProviderID: "future-provider", ProviderName: "future-provider"}}, Projects: []ProjectRef{{Kind: ProjectKindProject, Path: "/new-project", Name: "new-project"}}},
 	}
 	for i, want := range wants {
 		got, err := s.FilterOptions(context.Background())

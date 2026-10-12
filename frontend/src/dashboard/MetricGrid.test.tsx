@@ -2,128 +2,107 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 
-import type { SummaryUsageDto } from "../data/types";
+import type { QuotaProviderDto, QuotaResponse, QuotaWindowDto, UsageDto } from "../data/types";
 import { chartMuted, chartSeriesColor } from "./charts/chartPalette";
-import type { AntigravityQuotaResponse, CodexQuotaResponse } from "../data/types";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/beui/popover";
-import { CacheHitMetric, codexQuotaColor, EstimatedCostMetric, MetricGrid } from "./MetricGrid";
-import { formatCodexPlanType, formatCodexResetTime } from "./format";
+import { CacheHitMetric, CostMetric, MetricGrid, quotaColor } from "./MetricGrid";
+import { formatQuotaResetTime } from "./format";
 
-const usage: SummaryUsageDto = {
-  input_tokens: 1_500,
-  cached_tokens: 600,
-  cache_write_tokens: null,
-  uncached_input_tokens: null,
-  output_tokens: 500,
-  reasoning_tokens: 125,
-  other_output_tokens: 375,
-  total_tokens: 2_000,
-  cache_hit_rate: 0.4,
-  estimated_cost: 1_240,
-  estimated_cost_status: "partial",
-  session_count: 4,
-  cost_incomplete_session_count: 1,
-  complete_session_cost_per_million_tokens: 6.2354,
-  session_health: {
-    total_sessions: 5,
-    complete_sessions: 4,
-    incomplete_sessions: 1,
-    error_sessions: 0,
-  },
+const usage: UsageDto = {
+  calls: 5,
+  errors: 1,
+  input: 600,
+  output: 700,
+  cache_read: 400,
+  cache_write: 300,
+  cache_write_1h: 100,
+  reasoning: 125,
+  total: 2_000,
+  cache_hit_rate: 400 / 1_300,
+  cost: 0.0124,
+  unpriced: 1,
 };
 
-const compactUsage: SummaryUsageDto = {
+const compactUsage: UsageDto = {
   ...usage,
-  input_tokens: 12_200_000,
-  cached_tokens: 8_700_000,
-  output_tokens: 6_200_000,
-  reasoning_tokens: 2_100_000,
-  other_output_tokens: 4_100_000,
-  total_tokens: 18_400_000,
-  cache_hit_rate: 8_700_000 / 12_200_000,
+  input: 12_200_000,
+  cache_read: 8_700_000,
+  cache_write: 0,
+  output: 6_200_000,
+  cache_write_1h: 0,
+  reasoning: 2_100_000,
+  total: 27_100_000,
+  cost: 1_240,
+  unpriced: 0,
 };
 
-const TOKEN_BAR_LABEL = "输入与输出 Token 构成；推理 Token 包含在输出 Token 中";
+const tokenBarLabel = "Token 构成：输入、缓存读、缓存写和输出；推理 Token 包含在输出 Token 中";
+const resetAt = Date.UTC(2026, 7, 12, 4, 23);
 
-const readyQuota: CodexQuotaResponse = {
-  status: "ready",
-  account_email: "hoge@example.com",
-  plan_type: "prolite",
-  session: null,
-  weekly: {
-    used_percent: 55,
-    remaining_percent: 45,
-    limit_window_seconds: 604800,
-    reset_at_ms: Date.UTC(2026, 7, 12, 4, 23),
-  },
-  reset_credits_available: 2,
-  fetched_at_ms: Date.UTC(2026, 7, 1),
+function quotaWindow(name: string, used: number, resetsAt = resetAt): QuotaWindowDto {
+  return {
+    unlimited: false,
+    name,
+    used,
+    resets_at_ms: resetsAt,
+    reset_secs: 604_800,
+    display: "",
+    amount: 0,
+    limit: 0,
+    unit: "",
+    family: "",
+    pool: "",
+  };
+}
+
+function provider(
+  providerId: string,
+  name: string,
+  windows: QuotaWindowDto[],
+  user = `${providerId}@example.com`,
+): QuotaProviderDto {
+  return {
+    provider: providerId,
+    name,
+    plan: `${name} Plan`,
+    user,
+    windows,
+    balance: "$12.00 balance",
+    error: "",
+    as_of_ms: resetAt,
+    read_at_ms: resetAt,
+  };
+}
+
+const quota: QuotaResponse = {
+  reading: false,
+  items: [provider("codex", "Codex", [quotaWindow("Weekly", 0.55)], "hoge@example.com")],
 };
 
-const dualQuota: CodexQuotaResponse = {
-  ...readyQuota,
-  session: {
-    used_percent: 12,
-    remaining_percent: 88,
-    limit_window_seconds: 18000,
-    reset_at_ms: Date.UTC(2026, 7, 2, 9, 10),
-  },
-};
-
-const geminiQuota: AntigravityQuotaResponse = {
-  status: "ready",
-  account_email: "gemini@example.com",
-  plan_type: "google_ai_pro",
-  session: {
-    used_percent: 20,
-    remaining_percent: 80,
-    limit_window_seconds: 18000,
-    reset_at_ms: Date.UTC(2026, 7, 2, 9, 10),
-  },
-  weekly: {
-    used_percent: 65,
-    remaining_percent: 35,
-    limit_window_seconds: 604800,
-    reset_at_ms: Date.UTC(2026, 7, 12, 4, 23),
-  },
-  fetched_at_ms: Date.UTC(2026, 7, 1),
-};
-
-const unavailableCodexQuota: CodexQuotaResponse = {
-  status: "unavailable",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  reset_credits_available: null,
-  fetched_at_ms: null,
-};
-
-const unavailableAntigravityQuota: AntigravityQuotaResponse = {
-  status: "unavailable",
-  account_email: null,
-  plan_type: null,
-  session: null,
-  weekly: null,
-  fetched_at_ms: null,
+const manyProviders: QuotaResponse = {
+  reading: false,
+  items: [
+    provider("codex", "Codex", [quotaWindow("5H", 0.12), quotaWindow("Weekly", 0.55)], "hoge@example.com"),
+    provider("gemini", "Gemini", [quotaWindow("5H", 0.2), quotaWindow("Weekly", 0.65)], "gemini@example.com"),
+  ],
 };
 
 function MetricGridFixture({
   usage: currentUsage = usage,
+  sessionCount = 4,
   modelFilterActive = false,
-  codexQuota = unavailableCodexQuota,
-  antigravityQuota = unavailableAntigravityQuota,
+  quota: currentQuota = { reading: false, items: [] },
   onRefreshQuota = () => undefined,
   quotaRefreshing = false,
   quotaRefreshError = false,
-  quotaRefreshAvailable = false,
+  quotaRefreshAvailable = true,
 }: Partial<ComponentProps<typeof MetricGrid>>) {
   return (
     <MetricGrid
       usage={currentUsage}
+      sessionCount={sessionCount}
       modelFilterActive={modelFilterActive}
-      codexQuota={codexQuota}
-      antigravityQuota={antigravityQuota}
+      quota={currentQuota}
       onRefreshQuota={onRefreshQuota}
       quotaRefreshing={quotaRefreshing}
       quotaRefreshError={quotaRefreshError}
@@ -143,10 +122,6 @@ function segmentByClass(bar: HTMLElement, className: string): HTMLElement {
   const segment = Array.from(bar.children).find((child) => child.classList.contains(className));
   if (!segment) throw new Error(`Bar segment not found: ${className}`);
   return segment as HTMLElement;
-}
-
-function widths(segments: HTMLElement[]): string[] {
-  return segments.map((segment) => segment.style.width);
 }
 
 function enableTiltEffects() {
@@ -171,286 +146,122 @@ function glareOverlayCount(card: HTMLElement): number {
   ).length;
 }
 
-describe("MetricGrid v0.2.1", () => {
-  it("exports the shared tray metric components without changing dashboard behavior", () => {
-    expect(CacheHitMetric).toEqual(expect.any(Function));
-    expect(EstimatedCostMetric).toEqual(expect.any(Function));
-  });
-
-  it("keeps glare only on the total token card in the dashboard grid", async () => {
+describe("MetricGrid Spec04", () => {
+  it("keeps glare only on the total token card and preserves the count column behavior", async () => {
     enableTiltEffects();
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={readyQuota} />);
-
+    const { rerender } = render(<MetricGridFixture usage={usage} sessionCount={7} quota={quota} />);
     const grid = screen.getByLabelText("KPI 指标");
-    await waitFor(() => {
-      expect(Array.from(grid.children).map((card) => glareOverlayCount(card as HTMLElement))).toEqual([1, 0, 0, 0, 0]);
-    });
+    await waitFor(() => expect(Array.from(grid.children).map((card) => glareOverlayCount(card as HTMLElement))).toEqual([1, 0, 0, 0, 0]));
+    expect(within(grid).getByText("会话数量")).toBeInTheDocument();
+    expect(within(grid).getByTitle("7")).toHaveTextContent("7");
+
+    rerender(<MetricGridFixture usage={usage} sessionCount={7} modelFilterActive quota={quota} />);
+    expect(screen.getByLabelText("KPI 指标").children).toHaveLength(4);
+    expect(screen.queryByText("会话数量")).not.toBeInTheDocument();
   });
 
-  it("keeps the default Popover theme contract when inverseTheme is omitted", async () => {
-    render(
-      <Popover defaultOpen>
-        <PopoverTrigger>
-          <button type="button">default</button>
-        </PopoverTrigger>
-        <PopoverContent>Default content</PopoverContent>
-      </Popover>,
-    );
-
-    const dialog = await screen.findByRole("dialog");
-    const portal = dialog.closest("[data-popover-portal]");
-    expect(portal).not.toBeNull();
-    expect(portal?.querySelectorAll(".bg-popover")).toHaveLength(2);
-    expect(portal?.querySelectorAll(".bg-primary")).toHaveLength(0);
-    expect(dialog).toHaveClass("text-popover-foreground");
-    expect(dialog).not.toHaveClass("text-primary-foreground");
-  });
-
-  it("[T-S03-001] renders five KPI cards and all required titles without a model filter", () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={readyQuota} />);
-
-    const grid = screen.getByLabelText("KPI 指标");
-    expect(grid.children).toHaveLength(5);
-    for (const title of ["总 Token", "缓存命中", "会话数量", "预估费用", "账户额度"]) {
-      expect(within(grid).getByText(title)).toBeInTheDocument();
-    }
-  });
-
-  it("[T-S03-001] hides only Session Count while a model filter is active", () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive codexQuota={readyQuota} />);
-
-    const grid = screen.getByLabelText("KPI 指标");
-    expect(grid.children).toHaveLength(4);
-    expect(within(grid).queryByText("会话数量")).not.toBeInTheDocument();
-    for (const title of ["总 Token", "缓存命中", "预估费用", "账户额度"]) {
-      expect(within(grid).getByText(title)).toBeInTheDocument();
-    }
-  });
-
-  it("[T-S03-002] keeps reasoning nested in output with fixed token-bar geometry", () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} />);
-
-    const bar = screen.getByLabelText(TOKEN_BAR_LABEL) as HTMLElement;
+  it("lays out disjoint token fields against projection total and nests reasoning within output", () => {
+    render(<MetricGridFixture usage={usage} quota={quota} />);
+    const bar = screen.getByLabelText(tokenBarLabel) as HTMLElement;
     const input = segmentByClass(bar, "bg-[#68c0e8]");
+    const cacheRead = segmentByClass(bar, "bg-[#be506e]");
+    const cacheWrite = segmentByClass(bar, "bg-[#8660a8]");
     const output = segmentByClass(bar, "bg-[#be753e]");
     const reasoning = segmentByClass(bar, "bg-[#a6333d]");
-    expect(bar.children).toHaveLength(3);
 
-    expect(input).toHaveStyle({ width: "75%" });
-    expect(output).toHaveStyle({ left: "75%", width: "25%" });
-    expect(reasoning).toHaveStyle({ width: "6.25%" });
-    expect(reasoning).toHaveClass("absolute", "right-0");
-    expect(reasoning).not.toHaveClass("left-0");
+    expect(bar.children).toHaveLength(5);
+    expect(input).toHaveStyle({ left: "", width: "30%" });
+    expect(cacheRead).toHaveStyle({ left: "30%", width: "20%" });
+    expect(cacheWrite).toHaveStyle({ left: "50%", width: "15%" });
+    expect(output).toHaveStyle({ left: "65%", width: "35%" });
+    expect(reasoning).toHaveStyle({ left: "93.75%", width: "6.25%" });
+    expect(Number.parseFloat(input.style.width) + Number.parseFloat(cacheRead.style.width) + Number.parseFloat(cacheWrite.style.width) + Number.parseFloat(output.style.width)).toBeCloseTo(100);
     expect(screen.getByRole("button", { name: /推理 125，包含在输出 Token 中/ })).toBeInTheDocument();
 
-    const inputPct = Number.parseFloat(input.style.width);
-    const outputPct = Number.parseFloat(output.style.width);
-    const reasoningPct = Number.parseFloat(reasoning.style.width);
-    expect(inputPct + outputPct).toBeCloseTo(100);
-    expect(inputPct + outputPct + reasoningPct).not.toBeCloseTo(100);
-
-    const before = widths([input, output, reasoning]);
-    for (const legend of within(bar.parentElement as HTMLElement).getAllByRole("button")) {
+    const widths = Array.from(bar.children, (segment) => (segment as HTMLElement).style.width);
+    for (const legend of screen.getAllByRole("button").filter((button) => button.closest(".h-36") === cardByTitle("总 Token"))) {
       fireEvent.focus(legend);
-      expect(widths([input, output, reasoning])).toEqual(before);
+      expect(Array.from(bar.children, (segment) => (segment as HTMLElement).style.width)).toEqual(widths);
       fireEvent.blur(legend);
     }
   });
 
-  it("[T-S03-003] renders cache and remaining geometry with two interactive dotted legends", () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} />);
+  it("uses the cache hit rate denominator of input plus cache read and cache write", () => {
+    render(<CacheHitMetric usage={usage} glare={false} />);
+    const display = screen.getByTitle("30.8%");
+    expect(display).toHaveTextContent("30.8%");
 
-    const card = cardByTitle("缓存命中");
-    const cached = card.querySelector(".bg-\\[\\#be506e\\]")?.parentElement as HTMLElement;
-    const remaining = cached.children[1] as HTMLElement;
-    expect(cached.children).toHaveLength(2);
-    expect((cached.children[0] as HTMLElement).style.width).toBe("40%");
-    expect(remaining.style.width).toBe("60%");
-    expect(remaining).toHaveClass("bg-[#4057a5]");
-    expect(screen.getByTitle("40.0%")).toBeInTheDocument();
-
-    const legends = within(card).getAllByRole("button");
-    expect(legends).toHaveLength(2);
-    expect(legends[0]).toHaveAttribute("type", "button");
-    expect(legends[0]).toHaveTextContent("缓存读");
-    expect(legends[1]).toHaveTextContent("输入");
-    expect(legends[0].firstElementChild).toHaveAttribute("aria-hidden", "true");
-    expect(legends[1].firstElementChild).toHaveAttribute("aria-hidden", "true");
-    expect(legends[0]).toHaveClass("h-4", "gap-1");
-    expect(legends[1]).toHaveClass("h-4", "gap-1");
-    expect(legends[0].firstElementChild).toHaveClass("h-4", "shrink-0", "items-center", "justify-center");
-    expect(legends[1].firstElementChild).toHaveClass("h-4", "shrink-0", "items-center", "justify-center");
-    expect(legends[0].firstElementChild).not.toHaveClass("w-4");
-    expect(legends[1].firstElementChild).not.toHaveClass("w-4");
-    expect(legends[0].firstElementChild?.firstElementChild).toHaveClass("h-1.5", "w-1.5", "bg-[#be506e]");
-    expect(legends[1].firstElementChild?.firstElementChild).toHaveClass("h-1.5", "w-1.5", "bg-[#4057a5]");
-    expect(within(card).getByText("缓存读")).toHaveClass("h-4", "items-center");
-    expect(within(card).getByText("输入")).toHaveClass("h-4", "items-center");
-
-    const before = widths(Array.from(cached.children) as HTMLElement[]);
-    for (const legend of legends) {
-      fireEvent.focus(legend);
-      expect(widths(Array.from(cached.children) as HTMLElement[])).toEqual(before);
-      fireEvent.blur(legend);
-    }
+    const bar = screen.getByLabelText("缓存命中率分母包括输入、缓存读和缓存写");
+    const cached = segmentByClass(bar, "bg-[#be506e]");
+    const input = segmentByClass(bar, "bg-[#4057a5]");
+    const cacheWrite = segmentByClass(bar, "bg-[#8660a8]");
+    expect(cached).toHaveStyle({ width: `${(400 / 1300) * 100}%` });
+    expect(input).toHaveStyle({ left: `${(400 / 1300) * 100}%`, width: `${(600 / 1300) * 100}%` });
+    expect(cacheWrite).toHaveStyle({ width: `${(300 / 1300) * 100}%` });
+    expect(Number.parseFloat(cached.style.width) + Number.parseFloat(input.style.width) + Number.parseFloat(cacheWrite.style.width)).toBeCloseTo(100);
   });
 
-  it("[T-S03-005] always shows neutral completeness info and MToken cost for complete pricing", async () => {
-    render(
-      <MetricGridFixture
-        usage={{
-          ...usage,
-          estimated_cost_status: "complete",
-          cost_incomplete_session_count: 0,
-          complete_session_cost_per_million_tokens: 12.3456,
-        }}
-        modelFilterActive={false}
-      />,
-    );
+  it("shows cost per million from cost / total and warns using the unpriced count", async () => {
+    render(<CostMetric usage={usage} glare={false} />);
+    const card = cardByTitle("费用");
+    expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
+    expect(screen.getByTitle("$0.01")).toHaveTextContent("$0.01");
+    const trigger = within(card).getByRole("button", { name: "未计价使用记录提示" });
+    expect(trigger).toHaveClass("text-warning");
+    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(await screen.findByRole("dialog")).toHaveTextContent("1 条使用记录未计价");
+  });
 
-    const card = cardByTitle("预估费用");
-    expect(within(card).getByText("$12.35 / MToken")).toBeInTheDocument();
-    const trigger = within(card).getByRole("button", { name: "预估费用完整性提示" });
+  it("shows complete-cost messaging and uses total for the ratio", async () => {
+    render(<CostMetric usage={{ ...usage, unpriced: 0 }} glare={false} />);
+    const card = cardByTitle("费用");
+    expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
+    const trigger = within(card).getByRole("button", { name: "未计价使用记录提示" });
     expect(trigger).toHaveClass("text-foreground");
-    expect(trigger).not.toHaveClass("text-warning");
     fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("5/5 个会话完整计价");
-    expect(dialog).not.toHaveTextContent("计价不完整");
-    const portal = dialog.closest("[data-popover-portal]");
-    expect(portal).not.toBeNull();
-    expect(portal?.querySelectorAll(".bg-primary")).toHaveLength(2);
-    expect(portal?.querySelectorAll(".bg-popover")).toHaveLength(0);
-    expect(dialog).toHaveClass("text-primary-foreground");
-    expect(dialog).not.toHaveClass("text-popover-foreground");
+    expect(await screen.findByRole("dialog")).toHaveTextContent("所有使用记录均已计价");
   });
 
-  it("[T-S03-005] keeps known partial cost, warns, and reports unified completeness copy", async () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} />);
-
-    const card = cardByTitle("预估费用");
-    const cost = screen.getByTitle("$1,240.00");
-    expect(cost).toHaveTextContent("$1.24K");
-    expect(within(card).getByText("$6.235 / MToken")).toBeInTheDocument();
-
-    const trigger = within(card).getByRole("button", { name: "预估费用完整性提示" });
-    expect(trigger).toHaveClass("text-warning");
-    expect(trigger).not.toHaveClass("text-destructive");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("4/5 个会话完整计价");
-    expect(dialog).toHaveTextContent("1 个会话计价不完整");
-  });
-
-  it("[T-S03-005] shows an unknown-cost dash and no MToken value when no session is fully priced", async () => {
-    render(
-      <MetricGridFixture
-        usage={{
-          ...usage,
-          estimated_cost: null,
-          estimated_cost_status: "unknown",
-          cost_incomplete_session_count: 5,
-          complete_session_cost_per_million_tokens: null,
-        }}
-        modelFilterActive={false}
-      />,
-    );
-
-    const card = cardByTitle("预估费用");
-    expect(within(card).getByText("—")).toBeInTheDocument();
-    expect(within(card).getByText("— / MToken")).toBeInTheDocument();
-    const trigger = within(card).getByRole("button", { name: "预估费用完整性提示" });
-    expect(trigger).toHaveClass("text-warning");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("0/5 个会话完整计价");
-    expect(dialog).toHaveTextContent("5 个会话计价不完整");
-  });
-
-  it("[T-S03-006] exposes compact token and cost values with complete original aria/title values", () => {
-    render(<MetricGridFixture usage={compactUsage} modelFilterActive={false} />);
-
-    const token = screen.getByTitle("18,400,000");
-    expect(token).toHaveAttribute("aria-label", "18,400,000");
-    expect(token).toHaveTextContent("18.4M");
-
-    const cost = screen.getByTitle("$1,240.00");
-    expect(cost).toHaveAttribute("aria-label", "$1,240.00");
-    expect(cost).toHaveTextContent("$1.24K");
-  });
-
-  it("T-Q-005 formats known and unknown plan types", () => {
-    expect(formatCodexPlanType("prolite")).toBe("Pro 5x");
-    expect(formatCodexPlanType("pro")).toBe("Pro 20x");
-    expect(formatCodexPlanType("plus")).toBe("Plus");
-    expect(formatCodexPlanType("team_plan")).toBe("Team Plan");
-    expect(formatCodexPlanType(null)).toBe("—");
-  });
-
-  it("renders a compact quota card with reset details, plan Popover, and the shared palette", async () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={readyQuota} />);
-
-    const card = cardByTitle("账户额度");
-    const stack = within(card).getByRole("group", { name: "账户额度卡片" });
-    const panel = card.firstElementChild as HTMLElement;
-    expect(card).toHaveClass("h-[144px]", "w-[236px]");
-    expect(panel).toHaveClass("min-h-[144px]", "p-[10px]", "rounded-3xl");
-    expect(within(card).getByText("账户额度")).toBeInTheDocument();
-    expect(within(card).getByText("账户额度")).toHaveClass("pl-[2px]");
-    expect(within(card).getByRole("button", { name: "刷新账户额度" })).toBeDisabled();
-    expect(stack).toHaveClass("h-[100px]", "w-[216px]");
-    expect(stack.children).toHaveLength(1);
-    const inner = stack.firstElementChild as HTMLElement;
-    expect(inner).toHaveClass("h-[92px]", "w-full", "p-[10px]");
-    expect(within(inner).getByText("Codex·Weekly")).toBeInTheDocument();
-    expect(within(inner).getByLabelText("45%")).toBeInTheDocument();
-    const reset = within(inner).getByText(`下次重置：${formatCodexResetTime(readyQuota.weekly!.reset_at_ms)}`);
-    expect(reset).toBeInTheDocument();
-    expect(reset).toHaveClass("text-xs", "leading-4");
-
-    const bar = within(inner).getByLabelText("剩余与已使用配额");
-    expect(bar).toHaveClass("h-[5px]");
-    expect(bar.children).toHaveLength(2);
-    expect((bar.children[0] as HTMLElement).style.width).toBe("45%");
-    expect((bar.children[0] as HTMLElement).style.backgroundColor).toBe(chartSeriesColor(5));
-    expect((bar.children[1] as HTMLElement).style.backgroundColor).toBe(chartMuted);
-    const planTrigger = within(inner).getByRole("button", { name: "Codex 计划：Pro 5x" });
-    expect(planTrigger.parentElement?.parentElement).toHaveTextContent(`下次重置：${formatCodexResetTime(readyQuota.weekly!.reset_at_ms)}`);
-    expect(planTrigger).toHaveClass("h-4", "rounded-full", "border", "border-foreground/40", "whitespace-nowrap");
-    expect(card.querySelector(".size-7")).toBeNull();
-
-    expect(codexQuotaColor(60)).toBe(chartSeriesColor(8));
-    expect(codexQuotaColor(45)).toBe(chartSeriesColor(5));
-    expect(codexQuotaColor(20)).toBe(chartSeriesColor(5));
-    expect(codexQuotaColor(19)).toBe(chartSeriesColor(9));
-
-    fireEvent.pointerEnter(planTrigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const dialog = (await screen.findByText("hoge@example.com")).closest('[role="dialog"]');
-    expect(dialog).toHaveTextContent("hoge@example.com");
-    expect(dialog).toHaveTextContent("重置卡：2 次");
-    const portal = dialog?.closest("[data-popover-portal]");
-    expect(portal).not.toBeNull();
-    expect(portal?.querySelectorAll(".bg-primary")).toHaveLength(2);
-    expect(portal?.querySelectorAll(".bg-popover")).toHaveLength(0);
-    expect(dialog).toHaveClass("text-primary-foreground");
-    expect(dialog).not.toHaveClass("text-popover-foreground");
-  });
-
-  it("stacks quota windows in provider order and gives every Codex and Gemini card a plan Popover", async () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={dualQuota} antigravityQuota={geminiQuota} />);
-
-    const card = cardByTitle("账户额度");
-    const stack = within(card).getByRole("group", { name: "账户额度卡片" });
-    const labels = Array.from(stack.children, (entry) => {
-      const title = entry.firstElementChild?.firstElementChild?.firstElementChild;
-      return title?.textContent;
-    });
+  it("uses the provider and window order from the unified quota snapshot", () => {
+    render(<MetricGridFixture usage={usage} quota={manyProviders} />);
+    const stack = screen.getByRole("group", { name: "账户额度卡片" });
+    const labels = Array.from(stack.children, (entry) => entry.firstElementChild?.firstElementChild?.firstElementChild?.textContent);
     expect(labels).toEqual(["Codex·5H", "Codex·Weekly", "Gemini·5H", "Gemini·Weekly"]);
+    expect(stack.children).toHaveLength(4);
+  });
+
+  it("shows snapshot window percentages, reset data, and provider metadata", async () => {
+    render(<MetricGridFixture usage={usage} quota={quota} />);
+    const card = cardByTitle("账户额度");
+    const windowCard = within(screen.getByRole("group", { name: "账户额度卡片" })).getByText("Codex·Weekly").closest(".absolute") as HTMLElement;
+    expect(card).toHaveClass("h-[144px]", "w-[236px]");
+    expect(within(windowCard).getByLabelText("45%")).toBeInTheDocument();
+    expect(within(windowCard).getByText(`下次重置：${formatQuotaResetTime(resetAt)}`)).toBeInTheDocument();
+    const remainingBar = within(windowCard).getByLabelText("剩余与已使用配额");
+    expect(remainingBar.children).toHaveLength(2);
+    expect((remainingBar.children[0] as HTMLElement).style.width).toBe("45%");
+    expect((remainingBar.children[0] as HTMLElement).style.backgroundColor).toBe(chartSeriesColor(5));
+    expect((remainingBar.children[1] as HTMLElement).style.backgroundColor).toBe(chartMuted);
+    expect(quotaColor(60)).toBe(chartSeriesColor(8));
+    expect(quotaColor(45)).toBe(chartSeriesColor(5));
+    expect(quotaColor(20)).toBe(chartSeriesColor(5));
+    expect(quotaColor(19)).toBe(chartSeriesColor(9));
+
+    const planTrigger = within(windowCard).getByRole("button", { name: "Codex 账户信息" });
+    fireEvent.pointerEnter(planTrigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(await screen.findByText("hoge@example.com")).toBeInTheDocument();
+    expect(screen.getByText("$12.00 balance")).toBeInTheDocument();
+  });
+
+  it("keeps the quota stack open while moving into overflow and supports keyboard controls", () => {
+    render(<MetricGridFixture usage={usage} quota={manyProviders} />);
+    const card = cardByTitle("账户额度");
+    const stack = screen.getByRole("group", { name: "账户额度卡片" });
     const entries = Array.from(stack.children) as HTMLElement[];
-    for (const entry of entries) expect(entry).toHaveClass("h-[92px]", "w-full", "p-[10px]");
 
     fireEvent.pointerEnter(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
     expect(stack).toHaveAttribute("aria-expanded", "true");
+    expect(stack).toHaveStyle({ height: "380px" });
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "mouse", buttons: 0, relatedTarget: entries[3] });
     expect(stack).toHaveAttribute("aria-expanded", "true");
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
@@ -458,107 +269,48 @@ describe("MetricGrid v0.2.1", () => {
     expect(entries.slice(0, 2).every((entry) => entry.style.visibility !== "hidden")).toBe(true);
     expect(entries.slice(2).every((entry) => entry.style.visibility === "hidden")).toBe(true);
 
-    fireEvent.pointerEnter(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    expect(stack).toHaveAttribute("aria-expanded", "true");
-    expect(entries.every((entry) => entry.style.visibility !== "hidden")).toBe(true);
-    expect(within(stack).getAllByRole("button", { name: "Codex 计划：Pro 5x" })).toHaveLength(2);
-    const geminiBadges = within(stack).getAllByRole("button", { name: "Gemini 计划：Google AI Pro" });
-    expect(geminiBadges).toHaveLength(2);
-    const bars = within(stack).getAllByLabelText("剩余与已使用配额");
-    expect(bars).toHaveLength(4);
-    for (const bar of bars) expect(bar).toHaveClass("h-[5px]");
-
-    fireEvent.pointerEnter(geminiBadges[0].parentElement!, { pointerId: 2, pointerType: "mouse", buttons: 0 });
-    const dialogs = await screen.findAllByRole("dialog");
-    const geminiDialog = dialogs.find((dialog) => dialog.textContent?.includes("gemini@example.com"));
-    expect(geminiDialog).toBeDefined();
-    expect(geminiDialog).toHaveTextContent("gemini@example.com");
-    expect(geminiDialog).not.toHaveTextContent("Gemini 计划");
-    expect(geminiDialog).not.toHaveTextContent("数据更新时间");
-  });
-
-  it("keeps the expanded quota stack open while the pointer enters an overflowing card", async () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={dualQuota} antigravityQuota={geminiQuota} />);
-
-    const card = cardByTitle("账户额度");
-    const stack = within(card).getByRole("group", { name: "账户额度卡片" });
-    const panel = card.firstElementChild as HTMLElement;
-    const background = panel.firstElementChild as HTMLElement;
-    const fourthCard = stack.children[3] as HTMLElement;
-
-    expect(card).toHaveClass("h-[144px]");
-    expect(panel).toHaveClass("absolute", "top-0", "min-h-[144px]", "p-[10px]");
-    expect(panel).not.toHaveClass("h-[144px]");
-    expect(background).toHaveClass("absolute", "inset-0", "rounded-3xl", "bg-muted");
-
-    fireEvent.pointerEnter(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const entries = Array.from(stack.children) as HTMLElement[];
-    for (const entry of entries) expect(entry).toHaveClass("h-[92px]");
-    expect(stack).toHaveStyle({ height: "380px" });
-    expect(stack.parentElement).not.toHaveClass("h-[100px]");
-    await waitFor(() => {
-      expect(entries.map((entry) => Number(entry.style.transform.match(/translateY\((\d+)px\)/)?.[1] ?? 0))).toEqual([0, 96, 192, 288]);
-    });
-    fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "mouse", buttons: 0, relatedTarget: background });
-    expect(stack).toHaveAttribute("aria-expanded", "true");
-    fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "mouse", buttons: 0, relatedTarget: fourthCard });
-
-    expect(stack).toHaveAttribute("aria-expanded", "true");
-  });
-
-  it("shows only two quota card layers while collapsed", () => {
-    render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={dualQuota} antigravityQuota={geminiQuota} />);
-
-    const card = cardByTitle("账户额度");
-    const stack = within(card).getByRole("group", { name: "账户额度卡片" });
-    const entries = Array.from(stack.children) as HTMLElement[];
-
-    fireEvent.pointerEnter(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-
-    expect(stack).toHaveAttribute("aria-expanded", "false");
-    expect(entries.slice(0, 2).every((entry) => entry.style.visibility !== "hidden")).toBe(true);
-    expect(entries.slice(2).every((entry) => entry.style.visibility === "hidden")).toBe(true);
-    expect(entries.slice(2).every((entry) => entry.hasAttribute("inert") && entry.style.pointerEvents === "none")).toBe(true);
-
     fireEvent.click(stack);
-    expect(stack).toHaveAttribute("aria-expanded", "true");
-    expect(entries.every((entry) => !entry.hasAttribute("inert") && entry.style.pointerEvents === "auto")).toBe(true);
-    fireEvent.keyDown(stack, { key: " " });
-    expect(stack).toHaveAttribute("aria-expanded", "false");
-    fireEvent.keyDown(stack, { key: "Enter" });
     expect(stack).toHaveAttribute("aria-expanded", "true");
     fireEvent.keyDown(stack, { key: "Escape" });
     expect(stack).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("omits windows without data and shows status text without inventing percentages", () => {
-    const onlyWeeklyGemini = { ...geminiQuota, session: null };
-    const { rerender } = render(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={readyQuota} antigravityQuota={onlyWeeklyGemini} />);
-
+  it("shows reading and provider error states without fabricating quota percentages", () => {
+    const { rerender } = render(<MetricGridFixture usage={usage} quota={{ reading: true, items: [] }} />);
     const card = cardByTitle("账户额度");
-    const stack = within(card).getByRole("group", { name: "账户额度卡片" });
-    expect(stack.children).toHaveLength(2);
-    expect(within(stack).getByText("Codex·Weekly")).toBeInTheDocument();
-    expect(within(stack).getByText("Gemini·Weekly")).toBeInTheDocument();
-    expect(within(stack).queryByText("Codex·5H")).not.toBeInTheDocument();
-    expect(within(stack).queryByText("Gemini·5H")).not.toBeInTheDocument();
-
-    rerender(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={{ ...readyQuota, status: "loading", weekly: null }} antigravityQuota={{ ...geminiQuota, status: "unavailable", session: null, weekly: null }} />);
     expect(within(card).getByText("正在读取账户额度…")).toBeInTheDocument();
     expect(within(card).queryByLabelText(/%$/)).not.toBeInTheDocument();
-    rerender(<MetricGridFixture usage={usage} modelFilterActive={false} codexQuota={{ ...readyQuota, status: "unavailable", weekly: null }} antigravityQuota={{ ...geminiQuota, status: "unavailable", session: null, weekly: null }} />);
-    expect(within(card).getByText("暂无可用额度")).toBeInTheDocument();
+    rerender(<MetricGridFixture usage={usage} quota={{ reading: false, items: [provider("codex", "Codex", [], "",)] .map((item) => ({ ...item, error: "Quota unavailable" })) }} />);
+    expect(within(card).getByText("Quota unavailable")).toBeInTheDocument();
     expect(within(card).queryByLabelText(/%$/)).not.toBeInTheDocument();
   });
 
-  it("renders structural skeletons without fabricated KPI values", () => {
-    const { rerender } = render(<MetricGridFixture usage={null} modelFilterActive={false} />);
+  it("preserves default Popover theme behavior and renders structural skeletons", () => {
+    const { rerender } = render(
+      <Popover defaultOpen>
+        <PopoverTrigger><button type="button">default</button></PopoverTrigger>
+        <PopoverContent>Default content</PopoverContent>
+      </Popover>,
+    );
+    const dialog = screen.getByRole("dialog");
+    const portal = dialog.closest("[data-popover-portal]");
+    expect(portal?.querySelectorAll(".bg-popover")).toHaveLength(2);
+    expect(portal?.querySelectorAll(".bg-primary")).toHaveLength(0);
+    expect(dialog).toHaveClass("text-popover-foreground");
+    rerender(<MetricGridFixture usage={null} />);
     expect(screen.getByLabelText("KPI 加载中").children).toHaveLength(5);
     expect(screen.getByLabelText("KPI 加载中")).toHaveTextContent("");
-
     rerender(<MetricGridFixture usage={null} modelFilterActive />);
     expect(screen.getByLabelText("KPI 加载中").children).toHaveLength(4);
-    expect(screen.getByLabelText("KPI 加载中")).toHaveTextContent("");
+  });
+
+  it("keeps compact values accessible with full values in title and aria labels", () => {
+    render(<MetricGridFixture usage={compactUsage} quota={quota} />);
+    const token = screen.getByTitle("27,100,000");
+    expect(token).toHaveAttribute("aria-label", "27,100,000");
+    expect(token).toHaveTextContent("27.1M");
+    const cost = screen.getByTitle("$1,240.00");
+    expect(cost).toHaveAttribute("aria-label", "$1,240.00");
+    expect(cost).toHaveTextContent("$1.24K");
   });
 });

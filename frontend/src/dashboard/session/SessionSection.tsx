@@ -1,4 +1,5 @@
 import { Button } from "../../ui/beui/button";
+import type { AgentDisplayLookup } from "../shared/agentDisplay";
 import { SessionTable } from "./SessionTable";
 import { SessionTableFooter } from "./SessionTableFooter";
 import type { SessionTableViewModel } from "./sessionTypes";
@@ -7,11 +8,11 @@ import type { SessionDetailControllerViewModel } from "./useSessionDetailControl
 export function SessionSection({
   view,
   detail,
-  sourceDisplay,
+  agentDisplay,
 }: {
   view: SessionTableViewModel;
   detail?: SessionDetailControllerViewModel;
-  sourceDisplay?: (source: string) => string;
+  agentDisplay?: AgentDisplayLookup;
 }) {
   const refreshing = view.load_state === "refreshing";
   return (
@@ -35,14 +36,14 @@ export function SessionSection({
       <SessionTable
         rows={view.rows}
         timezone={view.timezone}
-        selectedRootSessionId={detail?.selected_root_session_id}
+        selectedThreadKeyId={detail?.selected_thread_key_id}
         onOpenSession={detail?.open_detail}
         loadState={view.load_state}
         pageState={view.page_state}
         sortBy={view.sort_by}
         sortOrder={view.sort_order}
         onSort={view.select_sort}
-        sourceDisplay={sourceDisplay}
+        agentDisplay={agentDisplay}
       />
       {view.load_state === "error" ? <div className="mt-2 flex items-center gap-2 text-xs text-destructive" role="alert" aria-live="polite"><span>{view.error_code === "UPDATE_FAILED" || view.error_code === "REVISION_FAILED" ? "Session 记录更新失败" : "Session 记录加载失败"}</span><Button variant="ghost" size="sm" onClick={view.retry_load}>重试</Button></div> : null}
     </section>

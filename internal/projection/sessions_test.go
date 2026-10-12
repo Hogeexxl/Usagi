@@ -39,12 +39,23 @@ func TestSessionProjectionClaudeThreads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Threads) != 3 {
-		t.Fatalf("thread count = %d, want 3: %+v", len(list.Threads), list.Threads)
+	if len(list.Items) != 1 {
+		t.Fatalf("main session item count = %d, want 1: %+v", len(list.Items), list.Items)
+	}
+	if list.Items[0].Thread.Type != ThreadMain || list.Items[0].SubagentCount != 2 || list.Items[0].SelfUsage.Input != 10 || list.Items[0].SubagentUsage.Input != 13 || list.Items[0].InclusiveUsage.Total != 31 {
+		t.Fatalf("main session list rollup = %+v", list.Items[0])
+	}
+	threadsProjection, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("loadThreadProjection() error = %v", err)
+	}
+	projectedThreads := threadsProjection.Threads
+	if len(projectedThreads) != 3 {
+		t.Fatalf("projected thread count = %d, want 3: %+v", len(projectedThreads), projectedThreads)
 	}
 	wantOrder := []string{"A", "B", "C"}
-	threads := make(map[string]SessionThreadView, len(list.Threads))
-	for i, thread := range list.Threads {
+	threads := make(map[string]SessionThreadView, len(projectedThreads))
+	for i, thread := range projectedThreads {
 		if thread.Key.ThreadID != wantOrder[i] {
 			t.Fatalf("thread %d ID = %q, want %q", i, thread.Key.ThreadID, wantOrder[i])
 		}
@@ -69,7 +80,7 @@ func TestSessionProjectionClaudeThreads(t *testing.T) {
 	if len(worker.ModelEffort) != 1 || worker.ModelEffort[0].Model != "worker" || worker.ModelEffort[0].Usage.Calls != 2 || worker.ModelEffort[0].Usage.Input != 10 {
 		t.Fatalf("subagent model usage = %+v", worker.ModelEffort)
 	}
-	for _, thread := range list.Threads {
+	for _, thread := range projectedThreads {
 		for _, modelEffort := range thread.ModelEffort {
 			if modelEffort.CompactionTokens != nil {
 				t.Fatalf("Claude compaction tokens = %d, want nil", *modelEffort.CompactionTokens)
@@ -124,18 +135,18 @@ func TestSessionProjectionClaudeWithoutMainRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Threads) != 2 {
-		t.Fatalf("thread count = %d, want 2", len(list.Threads))
+	if len(list.Items) != 1 {
+		t.Fatalf("main session item count = %d, want 1", len(list.Items))
 	}
-	main := list.Threads[0]
+	main := list.Items[0].Thread
 	if main.Key.ThreadID != "A" || main.Type != ThreadMain || main.Usage != (UsageView{}) {
 		t.Fatalf("main without self rows = %+v", main)
 	}
 	if !main.FirstUsage.Equal(first) || !main.LastUsage.Equal(last) {
 		t.Fatalf("main fallback activity = %v..%v, want %v..%v", main.FirstUsage, main.LastUsage, first, last)
 	}
-	if list.Threads[1].Key.ThreadID != "B" || list.Threads[1].Usage.Input != 5 || list.Threads[1].Project != project {
-		t.Fatalf("subagent thread = %+v", list.Threads[1])
+	if list.Items[0].SubagentCount != 1 || list.Items[0].SubagentUsage.Input != 5 || list.Items[0].InclusiveUsage.Input != 5 {
+		t.Fatalf("subagent rollup = %+v", list.Items[0])
 	}
 }
 
@@ -173,12 +184,12 @@ func TestCompactionTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Threads) != 1 {
-		t.Fatalf("thread count = %d, want 1", len(list.Threads))
+	if len(list.Items) != 1 {
+		t.Fatalf("session item count = %d, want 1", len(list.Items))
 	}
-	thread := list.Threads[0]
+	thread := list.Items[0].Thread
 	wantUsage := usageFromTotals(session.Totals)
-	if thread.Type != "" || thread.ParentThreadID != "" || !reflect.DeepEqual(thread.Usage, wantUsage) || thread.Usage.Total != 33 || thread.Usage.Cost != 1.5 {
+	if thread.Type != ThreadMain || thread.ParentThreadID != "" || !reflect.DeepEqual(thread.Usage, wantUsage) || thread.Usage.Total != 33 || thread.Usage.Cost != 1.5 {
 		t.Fatalf("Codex flat Usage must come from SessionUsage: %+v", thread)
 	}
 	if len(thread.ModelEffort) != 3 {
@@ -224,8 +235,15 @@ func TestSessionProjectionRangeOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Threads) != 3 || list.Threads[2].Key.ThreadID != "C" || list.Threads[2].ParentThreadID != "B" {
-		t.Fatalf("orphan C must remain in the list with parent B: %+v", list.Threads)
+	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "A" || list.Items[0].SubagentCount != 2 {
+		t.Fatalf("root list item must include all real subagents: %+v", list.Items)
+	}
+	projected, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("loadThreadProjection() error = %v", err)
+	}
+	if len(projected.Threads) != 3 || projected.Threads[2].Key.ThreadID != "C" || projected.Threads[2].ParentThreadID != "B" {
+		t.Fatalf("orphan C must retain its known parent B: %+v", projected.Threads)
 	}
 	parent, err := service.SessionDetail(context.Background(), ScopeQuery{}, ThreadKey{Agent: "claude", SessionID: "A", ThreadID: "P"})
 	if err != nil {
@@ -255,16 +273,14 @@ func TestThreadIdentityAndSort(t *testing.T) {
 	}
 	want := []ThreadKey{
 		{Agent: "claude", SessionID: "A1", ThreadID: "A1"},
-		{Agent: "claude", SessionID: "A1", ThreadID: "B"},
 		{Agent: "claude", SessionID: "A2", ThreadID: "A2"},
-		{Agent: "claude", SessionID: "A2", ThreadID: "B"},
 		{Agent: "codex", SessionID: "B", ThreadID: "B"},
 	}
-	got := make([]ThreadKey, len(list.Threads))
-	unique := make(map[ThreadKey]struct{}, len(list.Threads))
-	for i, thread := range list.Threads {
-		got[i] = thread.Key
-		unique[thread.Key] = struct{}{}
+	got := make([]ThreadKey, len(list.Items))
+	unique := make(map[ThreadKey]struct{}, len(list.Items))
+	for i, item := range list.Items {
+		got[i] = item.Thread.Key
+		unique[item.Thread.Key] = struct{}{}
 	}
 	if !reflect.DeepEqual(got, want) || len(unique) != len(want) {
 		t.Fatalf("sorted unique thread identities = %+v, want %+v", got, want)
@@ -312,8 +328,8 @@ func TestThreadCodexKindsStayFlat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Threads) != 1 || list.Threads[0].Key.ThreadID != "X" || list.Threads[0].Type != "" || list.Threads[0].Usage.Input != 3 {
-		t.Fatalf("Codex kind rows produced non-flat threads: %+v", list.Threads)
+	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "X" || list.Items[0].Thread.Type != ThreadMain || list.Items[0].Thread.Usage.Input != 3 || list.Items[0].SelfUsage.Input != 3 || list.Items[0].SubagentUsage != (UsageView{}) || list.Items[0].InclusiveUsage.Input != 3 || list.Items[0].SubagentCount != 0 {
+		t.Fatalf("Codex kind rows produced non-flat root item: %+v", list.Items)
 	}
 }
 
@@ -341,12 +357,16 @@ func TestThreadParentConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty and known parent error = %v", err)
 	}
-	threads := make(map[string]SessionThreadView, len(list.Threads))
-	for _, thread := range list.Threads {
+	projected, err := missingThenKnown.loadThreadProjection(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("loadThreadProjection() error = %v", err)
+	}
+	threads := make(map[string]SessionThreadView, len(projected.Threads))
+	for _, thread := range projected.Threads {
 		threads[thread.Key.ThreadID] = thread
 	}
-	if len(list.Threads) != 2 || threads["B"].ParentThreadID != "P" || threads["A"].Type != ThreadMain {
-		t.Fatalf("parent after missing value = %+v", list.Threads)
+	if len(list.Items) != 1 || len(projected.Threads) != 2 || threads["B"].ParentThreadID != "P" || threads["A"].Type != ThreadMain {
+		t.Fatalf("parent after missing value = %+v", projected.Threads)
 	}
 }
 

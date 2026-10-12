@@ -15,12 +15,33 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// NewClient constructs a client for a Magpie Web API endpoint.
+func NewClient(baseURL string, httpClient *http.Client) *Client {
+	return &Client{baseURL: baseURL, httpClient: httpClient}
+}
+
 type HTTPError struct {
 	StatusCode int
 }
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("magpie web request returned HTTP status %d", e.StatusCode)
+}
+
+type WebError struct {
+	Err error
+}
+
+func (e *WebError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *WebError) Unwrap() error {
+	return e.Err
+}
+
+func wrapWebError(err error) error {
+	return &WebError{Err: err}
 }
 
 func (c *Client) Usage(ctx context.Context, period string) (UsageSummary, error) {
@@ -102,17 +123,17 @@ func (c *Client) Quotas(ctx context.Context, asked bool) (QuotasResponse, error)
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return QuotasResponse{}, err
+		return QuotasResponse{}, wrapWebError(err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return QuotasResponse{}, &HTTPError{StatusCode: response.StatusCode}
+		return QuotasResponse{}, wrapWebError(&HTTPError{StatusCode: response.StatusCode})
 	}
 
 	var quotas []Quota
 	if err := json.NewDecoder(response.Body).Decode(&quotas); err != nil {
-		return QuotasResponse{}, err
+		return QuotasResponse{}, wrapWebError(err)
 	}
 	return QuotasResponse{
 		Quotas:  quotas,
@@ -200,14 +221,17 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return err
+		return wrapWebError(err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return &HTTPError{StatusCode: response.StatusCode}
+		return wrapWebError(&HTTPError{StatusCode: response.StatusCode})
 	}
-	return json.NewDecoder(response.Body).Decode(out)
+	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
+		return wrapWebError(err)
+	}
+	return nil
 }
 
 func authenticateWeb(ctx context.Context, httpClient *http.Client, baseURL, key string) error {

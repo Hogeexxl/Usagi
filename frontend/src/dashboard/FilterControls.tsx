@@ -5,11 +5,12 @@ import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardFilters,
   FilterOptionsResponse,
-  ModelFilterProvider,
+  ModelFilterOption,
   ProjectFilterOption,
   ProjectSelection,
-  SourceFilterOption,
+  AgentFilterOption,
 } from "../data/types";
+import { modelSelectionKey } from "../data/usagiClient";
 import { Button, type ButtonProps } from "../ui/beui/button";
 import { Checkbox } from "../ui/beui/checkbox";
 import { MorphPopover, MorphPopoverContent, MorphPopoverTrigger } from "../ui/beui/morph-popover";
@@ -28,93 +29,40 @@ type FilterControlsProps = {
   onRetryOptions: () => void;
 };
 
-type ModelGroupKey = ModelFilterProvider | "selected";
-
 type ModelGroup = {
-  key: ModelGroupKey;
-  label: "OpenAI" | "Antigravity" | "Route-models" | "Selected";
-  models: string[];
+  key: string;
+  label: string;
+  models: ModelFilterOption[];
 };
 
-const ACTIVE_MODEL_GROUPS: readonly {
-  provider: ModelFilterProvider;
-  label: "OpenAI" | "Antigravity" | "Route-models";
-}[] = [
-  { provider: "openai", label: "OpenAI" },
-  { provider: "antigravity", label: "Antigravity" },
-  { provider: "route-models", label: "Route-models" },
-];
-
-// Model release dates, not subsequent price or service updates.
-// https://developers.openai.com/api/docs/changelog
-// https://openai.com/index/introducing-gpt-5-2-codex/
-// https://openai.com/index/introducing-gpt-5-3-codex/
-// https://openai.com/index/introducing-gpt-5-5/
-// https://platform.claude.com/docs/en/release-notes/overview
-// https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-3-7-flash/
-// https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/
-// https://x.ai/news/grok-4-6
-const MODEL_RELEASE_DATES = new Map<string, string>([
-  ["gpt-6.1-sol", "2026-09-29"],
-  ["gpt-6-sol", "2026-09-22"],
-  ["gpt-6-luna", "2026-09-22"],
-  ["gpt-6-astra", "2026-09-03"],
-  ["gpt-5.6", "2026-07-09"],
-  ["gpt-5.6-sol", "2026-07-09"],
-  ["gpt-5.6-terra", "2026-07-09"],
-  ["gpt-5.6-luna", "2026-07-09"],
-  ["codex-auto-review", "2026-07-09"],
-  ["gpt-5.5", "2026-04-23"],
-  ["gpt-5.4-mini", "2026-03-17"],
-  ["gpt-5.4", "2026-03-05"],
-  ["gpt-5.3-codex", "2026-02-05"],
-  ["gpt-5.2-codex", "2025-12-18"],
-  ["gpt-5.1-codex-mini", "2025-11-13"],
-  ["claude-sonnet-5-5", "2026-09-28"],
-  ["claude-sonnet-5.5", "2026-09-28"],
-  ["claude-opus-5-5", "2026-09-22"],
-  ["claude-opus-5.5", "2026-09-22"],
-  ["claude-fable-5-1", "2026-09-01"],
-  ["claude-fable-5.1", "2026-09-01"],
-  ["claude-opus-4-6-thinking", "2026-02-05"],
-  ["gemini-3.8-flash", "2026-09-02"],
-  ["gemini-3.8-flash-high", "2026-09-02"],
-  ["gemini-3.7-flash", "2026-08-13"],
-  ["grok-4.6", "2026-08-12"],
-]);
-
-function compareModelRelease(left: string, right: string): number {
-  const releaseDate = (model: string) => MODEL_RELEASE_DATES.get(
-    model.toLowerCase().replace(/^(copilot|github-copilot|anthropic|custom)\//, ""),
-  ) ?? "";
-  return releaseDate(right).localeCompare(releaseDate(left))
-    || left.localeCompare(right, "en", { numeric: true });
-}
-
-function modelGroups(options: FilterOptionsResponse | null, selected: readonly string[]): ModelGroup[] {
+function modelGroups(options: FilterOptionsResponse | null, selectedModels: DashboardFilters["models"]): ModelGroup[] {
   const optionModels = options?.models ?? [];
-  const knownModels = new Set(optionModels.map(({ model }) => model));
-  const modelsByProvider = new Map<ModelFilterProvider, Set<string>>();
-  for (const { model, provider } of optionModels) {
-    const models = modelsByProvider.get(provider) ?? new Set<string>();
-    models.add(model);
-    modelsByProvider.set(provider, models);
+  const knownModels = new Set(optionModels.map(modelSelectionKey));
+  const groups = new Map<string, ModelGroup>();
+  for (const option of optionModels) {
+    const group = groups.get(option.provider_id) ?? {
+      key: option.provider_id,
+      label: option.provider_name,
+      models: [],
+    };
+    group.models.push(option);
+    groups.set(option.provider_id, group);
   }
-  const result: ModelGroup[] = ACTIVE_MODEL_GROUPS.flatMap(({ provider, label }) => {
-    const models = modelsByProvider.get(provider);
-    if (!models || models.size === 0) return [];
-    return [{ key: provider, label, models: [...models].sort(compareModelRelease) }];
-  });
-  const selectedOrphans = selected.filter((model) => !knownModels.has(model));
+  const result = [...groups.values()];
+  for (const group of result) group.models.sort((left, right) => left.model.localeCompare(right.model, "en", { numeric: true }));
+  const selectedOrphans = selectedModels.filter((model) => !knownModels.has(modelSelectionKey(model)));
   if (selectedOrphans.length > 0) {
-    const uniqueOrphans = [...new Set(selectedOrphans)].sort((left, right) => left.localeCompare(right));
-    result.push({ key: "selected", label: "Selected", models: uniqueOrphans });
+    result.push({
+      key: "selected",
+      label: "已选",
+      models: selectedOrphans.map((model) => ({ ...model, provider_name: model.provider_id })),
+    });
   }
   return result;
 }
 
-function sourceSelections(options: FilterOptionsResponse | null): SourceFilterOption[] {
-  return [...(options?.sources ?? [])];
+function agentSelections(options: FilterOptionsResponse | null): AgentFilterOption[] {
+  return [...(options?.agents ?? [])];
 }
 
 function projectSelections(options: FilterOptionsResponse | null, selected: readonly ProjectSelection[]): ProjectLike[] {
@@ -142,8 +90,8 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const modelGroupsInitialized = useRef(false);
   const reduce = useReducedMotion();
-  const showSourceFilter = (options?.sources?.length ?? 0) > 1;
-  const sources = useMemo(() => sourceSelections(options), [options]);
+  const showAgentFilter = (options?.agents?.length ?? 0) > 1;
+  const agents = useMemo(() => agentSelections(options), [options]);
   const groups = useMemo(() => modelGroups(options, filters.models), [options, filters.models]);
   const projects = useMemo(() => projectSelections(options, filters.projects), [options, filters.projects]);
 
@@ -155,26 +103,41 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
     setExpandedGroups((current) => ({ ...current, [firstActive.key]: true }));
   }, [groups, options]);
 
-  const selectedSources = new Set(filters.sources);
-  const selectedModels = new Set(filters.models);
+  const selectedAgents = new Set(filters.agents);
+  const selectedModels = new Set(filters.models.map(modelSelectionKey));
   const selectedProjects = new Set(filters.projects.map(projectKey));
 
-  const updateSources = (nextSources: string[]) => onChange({ ...filters, sources: nextSources });
-  const toggleSource = (source: string) =>
-    updateSources(
-      selectedSources.has(source)
-        ? filters.sources.filter((value) => value !== source)
-        : [...filters.sources, source],
+  const updateAgents = (nextAgents: string[]) => onChange({ ...filters, agents: nextAgents });
+  const toggleAgent = (agent: string) =>
+    updateAgents(
+      selectedAgents.has(agent)
+        ? filters.agents.filter((value) => value !== agent)
+        : [...filters.agents, agent],
     );
-  const updateModels = (nextModels: string[]) => onChange({ ...filters, models: nextModels });
-  const toggleModel = (model: string) => updateModels(selectedModels.has(model) ? filters.models.filter((value) => value !== model) : [...filters.models, model]);
-  const toggleGroup = (groupModels: readonly string[]) => {
-    const allSelected = groupModels.every((model) => selectedModels.has(model));
-    updateModels(allSelected ? filters.models.filter((model) => !groupModels.includes(model)) : [...new Set([...filters.models, ...groupModels])]);
+  const toggleModel = (model: ModelFilterOption) => {
+    const key = modelSelectionKey(model);
+    onChange({
+      ...filters,
+      models: selectedModels.has(key)
+        ? filters.models.filter((selection) => modelSelectionKey(selection) !== key)
+        : [...filters.models, { provider_id: model.provider_id, model: model.model }],
+    });
+  };
+  const toggleGroup = (groupModels: readonly ModelFilterOption[]) => {
+    const groupKeys = new Set(groupModels.map(modelSelectionKey));
+    const allSelected = groupModels.every((model) => selectedModels.has(modelSelectionKey(model)));
+    onChange({
+      ...filters,
+      models: allSelected
+        ? filters.models.filter((model) => !groupKeys.has(modelSelectionKey(model)))
+        : [...filters.models, ...groupModels
+            .filter((model) => !selectedModels.has(modelSelectionKey(model)))
+            .map(({ provider_id, model }) => ({ provider_id, model }))],
+    });
   };
   const toggleProject = (project: ProjectFilterOption | ProjectSelection) => {
     const key = projectKey(project);
-    const addition: ProjectSelection = project.kind === "project" ? { kind: "project", project_path: project.project_path } : { kind: project.kind };
+    const addition: ProjectSelection = project.kind === "project" ? { kind: "project", path: project.path } : { kind: project.kind };
     onChange({ ...filters, projects: selectedProjects.has(key) ? filters.projects.filter((selection) => projectKey(selection) !== key) : [...filters.projects, addition] });
   };
 
@@ -182,10 +145,10 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {showSourceFilter ? (
+      {showAgentFilter ? (
         <MorphPopover>
           <MorphPopoverTrigger>
-            <FilterTrigger label="终端" count={filters.sources.length} icon={<SquareTerminal className="h-4 w-4" />} />
+            <FilterTrigger label="终端" count={filters.agents.length} icon={<SquareTerminal className="h-4 w-4" />} />
           </MorphPopoverTrigger>
           <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
             <div className="p-2">
@@ -193,17 +156,17 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
               loading={optionsLoading}
               stale={optionsStale}
               error={optionsErrorCode}
-              hasOptions={sources.length > 0}
+              hasOptions={agents.length > 0}
               onRetry={onRetryOptions}
             />
-            {!optionsLoading && sources.length === 0 ? (
+            {!optionsLoading && agents.length === 0 ? (
               <div className="px-2 py-3 text-xs text-muted-foreground">暂无终端</div>
             ) : null}
-            {sources.map((item) => (
-              <div key={item.source} className={rowClass}>
+            {agents.map((item) => (
+              <div key={item.agent} className={rowClass}>
                 <Checkbox
-                  checked={selectedSources.has(item.source)}
-                  onCheckedChange={() => toggleSource(item.source)}
+                  checked={selectedAgents.has(item.agent)}
+                  onCheckedChange={() => toggleAgent(item.agent)}
                   label={item.display_name}
                 />
               </div>
@@ -220,14 +183,14 @@ export function FilterControls({ filters, options, optionsLoading, optionsStale,
           {!optionsLoading && groups.length === 0 ? <div className="px-2 py-3 text-xs text-muted-foreground">暂无模型</div> : null}
           {groups.map((group) => {
             const expanded = Boolean(expandedGroups[group.key]);
-            const allSelected = group.models.every((model) => selectedModels.has(model));
-            const someSelected = group.models.some((model) => selectedModels.has(model));
+            const allSelected = group.models.every((model) => selectedModels.has(modelSelectionKey(model)));
+            const someSelected = group.models.some((model) => selectedModels.has(modelSelectionKey(model)));
             return <div key={group.key}>
               <div className={rowClass}>
                 <Checkbox checked={allSelected} indeterminate={someSelected && !allSelected} aria-label={group.label} onCheckedChange={() => toggleGroup(group.models)} />
                 <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" aria-expanded={expanded} onClick={() => setExpandedGroups((current) => ({ ...current, [group.key]: !current[group.key] }))}><span className="flex-1">{group.label}</span><motion.span animate={{ rotate: expanded ? 90 : 0 }} transition={reduce ? { duration: 0 } : SPRING_LAYOUT}><ChevronRight className="h-4 w-4 text-muted-foreground" /></motion.span></button>
               </div>
-              {expanded ? <div className="pl-5">{group.models.map((model) => <div key={model} className={rowClass}><Checkbox checked={selectedModels.has(model)} onCheckedChange={() => toggleModel(model)} label={model} /></div>)}</div> : null}
+              {expanded ? <div className="pl-5">{group.models.map((model) => <div key={modelSelectionKey(model)} className={rowClass}><Checkbox checked={selectedModels.has(modelSelectionKey(model))} onCheckedChange={() => toggleModel(model)} label={model.model} /></div>)}</div> : null}
             </div>;
           })}
           </div>

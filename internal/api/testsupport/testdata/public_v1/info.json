@@ -1,0 +1,12 @@
+{
+  "service": "usagi",
+  "app_version": "0.2.6",
+  "api_version": "1",
+  "capabilities": [
+    "revision",
+    "revision-events",
+    "status",
+    "codex-quota",
+    "usage-summary"
+  ]
+}

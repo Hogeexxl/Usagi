@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { SessionItemDto, UsageDto } from "../../data/types";
+import type { SessionListItemDto, UsageDto } from "../../data/types";
 import type { SessionTableViewModel } from "./sessionTypes";
 import type { SessionDetailControllerViewModel } from "./useSessionDetailController";
 import { SessionSection } from "./SessionSection";
@@ -36,38 +36,39 @@ function restoreDimension(name: "offsetHeight" | "offsetWidth", descriptor: Prop
 }
 
 const usage: UsageDto = {
-  input_tokens: 1_234,
-  cached_tokens: 100,
-  cache_write_tokens: null,
-  uncached_input_tokens: 1_134,
-  output_tokens: 567,
-  reasoning_tokens: 12,
-  other_output_tokens: 555,
-  total_tokens: 1_801,
-  cache_hit_rate: 100 / 1234,
-  estimated_cost: 1.25,
-  estimated_cost_status: "complete",
+  calls: 2,
+  errors: 0,
+  input: 1_234,
+  output: 567,
+  cache_read: 100,
+  cache_write: 20,
+  cache_write_1h: 10,
+  reasoning: 12,
+  total: 1_921,
+  cache_hit_rate: 100 / 1354,
+  cost: 1.25,
+  unpriced: 0,
 };
 
-const item: SessionItemDto = {
-  source: "codex",
-  native_session_id: "root-1",
-  root_session_id: "root-1",
-  title: null,
-  project_name: "Usagi",
-  project_path: "/work/Usagi",
-  last_activity_at_ms: Date.UTC(2026, 7, 10, 8, 9),
-  models_used: ["gpt-5", "o4-mini"],
-  model_efforts: [
-    { model: "gpt-5", reasoning_effort: "high" },
-    { model: "o4-mini", reasoning_effort: null },
-  ],
+const item: SessionListItemDto = {
+  thread: {
+    key: { agent: "codex", session_id: "session-1", thread_id: "root-1" },
+    type: "main",
+    parent_thread_id: null,
+    title: null,
+    project: { kind: "project", name: "Usagi", path: "/work/Usagi" },
+    first_usage_ms: Date.UTC(2026, 7, 10, 8, 0),
+    last_usage_ms: Date.UTC(2026, 7, 10, 8, 9),
+    model_effort: [
+      { model: "gpt-5", effort: "high", usage, compaction_tokens: null },
+      { model: "o4-mini", effort: "low", usage, compaction_tokens: null },
+    ],
+    usage,
+  },
   subagent_count: 2,
-  inclusive_usage: { ...usage, total_tokens: 5_678 },
-  self_usage: { ...usage, total_tokens: 1_234 },
+  inclusive_usage: { ...usage, total: 5_678 },
+  self_usage: { ...usage, total: 1_234 },
   subagent_usage: usage,
-  data_status: "complete",
-  error_code: null,
 };
 
 function view(overrides: Partial<SessionTableViewModel> = {}): SessionTableViewModel {
@@ -77,7 +78,7 @@ function view(overrides: Partial<SessionTableViewModel> = {}): SessionTableViewM
     timezone: "Asia/Shanghai",
     load_state: "ready",
     page_state: "idle",
-    filters: { sources: [], models: [], projects: [] },
+    filters: { agents: [], models: [], projects: [] },
     page: 1,
     total_items: 1,
     total_pages: 1,
@@ -93,20 +94,23 @@ function view(overrides: Partial<SessionTableViewModel> = {}): SessionTableViewM
   };
 }
 
-function row(index: number, overrides: Partial<SessionItemDto> = {}): SessionItemDto {
+function row(index: number, overrides: Partial<SessionListItemDto> = {}): SessionListItemDto {
   return {
     ...item,
-    root_session_id: `root-${index}`,
-    title: `Session ${index}`,
-    last_activity_at_ms: item.last_activity_at_ms + index,
+    thread: {
+      ...item.thread,
+      key: { ...item.thread.key, session_id: `session-${index}`, thread_id: `root-${index}` },
+      title: `Session ${index}`,
+      last_usage_ms: item.thread.last_usage_ms + index,
+    },
     ...overrides,
   };
 }
 
-function detailView(openDetail: (row: SessionItemDto) => void): SessionDetailControllerViewModel {
+function detailView(openDetail: (row: SessionListItemDto) => void): SessionDetailControllerViewModel {
   return {
     open: false,
-    selected_root_session_id: null,
+    selected_thread_key_id: null,
     selected_row: null,
     detail: null,
     load_state: "closed",
@@ -123,11 +127,11 @@ function tableViewport(container: HTMLElement): HTMLElement {
   return table.parentElement;
 }
 
-function tableRow(container: HTMLElement, rootSessionId: string): HTMLTableRowElement {
+function tableRow(container: HTMLElement, threadKeyId: string): HTMLTableRowElement {
   const tableRow = container.querySelector<HTMLTableRowElement>(
-    `tbody tr[data-session-root-id="${rootSessionId}"]`,
+    `tbody tr[data-session-thread-key-id='${threadKeyId}']`,
   );
-  if (!tableRow) throw new Error(`Session row ${rootSessionId} not found`);
+  if (!tableRow) throw new Error(`Session row ${threadKeyId} not found`);
   return tableRow;
 }
 
@@ -167,16 +171,16 @@ describe("SessionSection v0.2.0", () => {
 
     expect(
       Array.from(
-        rendered.container.querySelectorAll("tbody tr[data-session-root-id]"),
-        (tableRow) => tableRow.getAttribute("data-session-root-id"),
+        rendered.container.querySelectorAll("tbody tr[data-session-thread-key-id]"),
+        (tableRow) => tableRow.getAttribute("data-session-thread-key-id"),
       ),
-    ).toEqual(["root-2", "root-1"]);
+    ).toEqual([JSON.stringify(["codex", "session-2", "root-2"]), JSON.stringify(["codex", "session-1", "root-1"])]);
 
     fireEvent.click(screen.getByRole("button", { name: "最后活动" }));
     expect(selectSort).toHaveBeenCalledWith("last_activity");
 
-    const firstRow = tableRow(rendered.container, "root-2");
-    expect(firstRow).toHaveAttribute("data-session-root-id", "root-2");
+    const firstRow = tableRow(rendered.container, JSON.stringify(["codex", "session-2", "root-2"]));
+    expect(firstRow).toHaveAttribute("data-session-thread-key-id", JSON.stringify(["codex", "session-2", "root-2"]));
     expect(firstRow).toHaveAttribute("tabindex", "0");
     expect(firstRow).toHaveAttribute("aria-selected", "false");
     fireEvent.click(firstRow);
@@ -214,15 +218,15 @@ describe("SessionSection v0.2.0", () => {
     }
 
     const cells = rendered.container.querySelectorAll(
-      'tbody tr[data-session-root-id="root-1"] td',
+      `tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`,
     );
     for (const index of [5, 6, 7, 8]) {
       expect(cells[index]).toHaveClass("text-right");
     }
     expect(cells[1]).toHaveTextContent("codex");
     expect(cells[4]).toHaveTextContent("gpt-5 (high) +1");
-    expect(cells[4].querySelector("span")).toHaveAttribute("title", "gpt-5 (high), o4-mini (—)");
-    expect(cells[4].querySelector("span")).toHaveAttribute("aria-label", "gpt-5 (high), o4-mini (—)");
+    expect(cells[4].querySelector("span")).toHaveAttribute("title", "gpt-5 (high), o4-mini (low)");
+    expect(cells[4].querySelector("span")).toHaveAttribute("aria-label", "gpt-5 (high), o4-mini (low)");
     expect(cells[5]).toHaveTextContent("5,678");
     expect(cells[6]).toHaveTextContent("2");
     expect(cells[5].querySelector(".tabular-nums")).toBeTruthy();
@@ -245,13 +249,13 @@ describe("SessionSection v0.2.0", () => {
   });
 
   it("TD-P5-TABLE-01 renders mixed-source rows with 9 columns in exact order and authored widths", () => {
-    const mixedRows: SessionItemDto[] = [
-      row(1, { source: "codex" }),
-      row(2, { source: "antigravity" }),
+    const mixedRows: SessionListItemDto[] = [
+      row(1, { thread: { ...row(1).thread, key: { ...row(1).thread.key, agent: "codex" } } }),
+      row(2, { thread: { ...row(2).thread, key: { ...row(2).thread.key, agent: "antigravity" } } }),
     ];
-    const sourceDisplay = (s: string) => (s === "antigravity" ? "Antigravity" : "Codex");
+    const agentDisplay = (s: string) => (s === "antigravity" ? "Antigravity" : "Codex");
     const rendered = render(
-      <SessionSection view={view({ rows: mixedRows })} sourceDisplay={sourceDisplay} />,
+      <SessionSection view={view({ rows: mixedRows })} agentDisplay={agentDisplay} />,
     );
     const headers = screen.getAllByRole("columnheader");
     expect(headers.map((h) => h.textContent?.trim())).toEqual([
@@ -281,9 +285,9 @@ describe("SessionSection v0.2.0", () => {
       "0px",
     ]);
 
-    const row1Cells = rendered.container.querySelectorAll('tbody tr[data-session-root-id="root-1"] td');
+    const row1Cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
     expect(row1Cells[1]).toHaveTextContent("Codex");
-    const row2Cells = rendered.container.querySelectorAll('tbody tr[data-session-root-id="root-2"] td');
+    const row2Cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["antigravity", "session-2", "root-2"])}'] td`);
     expect(row2Cells[1]).toHaveTextContent("Antigravity");
   });
 
@@ -347,65 +351,31 @@ describe("SessionSection v0.2.0", () => {
     readyEmpty.unmount();
   });
 
-  it("T-S04-005 activates usable rows and keeps error rows disabled", () => {
+  it("T-S04-005 activates every returned Session row with its full ThreadKey", () => {
     const openSession = vi.fn();
     const rendered = render(
       <SessionSection view={view()} detail={detailView(openSession)} />,
     );
-    const usableRow = tableRow(rendered.container, "root-1");
+    const usableRow = tableRow(rendered.container, JSON.stringify(["codex", "session-1", "root-1"]));
     fireEvent.click(usableRow);
     fireEvent.keyDown(usableRow, { key: "Enter" });
     fireEvent.keyDown(usableRow, { key: " " });
     expect(openSession).toHaveBeenCalledTimes(3);
+    expect(openSession.mock.calls.map(([selected]) => selected.thread.key)).toEqual([
+      { agent: "codex", session_id: "session-1", thread_id: "root-1" },
+      { agent: "codex", session_id: "session-1", thread_id: "root-1" },
+      { agent: "codex", session_id: "session-1", thread_id: "root-1" },
+    ]);
     rendered.unmount();
-
-    const errorOpen = vi.fn();
-    const errorRendered = render(
-      <SessionSection
-        view={view({ rows: [row(1, { data_status: "error" })] })}
-        detail={detailView(errorOpen)}
-      />,
-    );
-    const errorRow = tableRow(errorRendered.container, "root-1");
-    expect(errorRow).toHaveAttribute("aria-disabled", "true");
-    expect(errorRow).toHaveAttribute("tabindex", "-1");
-    fireEvent.click(errorRow);
-    fireEvent.keyDown(errorRow, { key: "Enter" });
-    fireEvent.keyDown(errorRow, { key: " " });
-    expect(errorOpen).not.toHaveBeenCalled();
   });
 
-  it("T-S04-005 exposes the incomplete and error tooltip copy", () => {
-    for (const [dataStatus, label] of [
-      ["incomplete", "数据不完整"],
-      ["error", "数据计算异常"],
-    ] as const) {
-      vi.useFakeTimers();
-      const rendered = render(
-        <SessionSection view={view({ rows: [row(1, { data_status: dataStatus })] })} />,
-      );
-      try {
-        const trigger = screen.getByLabelText(label);
-        expect(trigger).toHaveAttribute("aria-describedby");
-        if (!(trigger.parentElement instanceof HTMLElement)) {
-          throw new Error("Tooltip wrapper not found");
-        }
-        fireEvent.pointerEnter(trigger.parentElement, {
-          pointerId: 1,
-          pointerType: "mouse",
-          buttons: 0,
-        });
-        act(() => {
-          vi.advanceTimersByTime(120);
-        });
-        const tooltip = screen.getByRole("tooltip", { hidden: true });
-        expect(tooltip).toHaveTextContent(label);
-        expect(trigger).toHaveAttribute("aria-describedby", tooltip.id);
-      } finally {
-        rendered.unmount();
-        vi.useRealTimers();
-      }
-    }
+  it("keeps inclusive rollups and subagent counts in the Session row", () => {
+    const rendered = render(<SessionSection view={view({ rows: [row(1)] })} />);
+    const cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
+    expect(cells[5]).toHaveTextContent("5,678");
+    expect(cells[6]).toHaveTextContent("2");
+    expect(cells[7]).toHaveTextContent("7.4%");
+    expect(cells[8]).toHaveTextContent("$1.25");
   });
 
   it("T-S04-006 keeps pagination in the Session header and commits the real page-input flow", () => {

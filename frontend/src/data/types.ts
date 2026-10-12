@@ -10,142 +10,86 @@ export type DashboardRange =
   | { key: PresetRangeKey }
   | { key: "custom"; from: string; to: string };
 
-export type EstimatedCostStatus = "complete" | "partial" | "unknown";
-
-export type RangeDto = {
-  key: RangeKey;
-  start_ms: number;
-  end_ms: number;
-  timezone: string;
-};
-
 export type UsageDto = {
-  input_tokens: number;
-  cached_tokens: number;
-  cache_write_tokens: number | null;
-  uncached_input_tokens: number | null;
-  output_tokens: number;
-  reasoning_tokens: number;
-  other_output_tokens: number;
-  total_tokens: number;
+  calls: number;
+  errors: number;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  cache_write_1h: number;
+  reasoning: number;
+  total: number;
   cache_hit_rate: number | null;
-  estimated_cost: number | null;
-  estimated_cost_status: EstimatedCostStatus;
-};
-
-export type SessionHealthDto = {
-  total_sessions: number;
-  complete_sessions: number;
-  incomplete_sessions: number;
-  error_sessions: number;
-};
-
-export type SummaryUsageDto = UsageDto & {
-  session_count: number;
-  cost_incomplete_session_count: number;
-  complete_session_cost_per_million_tokens: number | null;
-  session_health: SessionHealthDto;
+  cost: number;
+  unpriced: number;
 };
 
 export type SummaryResponse = {
-  range: RangeDto;
   data_revision: number;
-  usage: SummaryUsageDto;
-};
-
-export type CodexQuotaWindowDto = {
-  used_percent: number;
-  remaining_percent: number;
-  limit_window_seconds: number;
-  reset_at_ms: number | null;
-};
-
-export type QuotaSnapshotStatus = "loading" | "ready" | "auth_required" | "unavailable";
-
-export type CodexQuotaResponse = {
-  status: QuotaSnapshotStatus;
-  account_email: string | null;
-  plan_type: string | null;
-  session: CodexQuotaWindowDto | null;
-  weekly: CodexQuotaWindowDto | null;
-  reset_credits_available: number | null;
-  fetched_at_ms: number | null;
-};
-
-export type AntigravityQuotaResponse = {
-  status: QuotaSnapshotStatus;
-  account_email: string | null;
-  plan_type: string | null;
-  session: CodexQuotaWindowDto | null;
-  weekly: CodexQuotaWindowDto | null;
-  fetched_at_ms: number | null;
+  usage: UsageDto;
+  session_count: number;
 };
 
 export type ProjectFilterOption =
-  | { kind: "project"; project_name: string; project_path: string }
+  | { kind: "project"; path: string; name: string }
   | { kind: "projectless" }
   | { kind: "unknown" };
 
 export type ProjectSelection =
-  | { kind: "project"; project_path: string }
+  | { kind: "project"; path: string }
   | { kind: "projectless" }
   | { kind: "unknown" };
 
+export type ModelSelection = {
+  provider_id: string;
+  model: string;
+};
+
 export type DashboardFilters = {
-  sources: string[];
-  models: string[];
+  agents: string[];
+  models: ModelSelection[];
   projects: ProjectSelection[];
 };
 
-export type SourceFilterOption = {
-  source: string;
+export type AgentFilterOption = {
+  agent: string;
   display_name: string;
 };
 
-export type ModelFilterProvider = "openai" | "antigravity" | "route-models";
-
 export type ModelFilterOption = {
   model: string;
-  provider: ModelFilterProvider;
+  provider_id: string;
+  provider_name: string;
 };
 
 export type FilterOptionsResponse = {
   data_revision: number;
-  sources: SourceFilterOption[];
+  agents: AgentFilterOption[];
   models: ModelFilterOption[];
   projects: ProjectFilterOption[];
 };
 
-export type DistributionUsageDto = {
-  total_tokens: number;
-  estimated_cost: number | null;
-  estimated_cost_status: EstimatedCostStatus;
-};
-
 export type ModelDistributionItemDto = {
   model: string;
-  usage: DistributionUsageDto;
+  usage: UsageDto;
 };
 
 export type ModelDistributionResponse = {
-  range: RangeDto;
   data_revision: number;
   items: ModelDistributionItemDto[];
 };
 
-export type ProjectDistributionItemDto = {
-  kind: "project" | "projectless" | "unknown";
-  project_name: string | null;
-  project_path: string | null;
-  usage: DistributionUsageDto;
-};
+export type ProjectDistributionItemDto =
+  | { kind: "project"; path: string; name: string; usage: UsageDto }
+  | { kind: "projectless" | "unknown"; usage: UsageDto };
 
 export type ProjectDistributionResponse = {
-  range: RangeDto;
   data_revision: number;
   items: ProjectDistributionItemDto[];
 };
 
+// Kept for future chart consumers; Skills are intentionally outside the main Dashboard fetch path.
 export type SkillDayDto = {
   date: string;
   start_ms: number;
@@ -155,33 +99,46 @@ export type SkillDayDto = {
 };
 
 export type SkillsUsageResponse = {
-  range: RangeDto;
   data_revision: number;
   data_status: "ready" | "rebuilding";
   days: SkillDayDto[];
 };
 
-export type SessionItemDto = {
-  source: string;
-  native_session_id: string;
-  root_session_id: string;
-  title: string | null;
-  project_name: string | null;
-  project_path: string | null;
-  last_activity_at_ms: number;
-  models_used: string[];
-  model_efforts: SessionModelEffortDto[];
-  subagent_count: number;
-  inclusive_usage: UsageDto | null;
-  self_usage: UsageDto | null;
-  subagent_usage: UsageDto | null;
-  data_status: "complete" | "incomplete" | "error";
-  error_code: string | null;
+export type ThreadKey = {
+  agent: string;
+  session_id: string;
+  thread_id: string;
 };
 
 export type SessionModelEffortDto = {
   model: string;
-  reasoning_effort: string | null;
+  effort: string;
+  usage: UsageDto;
+  compaction_tokens: number | null;
+};
+
+export type SessionProjectDto =
+  | { kind: "project"; path: string; name: string }
+  | { kind: "projectless" | "unknown"; path?: string; name?: string };
+
+export type SessionThreadDto = {
+  key: ThreadKey;
+  type: "main" | "subagent";
+  parent_thread_id: string | null;
+  title: string | null;
+  project: SessionProjectDto;
+  first_usage_ms: number;
+  last_usage_ms: number;
+  model_effort: SessionModelEffortDto[];
+  usage: UsageDto;
+};
+
+export type SessionListItemDto = {
+  thread: SessionThreadDto;
+  self_usage: UsageDto;
+  subagent_usage: UsageDto;
+  inclusive_usage: UsageDto;
+  subagent_count: number;
 };
 
 export type SessionSortField =
@@ -189,89 +146,54 @@ export type SessionSortField =
   | "project"
   | "model"
   | "total_tokens"
-  | "combined_total_tokens"
-  | "combined_estimated_cost"
+  | "cost"
   | "cache_hit_rate";
 
 export type SessionSortOrder = "asc" | "desc";
 
-export type SessionSortIndexItem = {
-  source: string;
-  native_session_id: string;
-  root_session_id: string;
-  last_activity_at_ms: number;
-  project_sort_key: string | null;
-  model_sort_key: string | null;
-  total_tokens: number | null;
-  combined_total_tokens: number | null;
-  combined_estimated_cost: number | null;
-  cache_hit_rate: number | null;
-  data_status: "complete" | "incomplete" | "error";
-  error_code: string | null;
-};
-
-export type SessionSnapshotResponse = {
-  range: RangeDto;
+export type SessionListResponse = {
   data_revision: number;
-  total_items: number;
-  sort_index: SessionSortIndexItem[];
-  items: SessionItemDto[];
-};
-
-export type SessionRowsResponse = {
-  range: RangeDto;
-  data_revision: number;
-  items: SessionItemDto[];
-};
-
-export type MainModelUsageDto = {
-  model: string;
-  reasoning_effort: string | null;
-  compaction_tokens: number | null;
-  usage: UsageDto;
-};
-
-export type MainSessionDetailDto = {
-  source: string;
-  native_session_id: string;
-  title: string | null;
-  project_name: string | null;
-  project_path: string | null;
-  thread_id: string;
-  root_session_id: string;
-  models_used: string[];
-  model_usage: MainModelUsageDto[];
-  self_usage: UsageDto;
-  subagent_count: number;
-  inclusive_usage: UsageDto;
-};
-
-export type SubagentDetailDto = {
-  source: string;
-  native_session_id: string;
-  thread_id: string;
-  parent_thread_id: string | null;
-  root_session_id: string;
-  title: string | null;
-  last_activity_at_ms: number;
-  model_usage: Array<{
-    model: string;
-    reasoning_effort: string | null;
-    compaction_tokens: number | null;
-    last_activity_at_ms: number;
-    usage: UsageDto;
-  }>;
+  items: SessionListItemDto[];
 };
 
 export type SessionDetailResponse = {
-  source: string;
-  native_session_id: string;
-  range: RangeDto;
   data_revision: number;
-  root_session_id: string;
-  last_activity_at_ms: number;
-  main: MainSessionDetailDto;
-  subagents: SubagentDetailDto[];
+  thread: SessionThreadDto;
+  self_usage: UsageDto;
+  subagent_usage: UsageDto;
+  inclusive_usage: UsageDto;
+  children: SessionThreadDto[];
+};
+
+export type QuotaWindowDto = {
+  unlimited: boolean;
+  name: string;
+  used: number;
+  resets_at_ms: number | null;
+  reset_secs: number;
+  display: string;
+  amount: number;
+  limit: number;
+  unit: string;
+  family: string;
+  pool: string;
+};
+
+export type QuotaProviderDto = {
+  provider: string;
+  name: string;
+  plan: string;
+  user: string;
+  windows: QuotaWindowDto[];
+  balance: string;
+  error: string;
+  as_of_ms: number | null;
+  read_at_ms: number | null;
+};
+
+export type QuotaResponse = {
+  reading: boolean;
+  items: QuotaProviderDto[];
 };
 
 export type RevisionResponse = {
@@ -279,42 +201,10 @@ export type RevisionResponse = {
   status_revision: number;
 };
 
-export type FollowupDto = {
-  scan_id: string;
-  state: "queued" | "start_failed";
-  enqueued_status_revision: number;
-  requested_at_ms: number;
-  error_code: string | null;
-};
-
-export type TargetScanDto = {
-  scan_id: string;
-  state: "queued" | "running" | "completed" | "failed" | "start_failed";
-  started_status_revision: number | null;
-  terminal_status_revision: number | null;
-  error_code: string | null;
-};
-
-export type StatusResponse = {
-  data_revision: number;
+export type RuntimeStatusResponse = {
   status_revision: number;
-  scan_state: "startup" | "running" | "idle" | "failed";
-  active_scan_id: string | null;
-  last_finished_scan_id: string | null;
-  last_finished_scan_result: string | null;
-  followup: FollowupDto | null;
-  target_scan: TargetScanDto | null;
-  last_scan_started_at_ms: number | null;
-  last_scan_completed_at_ms: number | null;
-  last_scan_failed_at_ms: number | null;
-  last_scan_error_code: string | null;
-  sources: SourceScanStatusDto[];
-};
-
-export type SourceScanStatusDto = {
-  source: string;
-  state: "queued" | "running" | "completed" | "skipped" | "failed";
-  error_code: string | null;
+  runtime_state: "starting" | "ready" | "unavailable";
+  last_error_code: string | null;
 };
 
 export type UpdateStatusResponse = {
@@ -326,36 +216,19 @@ export type UpdateStatusResponse = {
   checking: boolean;
 };
 
-export type RefreshAccepted = {
-  http_status: 200 | 202;
-  disposition: "started" | "coalesced";
-  scan_id: string;
-  status_revision: number;
-};
-
 export type ApiErrorCode =
   | "INVALID_RANGE"
   | "INVALID_FILTER"
-  | "INVALID_SESSION_IDS"
-  | "INVALID_SCAN_ID"
-  | "SCAN_NOT_FOUND"
-  | "STALE_DATA_REVISION"
-  | "FORBIDDEN"
+  | "THREAD_NOT_FOUND"
+  | "MAGPIE_UNAVAILABLE"
+  | "UPSTREAM_FAILED"
+  | "INTERNAL_ERROR"
+  | "NOT_FOUND"
   | "FORBIDDEN_HOST"
   | "FORBIDDEN_ORIGIN"
-  | "NOT_FOUND"
-  | "SOURCE_CHANGED"
-  | "SCANNER_UNAVAILABLE"
-  | "LOCAL_TIME_UNAVAILABLE"
-  | "QUERY_OVERFLOW"
-  | "DATABASE_BUSY"
-  | "QUERY_FAILED"
-  | "SCAN_START_FAILED"
-  | "SCAN_ENQUEUE_FAILED"
   | "UPDATE_CHECK_FAILED"
   | "UPDATE_NOT_AVAILABLE"
   | "UPDATE_BROWSER_OPEN_FAILED"
-  | "INTERNAL_ERROR"
   | "HTTP_ERROR";
 
 export class UsagiClientError extends Error {
@@ -371,11 +244,6 @@ export class UsagiClientError extends Error {
 }
 
 export type RevisionTuple = Pick<RevisionResponse, "data_revision" | "status_revision">;
-
-export type SyncResponse = {
-  status: "accepted" | "already_running" | "queued";
-  scan_id: string | null;
-};
 
 export type UpdateCheckResponse = {
   status: "up_to_date" | "update_available";

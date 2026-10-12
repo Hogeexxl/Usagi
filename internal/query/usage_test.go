@@ -94,17 +94,17 @@ func TestUsageRequestsAndGroups(t *testing.T) {
 func TestUsageFilters(t *testing.T) {
 	r := DateRange{From: "2026-10-01", To: "2026-10-11"}
 	rows := []magpie.UsageRequest{
-		{Agent: "codex", Model: "z", Input: 1, Priced: true},
-		{Agent: "claude", Model: "a", Input: 2, Priced: true},
-		{Agent: "other", Model: "z", Input: 4, Priced: true},
-		{Agent: "codex", Model: "other", Input: 8, Priced: true},
+		{Agent: "codex", Provider: "provider-a", Model: "gpt-x", Input: 1, Priced: true},
+		{Agent: "claude", Provider: "provider-b", Model: "gpt-x", Input: 10, Priced: true},
+		{Agent: "other", Provider: "provider-a", Model: "other", Input: 100, Priced: true},
+		{Agent: "codex", Provider: "provider-b", Model: "other", Input: 1000, Priced: true},
 	}
 	var queries []magpie.UsageRequestsQuery
 	u := &sessionUpstream{requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
 		queries = append(queries, q)
 		var pageRows []magpie.UsageRequest
 		for _, row := range rows {
-			if (q.Agent == "" || row.Agent == q.Agent) && (q.Model == "" || row.Model == q.Model) {
+			if (q.Agent == "" || row.Agent == q.Agent) && (q.Provider == "" || row.Provider == q.Provider) && (q.Model == "" || row.Model == q.Model) {
 				pageRows = append(pageRows, row)
 			}
 		}
@@ -112,26 +112,82 @@ func TestUsageFilters(t *testing.T) {
 	}}
 	s := newService(u)
 	filters := []UsageFilter{
-		{Agents: []string{"", "codex", "codex"}, Models: []string{"z", "", "z"}},
-		{Agents: []string{"codex", "", "claude", "codex"}, Models: []string{"z", "a", "", "z"}},
+		{Agents: []string{"", "codex", "codex"}, Models: []ModelSelection{{ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-a", Model: "gpt-x"}}},
+		{Agents: []string{"codex", "", "claude", "codex"}, Models: []ModelSelection{{ProviderID: "provider-b", Model: "other"}, {ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-b", Model: "other"}}},
 	}
 	for i, filter := range filters {
 		got, err := s.Usage(context.Background(), UsageQuery{Range: r, Filter: filter})
-		want := []UsageTotals{{Calls: 1, Input: 1}, {Calls: 2, Input: 3}}[i]
+		want := []UsageTotals{{Calls: 1, Input: 1}, {Calls: 2, Input: 1001}}[i]
 		if err != nil || got.Totals != want {
 			t.Fatalf("filter %d = %+v, %v; want %+v", i, got, err, want)
 		}
 	}
 	wantQueries := []magpie.UsageRequestsQuery{
-		{Period: "2026-10-01..2026-10-11", Agent: "codex", Model: "z", Limit: 500},
+		{Period: "2026-10-01..2026-10-11", Agent: "codex", Provider: "provider-a", Model: "gpt-x", Limit: 500},
 		{Period: "2026-10-01..2026-10-11", Limit: 500},
 	}
 	if !reflect.DeepEqual(queries, wantQueries) {
 		t.Fatalf("pushdown queries = %+v, want %+v", queries, wantQueries)
 	}
 	normalized, err := normalizeUsageInput(r, filters[1])
-	if err != nil || !reflect.DeepEqual(normalized.Agents, []string{"claude", "codex"}) || !reflect.DeepEqual(normalized.Models, []string{"a", "z"}) {
+	wantModels := []ModelSelection{{ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-b", Model: "other"}}
+	if err != nil || !reflect.DeepEqual(normalized.Agents, []string{"claude", "codex"}) || !reflect.DeepEqual(normalized.Models, wantModels) {
 		t.Fatalf("normalized filter = %+v, %v", normalized, err)
+	}
+}
+
+func TestProviderModelPairFiltersUsageGroupsAndSessions(t *testing.T) {
+	rangeValue := DateRange{From: "2026-10-01", To: "2026-10-11"}
+	rows := []magpie.UsageRequest{
+		{Agent: "codex", Provider: "provider-a", Model: "gpt-x", Session: "session-a", Time: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC), Input: 1, Priced: true},
+		{Agent: "codex", Provider: "provider-b", Model: "gpt-x", Session: "session-b", Time: time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC), Input: 10, Priced: true},
+	}
+	sessions := []magpie.Session{
+		{Agent: "codex", ID: "session-a", Title: "A", Cwd: "/a"},
+		{Agent: "codex", ID: "session-b", Title: "B", Cwd: "/b"},
+	}
+	var requestQueries []magpie.UsageRequestsQuery
+	upstream := &sessionUpstream{
+		sessions: func(context.Context, int) (magpie.SessionsResponse, error) {
+			return magpie.SessionsResponse{Sessions: sessions}, nil
+		},
+		requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
+			requestQueries = append(requestQueries, q)
+			var matched []magpie.UsageRequest
+			for _, row := range rows {
+				if (q.Provider == "" || q.Provider == row.Provider) && (q.Model == "" || q.Model == row.Model) {
+					matched = append(matched, row)
+				}
+			}
+			return magpie.UsageRequestsPage{Rows: matched, Total: len(matched)}, nil
+		},
+	}
+	service := newService(upstream)
+	for _, test := range []struct {
+		provider string
+		session  string
+		input    int
+	}{
+		{provider: "provider-a", session: "session-a", input: 1},
+		{provider: "provider-b", session: "session-b", input: 10},
+	} {
+		filter := UsageFilter{Models: []ModelSelection{{ProviderID: test.provider, Model: "gpt-x"}}}
+		usage, err := service.Usage(context.Background(), UsageQuery{Range: rangeValue, Filter: filter, GroupBy: GroupModel})
+		if err != nil || usage.Totals.Input != int64(test.input) || len(usage.Groups) != 1 || usage.Groups[0].Model != "gpt-x" || usage.Groups[0].Totals.Input != int64(test.input) {
+			t.Fatalf("Usage(%s/gpt-x) = %+v, %v", test.provider, usage, err)
+		}
+		result, err := service.Sessions(context.Background(), SessionQuery{Range: rangeValue, Filter: filter})
+		if err != nil || len(result.Sessions) != 1 || result.Sessions[0].ID != test.session || result.Sessions[0].Totals.Input != int64(test.input) {
+			t.Fatalf("Sessions(%s/gpt-x) = %+v, %v", test.provider, result, err)
+		}
+	}
+	if len(requestQueries) != 4 {
+		t.Fatalf("UsageRequests call count = %d, want 4", len(requestQueries))
+	}
+	for i, wantProvider := range []string{"provider-a", "provider-a", "provider-b", "provider-b"} {
+		if requestQueries[i].Provider != wantProvider || requestQueries[i].Model != "gpt-x" {
+			t.Fatalf("UsageRequests query %d = %+v, want %s/gpt-x", i, requestQueries[i], wantProvider)
+		}
 	}
 }
 
@@ -284,7 +340,7 @@ func TestUsageRows(t *testing.T) {
 		t.Fatalf("full row = %+v, want %+v", got.Rows[len(wantKeys)], wantFull)
 	}
 	cwd = "/fresh"
-	q.Filter = UsageFilter{Agents: []string{"codex", "", "a", "codex"}, Models: []string{"z", "m", "m"}, Projects: []ProjectSelection{{Kind: ProjectKindProject, Path: cwd}}}
+	q.Filter = UsageFilter{Agents: []string{"codex", "", "a", "codex"}, Models: []ModelSelection{{ProviderID: "p", Model: "z"}, {ProviderID: "p", Model: "m"}, {ProviderID: "p", Model: "m"}}, Projects: []ProjectSelection{{Kind: ProjectKindProject, Path: cwd}}}
 	got, err = s.UsageRows(ctx, q)
 	wantFull.Project = ProjectRef{Kind: ProjectKindProject, Path: cwd, Name: "fresh"}
 	if err != nil || !reflect.DeepEqual(got.Rows, []UsageRow{wantFull}) || refreshes != 2 || !reflect.DeepEqual(events, []string{"refresh", "requests", "refresh", "requests"}) {

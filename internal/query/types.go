@@ -29,9 +29,14 @@ type ProjectRef struct {
 	Name string
 }
 
+type ModelSelection struct {
+	ProviderID string
+	Model      string
+}
+
 type UsageFilter struct {
 	Agents   []string
-	Models   []string
+	Models   []ModelSelection
 	Projects []ProjectSelection
 }
 
@@ -170,8 +175,14 @@ type AgentOption struct {
 
 type FilterOptionsResult struct {
 	Agents   []AgentOption
-	Models   []string
+	Models   []ModelOption
 	Projects []ProjectRef
+}
+
+type ModelOption struct {
+	Model        string
+	ProviderID   string
+	ProviderName string
 }
 
 var (

@@ -5,7 +5,7 @@ export type RangePolicy = { kind: "dashboard" } | { kind: "fixed"; range: Dashbo
 export type FilterPolicy = "dashboard" | "ignore";
 export type DashboardScopePolicy = {
   range: RangePolicy;
-  sources: FilterPolicy;
+  agents: FilterPolicy;
   models: FilterPolicy;
   projects: FilterPolicy;
 };
@@ -13,23 +13,15 @@ export type ResolvedDashboardScope = { range: DashboardRange; filters: Dashboard
 
 const FOLLOW_DASHBOARD: DashboardScopePolicy = {
   range: { kind: "dashboard" },
-  sources: "dashboard",
+  agents: "dashboard",
   models: "dashboard",
   projects: "dashboard",
 };
-const ROLLING_7D_FILTERED: DashboardScopePolicy = {
-  range: { kind: "fixed", range: { key: "7d" } },
-  sources: "ignore",
-  models: "dashboard",
-  projects: "dashboard",
-};
-
 export const DASHBOARD_SCOPE_POLICIES = {
   kpi: FOLLOW_DASHBOARD,
   modelDistribution: FOLLOW_DASHBOARD,
   projectDistribution: FOLLOW_DASHBOARD,
   sessions: FOLLOW_DASHBOARD,
-  skillsUsage: ROLLING_7D_FILTERED,
 } as const;
 
 export function resolveDashboardScope(
@@ -41,7 +33,7 @@ export function resolveDashboardScope(
   return {
     range: policy.range.kind === "dashboard" ? dashboardRange : policy.range.range,
     filters: {
-      sources: policy.sources === "dashboard" ? canonical.sources : [],
+      agents: policy.agents === "dashboard" ? canonical.agents : [],
       models: policy.models === "dashboard" ? canonical.models : [],
       projects: policy.projects === "dashboard" ? canonical.projects : [],
     },

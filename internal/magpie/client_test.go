@@ -265,14 +265,41 @@ func TestClientNon2xx(t *testing.T) {
 
 	client := &Client{baseURL: server.URL, httpClient: server.Client()}
 	_, err := client.Usage(context.Background(), "today")
+	var webErr *WebError
+	if !errors.As(err, &webErr) {
+		t.Fatalf("Usage() error = %v, want WebError", err)
+	}
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("Usage() error = %v, want HTTPError status %d", err, http.StatusServiceUnavailable)
 	}
 	_, err = client.Quotas(context.Background(), false)
+	webErr = nil
+	if !errors.As(err, &webErr) {
+		t.Fatalf("Quotas() error = %v, want WebError", err)
+	}
 	httpErr = nil
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("Quotas() error = %v, want HTTPError status %d", err, http.StatusServiceUnavailable)
+	}
+}
+
+func TestClientDecodeAndTransportErrorsAreWebErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{"))
+	}))
+	client := &Client{baseURL: server.URL, httpClient: server.Client()}
+	_, err := client.Usage(context.Background(), "all")
+	server.Close()
+	var webErr *WebError
+	if !errors.As(err, &webErr) {
+		t.Fatalf("Usage() decode error = %v, want WebError", err)
+	}
+
+	_, err = client.Usage(context.Background(), "all")
+	webErr = nil
+	if !errors.As(err, &webErr) {
+		t.Fatalf("Usage() transport error = %v, want WebError", err)
 	}
 }
 

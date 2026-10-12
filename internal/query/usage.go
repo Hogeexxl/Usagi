@@ -34,7 +34,7 @@ func normalizeUsageInput(r DateRange, filter UsageFilter) (UsageFilter, error) {
 		}
 	}
 	filter.Agents = normalizeValues(filter.Agents)
-	filter.Models = normalizeValues(filter.Models)
+	filter.Models = normalizeModelSelections(filter.Models)
 	return filter, nil
 }
 
@@ -49,6 +49,22 @@ func normalizeValues(values []string) []string {
 	return slices.Compact(normalized)
 }
 
+func normalizeModelSelections(values []ModelSelection) []ModelSelection {
+	normalized := make([]ModelSelection, 0, len(values))
+	for _, value := range values {
+		if value.ProviderID != "" && value.Model != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	slices.SortFunc(normalized, func(a, b ModelSelection) int {
+		if c := cmp.Compare(a.ProviderID, b.ProviderID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
+	return slices.Compact(normalized)
+}
+
 func isRejected(row magpie.UsageRequest) bool {
 	return row.Rejected || (row.Provider == "" && row.Status >= 400)
 }
@@ -59,7 +75,14 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 		q.Agent = filter.Agents[0]
 	}
 	if len(filter.Models) == 1 {
-		q.Model = filter.Models[0]
+		q.Provider = filter.Models[0].ProviderID
+		q.Model = filter.Models[0].Model
+	}
+	modelSelections := make(map[ModelSelection]struct{}, len(filter.Models))
+	if len(filter.Models) > 1 {
+		for _, selection := range filter.Models {
+			modelSelections[selection] = struct{}{}
+		}
 	}
 	for {
 		page, err := s.upstream.UsageRequests(ctx, q)
@@ -73,8 +96,10 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 			if len(filter.Agents) > 1 && !slices.Contains(filter.Agents, row.Agent) {
 				continue
 			}
-			if len(filter.Models) > 1 && !slices.Contains(filter.Models, row.Model) {
-				continue
+			if len(filter.Models) > 1 {
+				if _, ok := modelSelections[ModelSelection{ProviderID: row.Provider, Model: row.Model}]; !ok {
+					continue
+				}
 			}
 			var ref SessionRef
 			var session magpie.Session

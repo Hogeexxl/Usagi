@@ -15,7 +15,10 @@ export type RevisionFeedOptions = {
   pollIntervalMs?: number;
 };
 
-export type RevisionListener = (tuple: RevisionTuple) => void;
+export type RevisionFeedEvent =
+  | { kind: "revision"; tuple: RevisionTuple }
+  | { kind: "epoch_reset"; tuple: RevisionTuple };
+export type RevisionListener = (event: RevisionFeedEvent) => void;
 export type RevisionErrorListener = (error: unknown) => void;
 
 const DEFAULT_POLL_INTERVAL = 60_000;
@@ -147,14 +150,24 @@ export class RevisionFeed {
 
   private accept(tuple: RevisionTuple, fromSse: boolean): void {
     const previous = this.tuple;
-    if (previous && (tuple.data_revision < previous.data_revision || tuple.status_revision < previous.status_revision)) return;
     if (fromSse) this.clearPolling();
+    if (previous && (tuple.data_revision < previous.data_revision || tuple.status_revision < previous.status_revision)) {
+      if (fromSse) void this.fetchRevision(false);
+      else {
+        this.tuple = tuple;
+        this.notify({ kind: "epoch_reset", tuple });
+      }
+      return;
+    }
     if (previous && tuple.data_revision === previous.data_revision && tuple.status_revision === previous.status_revision) {
-      for (const listener of this.listeners.keys()) listener(tuple);
       return;
     }
     this.tuple = tuple;
-    for (const listener of this.listeners.keys()) listener(tuple);
+    this.notify({ kind: "revision", tuple });
+  }
+
+  private notify(event: RevisionFeedEvent): void {
+    for (const listener of this.listeners.keys()) listener(event);
   }
 }
 

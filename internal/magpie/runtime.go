@@ -28,21 +28,101 @@ const (
 )
 
 type Runtime struct {
-	mu      sync.RWMutex
-	status  RuntimeStatus
-	client  *Client
-	cmd     *exec.Cmd
-	done    chan error
-	closing bool
-	started bool
-	baseURL string
-	webKey  string
+	mu          sync.RWMutex
+	status      RuntimeStatus
+	client      *Client
+	cmd         *exec.Cmd
+	done        chan error
+	closing     bool
+	started     bool
+	baseURL     string
+	webKey      string
+	nextSubID   uint64
+	subscribers map[uint64]*runtimeStatusSubscriber
+}
+
+type runtimeStatusSubscriber struct {
+	mu     sync.Mutex
+	queue  []RuntimeStatus
+	head   int
+	closed bool
+	wake   chan struct{}
+	done   chan struct{}
+	out    chan RuntimeStatus
+}
+
+func newRuntimeStatusSubscriber() *runtimeStatusSubscriber {
+	s := &runtimeStatusSubscriber{
+		wake: make(chan struct{}, 1),
+		done: make(chan struct{}),
+		out:  make(chan RuntimeStatus),
+	}
+	go s.run()
+	return s
+}
+
+func (s *runtimeStatusSubscriber) publish(status RuntimeStatus) {
+	s.mu.Lock()
+	if !s.closed {
+		s.queue = append(s.queue, status)
+	}
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *runtimeStatusSubscriber) close() {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.done)
+	}
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *runtimeStatusSubscriber) run() {
+	defer close(s.out)
+	for {
+		s.mu.Lock()
+		if s.head < len(s.queue) {
+			status := s.queue[s.head]
+			s.head++
+			if s.head == len(s.queue) {
+				s.queue = nil
+				s.head = 0
+			}
+			s.mu.Unlock()
+			select {
+			case s.out <- status:
+			case <-s.done:
+				return
+			}
+			continue
+		}
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return
+		}
+		select {
+		case <-s.wake:
+		case <-s.done:
+			return
+		}
+	}
 }
 
 func NewRuntime() *Runtime {
 	return &Runtime{
-		status: RuntimeStatusUnavailable,
-		done:   make(chan error, 1),
+		status:      RuntimeStatusUnavailable,
+		done:        make(chan error, 1),
+		subscribers: make(map[uint64]*runtimeStatusSubscriber),
 	}
 }
 
@@ -55,7 +135,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.started = true
 	r.closing = false
 	r.client = nil
-	r.status = RuntimeStatusStarting
+	r.setStatusLocked(RuntimeStatusStarting)
 	r.mu.Unlock()
 
 	binaryPath, err := locateMagpieBinary()
@@ -110,7 +190,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		r.mu.Lock()
 		r.client = nil
-		r.status = RuntimeStatusUnavailable
+		r.setStatusLocked(RuntimeStatusUnavailable)
 		r.mu.Unlock()
 		return err
 	}
@@ -126,7 +206,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.mu.Lock()
 		if !r.closing {
 			r.client = nil
-			r.status = RuntimeStatusUnavailable
+			r.setStatusLocked(RuntimeStatusUnavailable)
 		}
 		r.mu.Unlock()
 
@@ -141,7 +221,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return r.startFailedAfterSidecar(err)
 	}
 	httpClient := &http.Client{Jar: jar}
-	client := &Client{baseURL: baseURL, httpClient: httpClient}
+	client := NewClient(baseURL, httpClient)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -172,7 +252,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 					return r.startFailedAfterSidecar(errors.New("magpie web sidecar exited during startup"))
 				}
 				r.client = client
-				r.status = RuntimeStatusReady
+				r.setStatusLocked(RuntimeStatusReady)
 				r.mu.Unlock()
 				return nil
 			}
@@ -192,6 +272,29 @@ func (r *Runtime) Status() RuntimeStatus {
 	return r.status
 }
 
+func (r *Runtime) Subscribe() (<-chan RuntimeStatus, func()) {
+	r.mu.Lock()
+	if r.subscribers == nil {
+		r.subscribers = make(map[uint64]*runtimeStatusSubscriber)
+	}
+	r.nextSubID++
+	id := r.nextSubID
+	subscriber := newRuntimeStatusSubscriber()
+	r.subscribers[id] = subscriber
+	subscriber.publish(r.status)
+	r.mu.Unlock()
+
+	var once sync.Once
+	return subscriber.out, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.subscribers, id)
+			r.mu.Unlock()
+			subscriber.close()
+		})
+	}
+}
+
 func (r *Runtime) Client() (*Client, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -205,9 +308,9 @@ func (r *Runtime) Close() error {
 	r.mu.Lock()
 	r.closing = true
 	cmd := r.cmd
+	r.client = nil
+	r.setStatusLocked(RuntimeStatusUnavailable)
 	if cmd == nil {
-		r.client = nil
-		r.status = RuntimeStatusUnavailable
 		r.mu.Unlock()
 		return nil
 	}
@@ -261,9 +364,19 @@ func locateMagpieBinary() (string, error) {
 func (r *Runtime) startFailed(err error) error {
 	r.mu.Lock()
 	r.client = nil
-	r.status = RuntimeStatusUnavailable
+	r.setStatusLocked(RuntimeStatusUnavailable)
 	r.mu.Unlock()
 	return err
+}
+
+func (r *Runtime) setStatusLocked(status RuntimeStatus) {
+	if r.status == status {
+		return
+	}
+	r.status = status
+	for _, subscriber := range r.subscribers {
+		subscriber.publish(status)
+	}
 }
 
 func (r *Runtime) startFailedAfterSidecar(err error) error {

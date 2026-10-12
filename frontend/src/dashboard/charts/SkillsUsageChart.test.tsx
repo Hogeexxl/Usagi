@@ -4,13 +4,6 @@ import { describe, expect, it } from "vitest";
 import type { SkillDayDto, SkillsUsageResponse } from "../../data/types";
 import { SkillsUsageChart } from "./SkillsUsageChart";
 
-const range = {
-  key: "7d" as const,
-  start_ms: 0,
-  end_ms: 1,
-  timezone: "Asia/Shanghai",
-};
-
 function makeDay(date: string, skills: Array<[string, number]>): SkillDayDto {
   return {
     date,
@@ -25,7 +18,7 @@ function responseFromDays(
   days: SkillDayDto[],
   data_status: SkillsUsageResponse["data_status"] = "ready",
 ): SkillsUsageResponse {
-  return { range, data_revision: 1, data_status, days };
+  return { data_revision: 1, data_status, days };
 }
 
 function sevenDays(skillsByDay: Array<Array<[string, number]>>): SkillDayDto[] {

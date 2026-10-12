@@ -197,6 +197,7 @@ func sessionThreadFromQuery(session query.SessionUsage) SessionThreadView {
 		Key: ThreadKey{
 			Agent: session.Agent, SessionID: session.ID, ThreadID: session.ID,
 		},
+		Type:       ThreadMain,
 		Title:      session.Title,
 		Project:    session.Project,
 		FirstUsage: session.FirstUsage,
@@ -245,7 +246,57 @@ func (s *Service) Sessions(ctx context.Context, q ScopeQuery) (SessionListView, 
 	if err != nil {
 		return SessionListView{}, err
 	}
-	return SessionListView{Threads: projection.Threads}, nil
+	result := SessionListView{Items: make([]SessionListItemView, 0, len(projection.Threads))}
+	for index, thread := range projection.Threads {
+		if thread.Type != ThreadMain {
+			continue
+		}
+		rollup := projection.inclusiveRollup(index)
+		result.Items = append(result.Items, SessionListItemView{
+			Thread:         thread,
+			SelfUsage:      rollup.selfUsage,
+			SubagentUsage:  rollup.subagentUsage,
+			InclusiveUsage: rollup.inclusiveUsage,
+			SubagentCount:  rollup.subagentCount,
+		})
+	}
+	return result, nil
+}
+
+type sessionRollup struct {
+	selfUsage      UsageView
+	subagentUsage  UsageView
+	inclusiveUsage UsageView
+	subagentCount  int64
+	children       []int
+}
+
+func (p *threadProjection) inclusiveRollup(index int) sessionRollup {
+	thread := p.Threads[index]
+	rollup := sessionRollup{
+		selfUsage:      thread.Usage,
+		inclusiveUsage: thread.Usage,
+	}
+	if thread.Key.Agent != "claude" {
+		return rollup
+	}
+
+	indices := p.bySession[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}]
+	if thread.Type == ThreadMain {
+		for _, childIndex := range indices {
+			if p.Threads[childIndex].Type == ThreadSubagent {
+				rollup.children = append(rollup.children, childIndex)
+			}
+		}
+	} else if thread.Type == ThreadSubagent {
+		rollup.children = p.descendants(thread.Key, indices)
+	}
+	for _, childIndex := range rollup.children {
+		rollup.subagentUsage = mergeUsage(rollup.subagentUsage, p.Threads[childIndex].Usage)
+	}
+	rollup.inclusiveUsage = mergeUsage(rollup.selfUsage, rollup.subagentUsage)
+	rollup.subagentCount = int64(len(rollup.children))
+	return rollup
 }
 
 func (s *Service) SessionDetail(ctx context.Context, q ScopeQuery, key ThreadKey) (SessionDetailView, error) {
@@ -258,31 +309,14 @@ func (s *Service) SessionDetail(ctx context.Context, q ScopeQuery, key ThreadKey
 		return SessionDetailView{}, ErrThreadNotFound
 	}
 	thread := projection.Threads[index]
+	rollup := projection.inclusiveRollup(index)
 	detail := SessionDetailView{
-		Thread: thread, SelfUsage: thread.Usage, Children: []SessionThreadView{},
+		Thread: thread, SelfUsage: rollup.selfUsage, SubagentUsage: rollup.subagentUsage,
+		InclusiveUsage: rollup.inclusiveUsage, Children: make([]SessionThreadView, 0, len(rollup.children)),
 	}
-	if thread.Key.Agent != "claude" {
-		detail.InclusiveUsage = thread.Usage
-		return detail, nil
+	for _, childIndex := range rollup.children {
+		detail.Children = append(detail.Children, projection.Threads[childIndex])
 	}
-
-	indices := projection.bySession[threadSessionKey{Agent: key.Agent, SessionID: key.SessionID}]
-	if thread.Type == ThreadMain {
-		for _, childIndex := range indices {
-			child := projection.Threads[childIndex]
-			if child.Type == ThreadSubagent {
-				detail.Children = append(detail.Children, child)
-				detail.SubagentUsage = mergeUsage(detail.SubagentUsage, child.Usage)
-			}
-		}
-	} else if thread.Type == ThreadSubagent {
-		descendants := projection.descendants(key, indices)
-		for _, child := range descendants {
-			detail.Children = append(detail.Children, projection.Threads[child])
-			detail.SubagentUsage = mergeUsage(detail.SubagentUsage, projection.Threads[child].Usage)
-		}
-	}
-	detail.InclusiveUsage = mergeUsage(detail.SelfUsage, detail.SubagentUsage)
 	return detail, nil
 }
 

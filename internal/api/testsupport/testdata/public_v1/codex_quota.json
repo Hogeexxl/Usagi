@@ -1,0 +1,16 @@
+{
+  "status": "ready",
+  "five_hour": {
+    "used_percent": 2.0,
+    "remaining_percent": 98.3,
+    "limit_window_seconds": 18000,
+    "reset_at_ms": 1737044940000
+  },
+  "weekly": {
+    "used_percent": 25.0,
+    "remaining_percent": 75.0,
+    "limit_window_seconds": 604800,
+    "reset_at_ms": 1737120660000
+  },
+  "fetched_at_ms": 1737000000000
+}

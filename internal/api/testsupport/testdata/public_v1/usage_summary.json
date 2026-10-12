@@ -1,0 +1,31 @@
+{
+  "range": {
+    "key": "today",
+    "start_ms": 1736985600000,
+    "end_ms": 1737072000000,
+    "timezone": "Asia/Shanghai"
+  },
+  "data_revision": 41,
+  "usage": {
+    "input_tokens": 128000,
+    "cached_tokens": 64000,
+    "cache_write_tokens": null,
+    "uncached_input_tokens": null,
+    "output_tokens": 64000,
+    "reasoning_tokens": 1000,
+    "other_output_tokens": 200,
+    "total_tokens": 193200,
+    "cache_hit_rate": 0.983,
+    "estimated_cost": null,
+    "estimated_cost_status": "incomplete",
+    "session_count": 3,
+    "cost_incomplete_session_count": 1,
+    "complete_session_cost_per_million_tokens": null,
+    "session_health": {
+      "total_sessions": 3,
+      "complete_sessions": 2,
+      "incomplete_sessions": 1,
+      "error_sessions": 0
+    }
+  }
+}

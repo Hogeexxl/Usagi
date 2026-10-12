@@ -2,29 +2,28 @@ import { memo } from "react";
 
 import { projectDisplay } from "../shared/projectDisplay";
 import { DistributionDonutCard } from "./DistributionDonutCard";
-import { SkillsUsageChart } from "./SkillsUsageChart";
 import type { DashboardChartsView } from "./useDashboardChartsController";
 
 export const ChartSection = memo(function ChartSection({ view }: { view: DashboardChartsView }) {
   const modelItems = (view.models?.items ?? []).map((item) => ({
     id: item.model,
     label: item.model,
-    totalTokens: item.usage.total_tokens,
-    estimatedCost: item.usage.estimated_cost,
-    estimatedCostStatus: item.usage.estimated_cost_status,
+    totalTokens: item.usage.total,
+    cost: item.usage.cost,
+    unpriced: item.usage.unpriced,
   }));
   const projectItems = (view.projects?.items ?? []).map((item) => {
     const project = item.kind === "project"
-      ? { kind: "project" as const, project_name: item.project_name ?? item.project_path ?? "未识别项目", project_path: item.project_path ?? "" }
+      ? { kind: "project" as const, name: item.name, path: item.path }
       : { kind: item.kind as "projectless" | "unknown" };
     const label = projectDisplay(project);
     return {
-      id: item.kind === "project" ? item.project_path ?? label : item.kind,
+      id: item.kind === "project" ? item.path : item.kind,
       label,
-      title: item.project_path ?? undefined,
-      totalTokens: item.usage.total_tokens,
-      estimatedCost: item.usage.estimated_cost,
-      estimatedCostStatus: item.usage.estimated_cost_status,
+      title: item.kind === "project" ? item.path : undefined,
+      totalTokens: item.usage.total,
+      cost: item.usage.cost,
+      unpriced: item.usage.unpriced,
     };
   });
 
@@ -38,7 +37,6 @@ export const ChartSection = memo(function ChartSection({ view }: { view: Dashboa
       <div className="grid grid-cols-2 gap-4 max-[1279px]:grid-cols-1">
         <DistributionDonutCard title="模型分布" items={modelItems} />
         <DistributionDonutCard title="项目分布" items={projectItems} />
-        <SkillsUsageChart className="col-span-2 max-[1279px]:col-span-1" response={view.skills} />
       </div>
     </section>
   );

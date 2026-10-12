@@ -1,5 +1,4 @@
 import { formatCost, formatInteger, formatRatio, type FormattedValue } from "../format";
-import type { SessionModelEffortDto } from "../../data/types";
 
 const sessionIntegerFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, useGrouping: true });
 
@@ -11,16 +10,16 @@ export function formatSessionProject(project: string | null): string {
   return project && project.trim() ? project : "未识别项目";
 }
 
-export function formatSessionIdForDisplay(source: string, id: string): string {
-  return source === "antigravity" && id.startsWith("antigravity:") ? id.slice("antigravity:".length) : id;
+export function formatSessionIdForDisplay(agent: string, id: string): string {
+  return agent === "antigravity" && id.startsWith("antigravity:") ? id.slice("antigravity:".length) : id;
 }
 
-export function formatSessionModel(models: SessionModelEffortDto[]): FormattedValue {
+export function formatSessionModel(models: Array<{ model: string; effort: string | null }>): FormattedValue {
   if (models.length === 0) return { text: "unknown", title: "unknown", accessibleName: "unknown" };
-  const first = formatModelWithReasoningEffort(models[0].model, models[0].reasoning_effort, false);
+  const first = formatModelWithReasoningEffort(models[0].model, models[0].effort, false);
   const text = models.length === 1 ? first : `${first} +${models.length - 1}`;
   const full = models
-    .map(({ model, reasoning_effort }) => formatModelWithReasoningEffort(model, reasoning_effort, false))
+    .map(({ model, effort }) => formatModelWithReasoningEffort(model, effort, false))
     .join(", ");
   return { text, title: full, accessibleName: full };
 }

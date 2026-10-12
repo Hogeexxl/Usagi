@@ -3,19 +3,18 @@ import { Moon, RefreshCw, Sun } from "lucide-react";
 
 import { createRevisionFeed, type RevisionFeed } from "../data/revisionFeed";
 import type { ServiceClient } from "../data/serviceClient";
-import { ActionSwapIcon, ActionSwapText } from "../ui/beui/action-swap";
+import { ActionSwapIcon } from "../ui/beui/action-swap";
 import { Button } from "../ui/beui/button";
 import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { ChartSection } from "./charts/ChartSection";
 import { useDashboardChartsController } from "./charts/useDashboardChartsController";
 import { FilterControls } from "./FilterControls";
-import { formatLastSyncTime } from "./format";
 import { MetricGrid } from "./MetricGrid";
 import { RangeSelector } from "./RangeSelector";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "./scope";
 import { ServiceButton } from "./ServiceButton";
 import { SessionSection } from "./session/SessionSection";
-import { createSourceDisplayLookup } from "./shared/sourceDisplay";
+import { createAgentDisplayLookup } from "./shared/agentDisplay";
 import { useSessionDetailController } from "./session/useSessionDetailController";
 import { useSessionTableController } from "./session/useSessionTableController";
 import { UpdateButton } from "./UpdateButton";
@@ -28,14 +27,6 @@ const LazySessionDetailDrawer = lazy(() =>
 
 function loadErrorMessage(loadState: string): string | null {
   return loadState === "error" ? "数据加载失败" : null;
-}
-
-function refreshErrorMessage(refreshState: string, errorCode?: string): string | null {
-  if (refreshState === "source_changed") return "数据源已变化";
-  if (refreshState === "tracking_error") return "同步状态获取失败";
-  if (refreshState !== "failed") return null;
-  if (errorCode === "FORBIDDEN" || errorCode === "FORBIDDEN_HOST" || errorCode === "FORBIDDEN_ORIGIN") return "无法发起同步";
-  return "同步失败";
 }
 
 type DashboardPageOptions = DashboardControllerOptions & { serviceClient?: ServiceClient };
@@ -53,26 +44,41 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
   const quota = useDashboardQuotaController({ client: options?.client });
   const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const sessionScope = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.sessions, view.range, view.filters);
-  const sessions = useSessionTableController(sessionScope.range, sessionScope.filters, { client: options?.client, revisionFeed: feedRef.current });
+  const sessions = useSessionTableController(sessionScope.range, sessionScope.filters, {
+    client: options?.client,
+    revisionFeed: feedRef.current,
+    reloadKey: view.reload_key,
+  });
   const detail = useSessionDetailController(sessionScope.range, sessionScope.filters, {
     client: options?.client,
     revisionFeed: feedRef.current,
     dataRevision: sessions.data_revision,
+    sessionsReady: sessions.load_state === "ready",
     onStaleRevision: sessions.retry_load,
   });
-  const charts = useDashboardChartsController({ range: view.range, filters: view.filters, dataRevision: view.data_revision, client: options?.client });
-  const sourceDisplay = useMemo(
-    () => createSourceDisplayLookup(view.filter_options?.sources),
-    [view.filter_options?.sources],
+  const charts = useDashboardChartsController({
+    range: view.range,
+    filters: view.filters,
+    dataRevision: view.data_revision,
+    reloadKey: view.reload_key,
+    epochResetKey: view.epoch_reset_key,
+    client: options?.client,
+  });
+  const agentDisplay = useMemo(
+    () => createAgentDisplayLookup(view.filter_options?.agents),
+    [view.filter_options?.agents],
   );
+  const lastReloadKeyRef = useRef(view.reload_key);
+  useEffect(() => {
+    if (lastReloadKeyRef.current === view.reload_key) return;
+    lastReloadKeyRef.current = view.reload_key;
+    if (detail.open) detail.retry_detail();
+  }, [detail.open, detail.retry_detail, view.reload_key]);
   useEffect(() => () => feedRef.current?.dispose(), []);
 
   const loading = view.load_state === "loading";
   const loadError = loadErrorMessage(view.load_state);
-  const refreshError = refreshErrorMessage(view.refresh_state, view.error_code);
-  const refreshEnabled = view.error_code !== "STATUS_NOT_READY" && (view.refresh_state === "idle" || view.refresh_state === "failed");
-  const refreshAnimating = view.refresh_state === "requesting" || view.refresh_state === "running";
-  const syncText = formatLastSyncTime(view.last_scan_completed_at_ms);
+  const refreshAnimating = view.refreshing;
 
   return (
     <div className="dashboard-shell bg-background text-foreground">
@@ -84,16 +90,12 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
               <UpdateButton client={options?.client} />
             </div>
             <div className="dashboard-sync-group">
-              <span className="flex items-center whitespace-nowrap text-sm text-muted-foreground">
-                上次同步：
-                <ActionSwapText key={syncText} value={syncText} animation="blur">{syncText}</ActionSwapText>
-              </span>
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label="同步数据"
-                title="同步数据"
-                disabled={!refreshEnabled}
+                aria-label="刷新数据"
+                title="刷新数据"
+                disabled={view.refreshing}
                 onClick={view.request_refresh}
               >
                 <RefreshCw className={`h-4 w-4${refreshAnimating ? " animate-spin" : ""}`} />
@@ -137,34 +139,28 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 <Button variant="ghost" size="sm" onClick={view.retry_load}>重试</Button>
               </div>
             ) : null}
-            {refreshError ? (
-              <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
-                <span>{refreshError}</span>
-                {view.refresh_state === "tracking_error" ? <Button variant="ghost" size="sm" onClick={view.retry_refresh_status}>重试</Button> : null}
-              </div>
-            ) : null}
           </section>
 
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
             <MetricGrid
               usage={view.metrics}
+              sessionCount={view.session_count}
               modelFilterActive={view.modelFilterActive}
-              codexQuota={quota.codex}
-              antigravityQuota={quota.antigravity}
+              quota={quota.quota}
               onRefreshQuota={quota.refresh}
               quotaRefreshing={quota.refreshing}
               quotaRefreshError={quota.refresh_error}
               quotaRefreshAvailable={quota.refresh_available}
             />
           </section>
-          <SessionSection view={sessions} detail={detail} sourceDisplay={sourceDisplay} />
+          <SessionSection view={sessions} detail={detail} agentDisplay={agentDisplay} />
           <ChartSection view={charts} />
         </div>
-        <div className="sr-only" aria-live="polite">{loading ? "数据加载中…" : loadError ?? refreshError}</div>
+        <div className="sr-only" aria-live="polite">{loading ? "数据加载中…" : loadError}</div>
       </main>
       {detail.open || detail.selected_row ? (
         <Suspense fallback={null}>
-          <LazySessionDetailDrawer view={detail} timezone={sessions.timezone} sourceDisplay={sourceDisplay} />
+          <LazySessionDetailDrawer view={detail} timezone={sessions.timezone} agentDisplay={agentDisplay} />
         </Suspense>
       ) : null}
     </div>

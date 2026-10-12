@@ -6,8 +6,7 @@ import { ActionSwapIcon } from "../ui/beui/action-swap";
 import { AnimatedToastStack, useAnimatedToastStack } from "../ui/beui/animated-toast-stack";
 import { Button } from "../ui/beui/button";
 import { useThemeToggle } from "../ui/beui/theme-toggle";
-import { formatLastSyncTime } from "../dashboard/format";
-import { AccountQuotaCard, CacheHitMetric, EstimatedCostMetric, SkeletonCard, TotalTokenMetric } from "../dashboard/MetricGrid";
+import { AccountQuotaCard, CacheHitMetric, CostMetric, SkeletonCard, TotalTokenMetric } from "../dashboard/MetricGrid";
 import { RangeSelector } from "../dashboard/RangeSelector";
 import {
   useDashboardController,
@@ -28,14 +27,13 @@ export type TrayPanelViewModel = Pick<
   DashboardViewModel,
   | "range"
   | "metrics"
+  | "session_count"
   | "load_state"
-  | "last_scan_completed_at_ms"
-  | "refresh_state"
+  | "refreshing"
   | "error_code"
   | "select_range"
   | "request_refresh"
   | "retry_load"
-  | "retry_refresh_status"
 >;
 
 export type TrayPanelViewProps = {
@@ -50,22 +48,10 @@ function loadErrorMessage(loadState: TrayPanelViewModel["load_state"]): string |
   return loadState === "error" ? "数据加载失败" : null;
 }
 
-function refreshErrorMessage(refreshState: TrayPanelViewModel["refresh_state"], errorCode?: string): string | null {
-  if (refreshState === "source_changed") return "数据源已变化";
-  if (refreshState === "tracking_error") return "同步状态获取失败";
-  if (refreshState !== "failed") return null;
-  if (errorCode === "FORBIDDEN" || errorCode === "FORBIDDEN_HOST" || errorCode === "FORBIDDEN_ORIGIN") return "无法发起同步";
-  return "同步失败";
-}
-
 export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }: TrayPanelViewProps) {
   const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const loadError = loadErrorMessage(view.load_state);
-  const refreshError = refreshErrorMessage(view.refresh_state, view.error_code);
-  const refreshEnabled =
-    view.error_code !== "STATUS_NOT_READY" &&
-    (view.refresh_state === "idle" || view.refresh_state === "failed");
-  const refreshAnimating = view.refresh_state === "requesting" || view.refresh_state === "running";
+  const refreshAnimating = view.refreshing;
 
   return (
     <div className="flex w-full flex-col gap-4 p-4">
@@ -80,13 +66,13 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
           Dashboard
           <ArrowUpRight className="h-4 w-4" />
         </Button>
-        <div className="ml-auto text-xs text-muted-foreground">上次同步：{formatLastSyncTime(view.last_scan_completed_at_ms)}</div>
         <Button
           variant="ghost"
           size="icon"
-          aria-label="刷新"
-          title="刷新"
-          disabled={!refreshEnabled}
+          className="ml-auto"
+          aria-label="刷新数据"
+          title="刷新数据"
+          disabled={view.refreshing}
           onClick={view.request_refresh}
         >
           <RefreshCw className={`h-4 w-4${refreshAnimating ? " animate-spin" : ""}`} />
@@ -131,13 +117,6 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
           <Button variant="ghost" size="sm" onClick={view.retry_load}>重试</Button>
         </div>
       ) : null}
-      {refreshError ? (
-        <div className="flex items-center gap-4 text-xs text-muted-foreground" aria-live="polite">
-          <span>{refreshError}</span>
-          {view.refresh_state === "tracking_error" ? <Button variant="ghost" size="sm" onClick={view.retry_refresh_status}>重试</Button> : null}
-        </div>
-      ) : null}
-
       <div className="grid grid-cols-[304px_304px] gap-4 [&>*]:col-span-1" aria-label={view.metrics ? "KPI 指标" : "KPI 加载中"}>
         {view.metrics === null ? (
           <SkeletonCard />
@@ -145,14 +124,12 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
           <TotalTokenMetric usage={view.metrics} />
         )}
         <AccountQuotaCard
-          codex={quota.codex}
-          antigravity={quota.antigravity}
+          quota={quota.quota}
           onRefresh={quota.refresh}
           refreshing={quota.refreshing}
           refreshError={quota.refresh_error}
           refreshAvailable={quota.refresh_available}
           wide
-          showGemini={false}
         />
         {view.metrics === null ? (
           <>
@@ -162,7 +139,7 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
         ) : (
           <>
             <CacheHitMetric usage={view.metrics} glare={false} />
-            <EstimatedCostMetric usage={view.metrics} glare={false} />
+            <CostMetric usage={view.metrics} glare={false} />
           </>
         )}
       </div>
