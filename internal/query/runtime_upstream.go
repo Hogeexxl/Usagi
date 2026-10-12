@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"sync"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
@@ -12,6 +13,10 @@ type ClientProvider interface {
 
 type runtimeUpstream struct {
 	provider ClientProvider
+
+	mu         sync.Mutex
+	last       *magpie.Client
+	generation uint64
 }
 
 func NewRuntimeService(provider ClientProvider) *Service {
@@ -23,7 +28,28 @@ func (u *runtimeUpstream) current() (*magpie.Client, error) {
 	if !ready || client == nil {
 		return nil, ErrUpstreamUnavailable
 	}
+	u.observe(client)
 	return client, nil
+}
+
+// Generation changes whenever the Runtime hands out a different Magpie client,
+// so caches built from the previous client can be dropped.
+func (u *runtimeUpstream) Generation() uint64 {
+	if client, ready := u.provider.Client(); ready && client != nil {
+		u.observe(client)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.generation
+}
+
+func (u *runtimeUpstream) observe(client *magpie.Client) {
+	u.mu.Lock()
+	if client != u.last {
+		u.last = client
+		u.generation++
+	}
+	u.mu.Unlock()
 }
 
 func (u *runtimeUpstream) Usage(ctx context.Context, period string) (magpie.UsageSummary, error) {
@@ -40,6 +66,14 @@ func (u *runtimeUpstream) UsageRequests(ctx context.Context, q magpie.UsageReque
 		return magpie.UsageRequestsPage{}, err
 	}
 	return client.UsageRequests(ctx, q)
+}
+
+func (u *runtimeUpstream) UsageDayDigests(ctx context.Context, from, to string) ([]magpie.UsageDayDigest, error) {
+	client, err := u.current()
+	if err != nil {
+		return nil, err
+	}
+	return client.UsageDayDigests(ctx, from, to)
 }
 
 func (u *runtimeUpstream) Sessions(ctx context.Context, limit int) (magpie.SessionsResponse, error) {

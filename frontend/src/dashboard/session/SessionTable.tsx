@@ -50,10 +50,10 @@ export function SessionTable({
   onSort,
   agentDisplay,
 }: SessionTableProps) {
+  // A refresh keeps the current rows in place; only empty loads show skeletons.
   const loading =
     loadState === "initial" ||
     loadState === "loading" ||
-    loadState === "refreshing" ||
     pageState === "loading";
   const tableHeight =
     rows.length === 0

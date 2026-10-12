@@ -129,14 +129,16 @@ export function useSessionTableController(
     setState(value);
   }, []);
 
-  const loadSessions = useCallback((targetRange: DashboardRange, targetFilters: DashboardFilters, force = false) => {
+  const loadSessions = useCallback((targetRange: DashboardRange, targetFilters: DashboardFilters) => {
     const canonical = canonicalDashboardFilters(targetFilters);
     const targetKey = dashboardQueryKey(targetRange, canonical);
     requestAbortRef.current?.abort();
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const generation = ++requestGenerationRef.current;
-    const previous = force ? null : snapshotsRef.current.get(targetKey) ?? null;
+    // Forced reloads (revision, manual refresh, retry) keep the cached rows on
+    // screen until the new snapshot replaces them; epoch resets clear the cache first.
+    const previous = snapshotsRef.current.get(targetKey) ?? null;
     if (targetKey === dashboardQueryKey(stateRef.current.range, stateRef.current.filters)) {
       commit((current) => ({
         ...current,
@@ -212,7 +214,7 @@ export function useSessionTableController(
 
   const retryLoad = useCallback(() => {
     const current = stateRef.current;
-    loadSessions(current.range, current.filters, true);
+    loadSessions(current.range, current.filters);
   }, [loadSessions]);
 
   useEffect(() => {
@@ -238,7 +240,7 @@ export function useSessionTableController(
     if (reloadKeyRef.current === reloadKey) return;
     reloadKeyRef.current = reloadKey;
     const current = stateRef.current;
-    loadSessions(current.range, current.filters, true);
+    loadSessions(current.range, current.filters);
   }, [loadSessions, options.reloadKey]);
 
   useEffect(() => {
@@ -257,11 +259,11 @@ export function useSessionTableController(
           page_state: "idle",
           error_code: undefined,
         }));
-        loadSessions(currentRange, currentFilters, true);
+        loadSessions(currentRange, currentFilters);
         return;
       }
       if (current.snapshot && event.tuple.data_revision <= current.snapshot.data_revision) return;
-      loadSessions(current.range, current.filters, true);
+      loadSessions(current.range, current.filters);
     }, (error: unknown) => {
       if (isAbortError(error)) return;
       commit((current) => ({ ...current, load_state: "error", error_code: "HTTP_ERROR" }));

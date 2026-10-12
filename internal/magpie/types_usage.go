@@ -119,6 +119,14 @@ type UsageRequestsPage struct {
 	UsageTotals
 }
 
+// UsageDayDigest fingerprints one local day of Magpie's usage series. Any row
+// change that moves that day's totals or per-agent/model breakdown changes it.
+type UsageDayDigest struct {
+	Day    string // YYYY-MM-DD in Magpie's local time
+	Calls  int
+	Digest [32]byte
+}
+
 type UsageRequestsQuery struct {
 	Period   string
 	Day      string

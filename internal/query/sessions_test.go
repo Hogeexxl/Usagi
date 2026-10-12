@@ -16,6 +16,7 @@ type sessionUpstream struct {
 	sessions func(context.Context, int) (magpie.SessionsResponse, error)
 	session  func(context.Context, string) (magpie.Session, error)
 	requests func(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error)
+	digests  func(context.Context, string, string) ([]magpie.UsageDayDigest, error)
 	stats    func(context.Context, int) (magpie.SessionStats, error)
 	quotas   func(context.Context, bool) (magpie.QuotasResponse, error)
 	overview func(context.Context, magpie.SessionOverviewQuery) (magpie.SessionOverview, error)
@@ -35,6 +36,13 @@ func (u *sessionUpstream) SessionOverview(ctx context.Context, q magpie.SessionO
 
 func (u *sessionUpstream) UsageRequests(ctx context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
 	return u.requests(ctx, q)
+}
+
+func (u *sessionUpstream) UsageDayDigests(ctx context.Context, from, to string) ([]magpie.UsageDayDigest, error) {
+	if u.digests == nil {
+		return nil, magpie.ErrDayDigestsUnavailable
+	}
+	return u.digests(ctx, from, to)
 }
 
 func (u *sessionUpstream) Sessions(ctx context.Context, limit int) (magpie.SessionsResponse, error) {
@@ -162,11 +170,12 @@ func TestProject(t *testing.T) {
 	ctx := context.Background()
 	const cwd = "/workspace/notes/../Usagi/"
 	calls := map[string]int{}
+	projectlessCwd := ""
 	u := &sessionUpstream{
 		sessions: func(context.Context, int) (magpie.SessionsResponse, error) {
 			return magpie.SessionsResponse{Sessions: []magpie.Session{
 				{Agent: "codex", ID: "known", Cwd: cwd},
-				{Agent: "codex", ID: "projectless"},
+				{Agent: "codex", ID: "projectless", Cwd: projectlessCwd},
 			}}, nil
 		},
 		session: func(_ context.Context, key string) (magpie.Session, error) {
@@ -218,8 +227,21 @@ func TestProject(t *testing.T) {
 	if _, _, err := s.newWorkspace().resolveSession(ctx, magpie.UsageRequest{Agent: "codex", Session: "historical"}); err != nil {
 		t.Fatal(err)
 	}
-	if calls["codex:historical"] != 2 {
-		t.Fatal("new workspace reused an earlier query's historical memo")
+	if calls["codex:historical"] != 1 {
+		t.Fatal("new workspace repeated a lookup the unchanged snapshot already answered")
+	}
+	if _, err := s.RefreshSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.newWorkspace().resolveSession(ctx, magpie.UsageRequest{Agent: "codex", Session: "historical"}); err != nil || calls["codex:historical"] != 1 {
+		t.Fatalf("unchanged snapshot refresh dropped lookups: %v, calls %v", err, calls)
+	}
+	projectlessCwd = "/now-a-project"
+	if _, err := s.RefreshSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.newWorkspace().resolveSession(ctx, magpie.UsageRequest{Agent: "codex", Session: "historical"}); err != nil || calls["codex:historical"] != 2 {
+		t.Fatalf("changed snapshot kept stale lookups: %v, calls %v", err, calls)
 	}
 }
 
@@ -284,11 +306,14 @@ func TestSessions(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got.Sessions, want) {
 		t.Fatalf("Sessions = %+v, %v; want %+v", got, err, want)
 	}
+	if _, err := s.RefreshSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
 	q.Filter.Projects = []ProjectSelection{{Kind: ProjectKindProject, Path: "/new"}, {Kind: ProjectKindUnknown}}
 	known.Title, known.Cwd = "new", "/new"
 	known.Project = ProjectRef{Kind: ProjectKindProject, Path: "/new", Name: "new"}
 	got, err = s.Sessions(ctx, q)
-	if err != nil || !reflect.DeepEqual(got.Sessions, []SessionUsage{known, unknown}) || refreshes != 2 || !reflect.DeepEqual(events, []string{"refresh", "requests", "refresh", "requests"}) {
+	if err != nil || !reflect.DeepEqual(got.Sessions, []SessionUsage{known, unknown}) || refreshes != 2 || !reflect.DeepEqual(events, []string{"refresh", "requests", "refresh"}) {
 		t.Fatalf("Sessions after refresh/filter = %+v, %v, refreshes %d, events %v", got, err, refreshes, events)
 	}
 }

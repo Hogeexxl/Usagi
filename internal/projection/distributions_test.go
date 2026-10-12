@@ -28,13 +28,7 @@ func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
 		requests = append(requests, magpie.UsageRequestsQuery{
 			Provider: provider, Model: model, Period: r.URL.Query().Get("period"),
 		})
-		var matching []magpie.UsageRequest
-		for _, row := range rows {
-			if row.Provider == provider && row.Model == model {
-				matching = append(matching, row)
-			}
-		}
-		if err := json.NewEncoder(w).Encode(magpie.UsageRequestsPage{Rows: matching, Total: len(matching)}); err != nil {
+		if err := json.NewEncoder(w).Encode(magpie.UsageRequestsPage{Rows: rows, Total: len(rows)}); err != nil {
 			t.Errorf("encode usage page: %v", err)
 		}
 	}))
@@ -42,7 +36,7 @@ func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
 
 	client := magpie.NewClient(upstream.URL, upstream.Client())
 	service := NewService(query.NewService(client))
-	rangeValue := query.DateRange{From: "2026-10-01", To: "2026-10-11"}
+	rangeValue := query.DateRange{From: "2026-10-11", To: "2026-10-11"}
 	for _, test := range []struct {
 		provider string
 		input    int64
@@ -58,12 +52,14 @@ func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
 			t.Fatalf("ModelDistribution(%s/gpt-x) = %+v, %v", test.provider, view, err)
 		}
 	}
+	// The day is fetched once, unfiltered (a digest probe plus one page), and
+	// both provider selections are split from the cached rows.
 	if len(requests) != 2 {
 		t.Fatalf("UsageRequests query count = %d, want 2", len(requests))
 	}
-	for index, provider := range []string{"provider-a", "provider-b"} {
-		if requests[index].Provider != provider || requests[index].Model != "gpt-x" || requests[index].Period != "2026-10-01..2026-10-11" {
-			t.Fatalf("UsageRequests query %d = %+v", index, requests[index])
+	for index, request := range requests {
+		if request.Provider != "" || request.Model != "" || request.Period != "2026-10-11..2026-10-11" {
+			t.Fatalf("UsageRequests query %d = %+v", index, request)
 		}
 	}
 }

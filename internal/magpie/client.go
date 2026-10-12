@@ -1,13 +1,16 @@
 package magpie
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 type Client struct {
@@ -19,6 +22,10 @@ type Client struct {
 func NewClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{baseURL: baseURL, httpClient: httpClient}
 }
+
+// ErrDayDigestsUnavailable reports a Magpie that does not return a per-day
+// usage series for the requested window.
+var ErrDayDigestsUnavailable = errors.New("magpie usage series is not bucketed by day")
 
 type HTTPError struct {
 	StatusCode int
@@ -101,6 +108,59 @@ func (c *Client) UsageRequests(ctx context.Context, q UsageRequestsQuery) (Usage
 		return UsageRequestsPage{}, err
 	}
 	return page, nil
+}
+
+// UsageDayDigests reads Magpie's per-day chart series for an inclusive local
+// date window and fingerprints each day. Magpie only buckets by day for windows
+// up to 60 days, so callers must chunk longer spans.
+func (c *Client) UsageDayDigests(ctx context.Context, from, to string) ([]UsageDayDigest, error) {
+	query := url.Values{"period": {from + ".." + to}, "limit": {"1"}}
+	var page struct {
+		Bucket string            `json:"bucket"`
+		Series []json.RawMessage `json:"series"`
+	}
+	if err := c.getJSON(ctx, "/api/usage/requests", query, &page); err != nil {
+		return nil, err
+	}
+	if page.Bucket != "day" {
+		return nil, ErrDayDigestsUnavailable
+	}
+	digests := make([]UsageDayDigest, 0, len(page.Series))
+	for _, raw := range page.Series {
+		digest, err := usageDayDigest(raw)
+		if err != nil {
+			return nil, wrapWebError(err)
+		}
+		digests = append(digests, digest)
+	}
+	return digests, nil
+}
+
+func usageDayDigest(raw json.RawMessage) (UsageDayDigest, error) {
+	var point struct {
+		Time  time.Time `json:"time"`
+		Calls int       `json:"calls"`
+	}
+	if err := json.Unmarshal(raw, &point); err != nil {
+		return UsageDayDigest{}, err
+	}
+	// Re-encode through a generic value so key order and whitespace cannot
+	// change the digest; json.Number keeps numbers byte-exact.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return UsageDayDigest{}, err
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return UsageDayDigest{}, err
+	}
+	return UsageDayDigest{
+		Day:    point.Time.Format(time.DateOnly),
+		Calls:  point.Calls,
+		Digest: sha256.Sum256(canonical),
+	}, nil
 }
 
 func (c *Client) Quotas(ctx context.Context, asked bool) (QuotasResponse, error) {

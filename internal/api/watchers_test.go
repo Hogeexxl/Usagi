@@ -27,8 +27,18 @@ type watcherTestQuery struct {
 	mu             sync.Mutex
 	usageResults   []usageResult
 	sessionResults []sessionResult
+	rowsChanged    []bool
 	usageCalls     int
 	sessionCalls   int
+	rowCalls       []bool
+}
+
+func (q *watcherTestQuery) RefreshUsageRows(_ context.Context, forceRecent bool) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	changed := len(q.rowCalls) < len(q.rowsChanged) && q.rowsChanged[len(q.rowCalls)]
+	q.rowCalls = append(q.rowCalls, forceRecent)
+	return changed, nil
 }
 
 func (q *watcherTestQuery) UsageSnapshot(context.Context) (magpie.UsageSummary, error) {

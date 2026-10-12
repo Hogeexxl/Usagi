@@ -222,7 +222,13 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	requestMu.Lock()
 	failUsageRequests = true
 	requestMu.Unlock()
-	upstreamFailed := request(server, http.MethodGet, "/api/usage/summary?range=today")
+	// Cached days keep serving through a Magpie Web failure; an uncached day
+	// still surfaces it.
+	cached := request(server, http.MethodGet, "/api/usage/summary?range=today")
+	if cached.Code != http.StatusOK || !strings.Contains(cached.Body.String(), `"input":12`) {
+		t.Fatalf("cached summary during Magpie Web failure = %d %s, want cached rows", cached.Code, cached.Body.String())
+	}
+	upstreamFailed := request(server, http.MethodGet, "/api/usage/summary?range=custom&from=2020-01-01&to=2020-01-01")
 	if upstreamFailed.Code != http.StatusBadGateway || !strings.Contains(upstreamFailed.Body.String(), ErrorUpstreamFailed) {
 		t.Fatalf("Magpie Web failure response = %d %s, want 502 %s", upstreamFailed.Code, upstreamFailed.Body.String(), ErrorUpstreamFailed)
 	}

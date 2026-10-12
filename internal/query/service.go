@@ -15,6 +15,7 @@ import (
 type upstream interface {
 	Usage(context.Context, string) (magpie.UsageSummary, error)
 	UsageRequests(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error)
+	UsageDayDigests(context.Context, string, string) ([]magpie.UsageDayDigest, error)
 	Sessions(context.Context, int) (magpie.SessionsResponse, error)
 	Session(context.Context, string) (magpie.Session, error)
 	SessionStats(context.Context, int) (magpie.SessionStats, error)
@@ -23,6 +24,11 @@ type upstream interface {
 }
 
 var ErrUpstreamUnavailable = errors.New("query: upstream unavailable")
+
+// generational is implemented by upstreams whose Magpie client can be replaced.
+type generational interface {
+	Generation() uint64
+}
 
 type SessionRefreshFact struct {
 	Agent string
@@ -35,9 +41,14 @@ type SessionRefreshFact struct {
 
 type Service struct {
 	upstream   upstream
+	store      *usageStore
 	snapshotMu sync.RWMutex
 	refreshMu  sync.Mutex
 	snapshot   *sessionSnapshot
+	loaded     bool
+	facts      []SessionRefreshFact
+	lookups    *sessionLookups
+	generation uint64
 }
 
 type sessionKey struct {
@@ -53,7 +64,12 @@ func NewService(client *magpie.Client) *Service {
 }
 
 func newService(client upstream) *Service {
-	return &Service{upstream: client, snapshot: &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)}}
+	return &Service{
+		upstream: client,
+		store:    newUsageStore(client),
+		snapshot: &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)},
+		lookups:  newSessionLookups(),
+	}
 }
 
 func (s *Service) Refresh(ctx context.Context) error {
@@ -61,7 +77,29 @@ func (s *Service) Refresh(ctx context.Context) error {
 	return err
 }
 
+// syncGeneration drops every cache built from a Magpie client the Runtime has
+// since replaced.
+func (s *Service) syncGeneration() {
+	source, ok := s.upstream.(generational)
+	if !ok {
+		return
+	}
+	generation := source.Generation()
+	s.snapshotMu.Lock()
+	if generation == s.generation {
+		s.snapshotMu.Unlock()
+		return
+	}
+	s.generation = generation
+	s.loaded = false
+	s.facts = nil
+	s.lookups = newSessionLookups()
+	s.snapshotMu.Unlock()
+	s.store.reset()
+}
+
 func (s *Service) RefreshSessions(ctx context.Context) ([]SessionRefreshFact, error) {
+	s.syncGeneration()
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
 
@@ -98,8 +136,41 @@ func (s *Service) RefreshSessions(ctx context.Context) ([]SessionRefreshFact, er
 	})
 	s.snapshotMu.Lock()
 	s.snapshot = snapshot
+	s.loaded = true
+	if !slices.EqualFunc(s.facts, facts, sessionFactEqual) {
+		// Sessions that missed the old snapshot may now resolve differently.
+		s.lookups = newSessionLookups()
+	}
+	s.facts = facts
 	s.snapshotMu.Unlock()
 	return facts, nil
+}
+
+func sessionFactEqual(a, b SessionRefreshFact) bool {
+	return a.Agent == b.Agent && a.ID == b.ID && a.Title == b.Title && a.Cwd == b.Cwd &&
+		a.Start.Equal(b.Start) && a.Last.Equal(b.Last)
+}
+
+// ensureSessions loads the session snapshot once; the session watcher keeps it
+// current afterwards, so queries do not re-download every session.
+func (s *Service) ensureSessions(ctx context.Context) error {
+	s.syncGeneration()
+	s.snapshotMu.RLock()
+	loaded := s.loaded
+	s.snapshotMu.RUnlock()
+	if loaded {
+		return nil
+	}
+	_, err := s.RefreshSessions(ctx)
+	return err
+}
+
+// RefreshUsageRows brings cached request rows in line with Magpie and reports
+// whether any cached row changed. forceRecent refetches today and yesterday
+// even when their per-day digests did not move.
+func (s *Service) RefreshUsageRows(ctx context.Context, forceRecent bool) (bool, error) {
+	s.syncGeneration()
+	return s.store.refresh(ctx, forceRecent)
 }
 
 func (s *Service) UsageSnapshot(ctx context.Context) (magpie.UsageSummary, error) {

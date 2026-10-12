@@ -3,7 +3,6 @@ package query
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"slices"
 	"time"
 
@@ -70,33 +69,24 @@ func isRejected(row magpie.UsageRequest) bool {
 }
 
 func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilter, workspace *queryWorkspace, visit func(magpie.UsageRequest, SessionRef, magpie.Session, ProjectRef)) error {
-	q := magpie.UsageRequestsQuery{Period: r.From + ".." + r.To, Limit: 500}
-	if len(filter.Agents) == 1 {
-		q.Agent = filter.Agents[0]
-	}
-	if len(filter.Models) == 1 {
-		q.Provider = filter.Models[0].ProviderID
-		q.Model = filter.Models[0].Model
+	s.syncGeneration()
+	buckets, err := s.store.rows(ctx, r.From, r.To)
+	if err != nil {
+		return err
 	}
 	modelSelections := make(map[ModelSelection]struct{}, len(filter.Models))
-	if len(filter.Models) > 1 {
-		for _, selection := range filter.Models {
-			modelSelections[selection] = struct{}{}
-		}
+	for _, selection := range filter.Models {
+		modelSelections[selection] = struct{}{}
 	}
-	for {
-		page, err := s.upstream.UsageRequests(ctx, q)
-		if err != nil {
-			return fmt.Errorf("query: usage requests: %w", err)
-		}
-		for _, row := range page.Rows {
+	for _, bucket := range buckets {
+		for _, row := range bucket.rows {
 			if isRejected(row) {
 				continue
 			}
-			if len(filter.Agents) > 1 && !slices.Contains(filter.Agents, row.Agent) {
+			if len(filter.Agents) > 0 && !slices.Contains(filter.Agents, row.Agent) {
 				continue
 			}
-			if len(filter.Models) > 1 {
+			if len(filter.Models) > 0 {
 				if _, ok := modelSelections[ModelSelection{ProviderID: row.Provider, Model: row.Model}]; !ok {
 					continue
 				}
@@ -116,11 +106,8 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 			}
 			visit(row, ref, session, project)
 		}
-		q.Offset += len(page.Rows)
-		if q.Offset >= page.Total || len(page.Rows) == 0 {
-			return nil
-		}
 	}
+	return nil
 }
 
 func (s *Service) Usage(ctx context.Context, q UsageQuery) (UsageResult, error) {
@@ -138,7 +125,7 @@ func (s *Service) Usage(ctx context.Context, q UsageQuery) (UsageResult, error) 
 	}
 	var workspace *queryWorkspace
 	if join {
-		if err := s.Refresh(ctx); err != nil {
+		if err := s.ensureSessions(ctx); err != nil {
 			return UsageResult{}, err
 		}
 		workspace = s.newWorkspace()
@@ -238,7 +225,7 @@ func (s *Service) UsageRows(ctx context.Context, q UsageRowsQuery) (UsageRowsRes
 	if err != nil {
 		return UsageRowsResult{}, err
 	}
-	if err := s.Refresh(ctx); err != nil {
+	if err := s.ensureSessions(ctx); err != nil {
 		return UsageRowsResult{}, err
 	}
 	workspace := s.newWorkspace()

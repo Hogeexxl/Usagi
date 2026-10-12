@@ -17,6 +17,7 @@ import (
 
 type watcherQuery interface {
 	UsageSnapshot(context.Context) (magpie.UsageSummary, error)
+	RefreshUsageRows(context.Context, bool) (bool, error)
 	RefreshSessions(context.Context) ([]query.SessionRefreshFact, error)
 }
 
@@ -82,7 +83,7 @@ func newWatchers(queryService watcherQuery, quotaService watcherQuotaService, re
 }
 
 func (w *watchers) start(ctx context.Context, runtime RuntimeStatusSource) {
-	go w.run(ctx, w.usageInterval, w.refreshUsage)
+	go w.runUsage(ctx, runtime)
 	go w.run(ctx, w.sessionInterval, w.refreshSessions)
 	go w.runQuota(ctx, runtime, quotaReadingPollInterval)
 }
@@ -101,7 +102,43 @@ func (w *watchers) run(ctx context.Context, interval time.Duration, refresh func
 	}
 }
 
+// runUsage refreshes on every tick and also as soon as Magpie becomes ready,
+// so the row cache is warm before the first Dashboard request.
+func (w *watchers) runUsage(ctx context.Context, runtime RuntimeStatusSource) {
+	var statuses <-chan magpie.RuntimeStatus
+	if runtime != nil {
+		subscription, cancel := runtime.Subscribe()
+		defer cancel()
+		statuses = subscription
+	}
+	w.refreshUsage(ctx)
+	ticker := time.NewTicker(w.usageInterval)
+	defer ticker.Stop()
+	previous := magpie.RuntimeStatus("")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.refreshUsage(ctx)
+		case status, ok := <-statuses:
+			if !ok {
+				statuses = nil
+				continue
+			}
+			if status == magpie.RuntimeStatusReady && previous != magpie.RuntimeStatusReady {
+				w.refreshUsage(ctx)
+			}
+			previous = status
+		}
+	}
+}
+
+// refreshUsage updates the row cache before bumping the data revision, so
+// clients refetching on that revision already read the new rows.
 func (w *watchers) refreshUsage(ctx context.Context) {
+	w.usageMu.Lock()
+	defer w.usageMu.Unlock()
 	summary, err := w.query.UsageSnapshot(ctx)
 	if err != nil {
 		return
@@ -110,15 +147,11 @@ func (w *watchers) refreshUsage(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	w.usageMu.Lock()
-	defer w.usageMu.Unlock()
-	if !w.usageHasBaseline {
-		w.usageFingerprint = fingerprint
-		w.usageHasBaseline = true
-		return
-	}
-	if fingerprint != w.usageFingerprint {
-		w.usageFingerprint = fingerprint
+	summaryChanged := w.usageHasBaseline && fingerprint != w.usageFingerprint
+	w.usageFingerprint = fingerprint
+	w.usageHasBaseline = true
+	rowsChanged, _ := w.query.RefreshUsageRows(ctx, summaryChanged)
+	if summaryChanged || rowsChanged {
 		w.revisions.BumpData()
 	}
 }

@@ -123,4 +123,32 @@ describe("useSessionTableController SessionListItemView", () => {
     expect(client.getSessions).toHaveBeenCalledTimes(2);
     feed.dispose();
   });
+
+  it("keeps the current rows and page while a data revision refetches in place", async () => {
+    const eventSource: RevisionEventSource = source();
+    let resolveRefresh: (value: { data_revision: number; items: SessionListItemDto[] }) => void = () => {};
+    const first = Array.from({ length: 15 }, (_, index) => item(index + 1));
+    const client = clientWith({
+      getRevision: vi.fn(async () => ({ data_revision: 5, status_revision: 1 })),
+      getSessions: vi.fn()
+        .mockResolvedValueOnce({ data_revision: 5, items: first })
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; })),
+    });
+    const feed = createRevisionFeed({ client, eventSourceFactory: () => eventSource });
+    const { result } = renderHook(() => useSessionTableController({ key: "today" }, filters, { client, revisionFeed: feed }));
+    await waitFor(() => expect(result.current.total_items).toBe(15));
+    await act(async () => result.current.next_page());
+
+    await act(async () => eventSource.onmessage?.({ data: JSON.stringify({ data_revision: 6, status_revision: 1 }) } as MessageEvent<string>));
+    await waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(2));
+    expect(result.current.load_state).toBe("refreshing");
+    expect(result.current.total_items).toBe(15);
+    expect(result.current.page).toBe(2);
+
+    await act(async () => resolveRefresh({ data_revision: 6, items: [...first, item(16)] }));
+    expect(result.current.load_state).toBe("ready");
+    expect(result.current.total_items).toBe(16);
+    expect(result.current.page).toBe(2);
+    feed.dispose();
+  });
 });

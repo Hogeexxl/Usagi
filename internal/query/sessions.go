@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
@@ -16,7 +17,7 @@ func (s *Service) Sessions(ctx context.Context, q SessionQuery) (SessionResult, 
 	if err != nil {
 		return SessionResult{}, err
 	}
-	if err := s.Refresh(ctx); err != nil {
+	if err := s.ensureSessions(ctx); err != nil {
 		return SessionResult{}, err
 	}
 	workspace := s.newWorkspace()
@@ -87,20 +88,45 @@ type sessionLookup struct {
 	matched bool
 }
 
+// sessionLookups remembers single-session lookups for rows whose session is
+// missing from the snapshot. It is shared across queries and replaced whenever
+// the session snapshot changes.
+type sessionLookups struct {
+	mu   sync.Mutex
+	memo map[sessionKey]sessionLookup
+}
+
+func newSessionLookups() *sessionLookups {
+	return &sessionLookups{memo: make(map[sessionKey]sessionLookup)}
+}
+
+func (l *sessionLookups) get(key sessionKey) (sessionLookup, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result, ok := l.memo[key]
+	return result, ok
+}
+
+func (l *sessionLookups) put(key sessionKey, result sessionLookup) {
+	l.mu.Lock()
+	l.memo[key] = result
+	l.mu.Unlock()
+}
+
 type queryWorkspace struct {
 	snapshot *sessionSnapshot
 	upstream upstream
-	memo     map[sessionKey]sessionLookup
+	memo     *sessionLookups
 }
 
 func (s *Service) newWorkspace() *queryWorkspace {
 	s.snapshotMu.RLock()
-	snapshot := s.snapshot
+	snapshot, lookups := s.snapshot, s.lookups
 	s.snapshotMu.RUnlock()
 	return &queryWorkspace{
 		snapshot: snapshot,
 		upstream: s.upstream,
-		memo:     make(map[sessionKey]sessionLookup),
+		memo:     lookups,
 	}
 }
 
@@ -132,7 +158,7 @@ func (w *queryWorkspace) lookupSession(ctx context.Context, key sessionKey) (ses
 	if session, ok := w.snapshot.sessions[key]; ok {
 		return sessionLookup{session: session, matched: true}, nil
 	}
-	if result, ok := w.memo[key]; ok {
+	if result, ok := w.memo.get(key); ok {
 		return result, nil
 	}
 	session, err := w.upstream.Session(ctx, key.Agent+":"+key.ID)
@@ -141,10 +167,10 @@ func (w *queryWorkspace) lookupSession(ctx context.Context, key sessionKey) (ses
 		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
 			return sessionLookup{}, fmt.Errorf("query: lookup session %s:%s: %w", key.Agent, key.ID, err)
 		}
-		w.memo[key] = sessionLookup{}
+		w.memo.put(key, sessionLookup{})
 		return sessionLookup{}, nil
 	}
 	result := sessionLookup{session: session, matched: true}
-	w.memo[key] = result
+	w.memo.put(key, result)
 	return result, nil
 }

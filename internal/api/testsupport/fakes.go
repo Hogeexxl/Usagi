@@ -115,6 +115,10 @@ func (f *FakeWatcherQuery) UsageSnapshot(context.Context) (magpie.UsageSummary, 
 	return f.UsageResult, f.UsageErr
 }
 
+func (f *FakeWatcherQuery) RefreshUsageRows(context.Context, bool) (bool, error) {
+	return false, nil
+}
+
 func (f *FakeWatcherQuery) RefreshSessions(context.Context) ([]query.SessionRefreshFact, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

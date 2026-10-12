@@ -59,6 +59,7 @@ type ShutdownRequester func()
 
 type WatcherQuery interface {
 	UsageSnapshot(context.Context) (magpie.UsageSummary, error)
+	RefreshUsageRows(context.Context, bool) (bool, error)
 	RefreshSessions(context.Context) ([]query.SessionRefreshFact, error)
 }
 

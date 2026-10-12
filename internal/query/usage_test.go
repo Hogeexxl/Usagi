@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -61,6 +62,7 @@ func TestUsageRequestsAndGroups(t *testing.T) {
 		return magpie.UsageRequestsPage{Rows: current, Total: len(current)}, nil
 	}}
 	s := newService(u)
+	s.store.warmDays = 0
 	gateway := UsageTotals{Calls: 1, Input: 10, Output: 2, CacheRead: 3, CacheWrite: 4, CacheWrite1h: 5, Reasoning: 6, Cost: 0.5}
 	direct := UsageTotals{Calls: 1, Errors: 1, Input: 7, Output: 1, Cost: 0.25, Unpriced: 1}
 	codex := gateway
@@ -83,16 +85,27 @@ func TestUsageRequestsAndGroups(t *testing.T) {
 		if test.by == GroupNone {
 			current = []magpie.UsageRequest{{Provider: "p", Input: 99, Priced: true}}
 			got, err = s.Usage(ctx, UsageQuery{Range: r})
+			if err != nil || got.Totals != wantTotals {
+				t.Fatalf("cached Usage before refresh = %+v, %v; want earlier rows", got, err)
+			}
+			changed, err := s.RefreshUsageRows(ctx, false)
+			if err != nil || !changed {
+				t.Fatalf("RefreshUsageRows = %v, %v; want changed rows", changed, err)
+			}
+			got, err = s.Usage(ctx, UsageQuery{Range: r})
 			if err != nil || got.Totals != (UsageTotals{Calls: 1, Input: 99}) || len(got.Groups) != 0 {
-				t.Fatalf("second Usage reused earlier data: %+v, %v", got, err)
+				t.Fatalf("Usage after refresh kept stale rows: %+v, %v", got, err)
 			}
 			current = rows
+			if _, err := s.RefreshUsageRows(ctx, false); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }
 
 func TestUsageFilters(t *testing.T) {
-	r := DateRange{From: "2026-10-01", To: "2026-10-11"}
+	r := DateRange{From: "2026-10-11", To: "2026-10-11"}
 	rows := []magpie.UsageRequest{
 		{Agent: "codex", Provider: "provider-a", Model: "gpt-x", Input: 1, Priced: true},
 		{Agent: "claude", Provider: "provider-b", Model: "gpt-x", Input: 10, Priced: true},
@@ -122,12 +135,10 @@ func TestUsageFilters(t *testing.T) {
 			t.Fatalf("filter %d = %+v, %v; want %+v", i, got, err, want)
 		}
 	}
-	wantQueries := []magpie.UsageRequestsQuery{
-		{Period: "2026-10-01..2026-10-11", Agent: "codex", Provider: "provider-a", Model: "gpt-x", Limit: 500},
-		{Period: "2026-10-01..2026-10-11", Limit: 500},
-	}
+	// Filters run in memory over the cached day, so both queries share one fetch.
+	wantQueries := []magpie.UsageRequestsQuery{{Period: "2026-10-11..2026-10-11", Limit: 500}}
 	if !reflect.DeepEqual(queries, wantQueries) {
-		t.Fatalf("pushdown queries = %+v, want %+v", queries, wantQueries)
+		t.Fatalf("day queries = %+v, want %+v", queries, wantQueries)
 	}
 	normalized, err := normalizeUsageInput(r, filters[1])
 	wantModels := []ModelSelection{{ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-b", Model: "other"}}
@@ -146,21 +157,12 @@ func TestProviderModelPairFiltersUsageGroupsAndSessions(t *testing.T) {
 		{Agent: "codex", ID: "session-a", Title: "A", Cwd: "/a"},
 		{Agent: "codex", ID: "session-b", Title: "B", Cwd: "/b"},
 	}
-	var requestQueries []magpie.UsageRequestsQuery
+	var queries recordedQueries
 	upstream := &sessionUpstream{
 		sessions: func(context.Context, int) (magpie.SessionsResponse, error) {
 			return magpie.SessionsResponse{Sessions: sessions}, nil
 		},
-		requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
-			requestQueries = append(requestQueries, q)
-			var matched []magpie.UsageRequest
-			for _, row := range rows {
-				if (q.Provider == "" || q.Provider == row.Provider) && (q.Model == "" || q.Model == row.Model) {
-					matched = append(matched, row)
-				}
-			}
-			return magpie.UsageRequestsPage{Rows: matched, Total: len(matched)}, nil
-		},
+		requests: dayRequests(rows, &queries),
 	}
 	service := newService(upstream)
 	for _, test := range []struct {
@@ -181,12 +183,14 @@ func TestProviderModelPairFiltersUsageGroupsAndSessions(t *testing.T) {
 			t.Fatalf("Sessions(%s/gpt-x) = %+v, %v", test.provider, result, err)
 		}
 	}
-	if len(requestQueries) != 4 {
-		t.Fatalf("UsageRequests call count = %d, want 4", len(requestQueries))
+	// Each of the 11 days is fetched once, unfiltered, and reused by every query.
+	got := queries.periods()
+	if len(got) != 11 || got[0] != "2026-10-01..2026-10-01" || got[10] != "2026-10-11..2026-10-11" {
+		t.Fatalf("day periods = %v, want one per day", got)
 	}
-	for i, wantProvider := range []string{"provider-a", "provider-a", "provider-b", "provider-b"} {
-		if requestQueries[i].Provider != wantProvider || requestQueries[i].Model != "gpt-x" {
-			t.Fatalf("UsageRequests query %d = %+v, want %s/gpt-x", i, requestQueries[i], wantProvider)
+	for _, q := range queries.all() {
+		if q.Provider != "" || q.Model != "" || q.Agent != "" {
+			t.Fatalf("filter pushed down to Magpie: %+v", q)
 		}
 	}
 }
@@ -205,21 +209,29 @@ func TestUsagePagination(t *testing.T) {
 		if fail {
 			return magpie.UsageRequestsPage{}, failure
 		}
-		if q.Limit != 500 || q.Period != "2026-10-01..2026-10-11" {
-			t.Fatalf("page query = %+v", q)
+		if q.Limit != 500 || q.Period != "2026-10-11..2026-10-11" {
+			return magpie.UsageRequestsPage{}, fmt.Errorf("page query = %+v", q)
 		}
 		offsets = append(offsets, q.Offset)
 		end := min(q.Offset+q.Limit, len(rows))
 		return magpie.UsageRequestsPage{Rows: rows[q.Offset:end], Total: 600}, nil
 	}}
 	s := newService(u)
-	q := UsageQuery{Range: DateRange{From: "2026-10-01", To: "2026-10-11"}}
+	s.store.warmDays = 0
+	q := UsageQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}}
 	got, err := s.Usage(context.Background(), q)
 	if err != nil || got.Totals != (UsageTotals{Calls: 501, Input: 501}) || !reflect.DeepEqual(offsets, []int{0, 500, 503}) {
 		t.Fatalf("paged Usage = %+v, %v, offsets %v", got, err, offsets)
 	}
 	fail = true
+	if _, err := s.RefreshUsageRows(context.Background(), false); !errors.Is(err, failure) {
+		t.Fatalf("failed refresh = %v; want wrapped upstream error", err)
+	}
 	got, err = s.Usage(context.Background(), q)
+	if err != nil || got.Totals != (UsageTotals{Calls: 501, Input: 501}) {
+		t.Fatalf("failed refresh dropped cached rows: %+v, %v", got, err)
+	}
+	got, err = s.Usage(context.Background(), UsageQuery{Range: DateRange{From: "2026-10-10", To: "2026-10-10"}})
 	if !errors.Is(err, failure) || !reflect.DeepEqual(got, UsageResult{}) {
 		t.Fatalf("failed Usage = %+v, %v; want wrapped upstream error and no partial result", got, err)
 	}
@@ -227,7 +239,7 @@ func TestUsagePagination(t *testing.T) {
 
 func TestUsageProjectGroups(t *testing.T) {
 	ctx := context.Background()
-	r := DateRange{From: "2026-10-01", To: "2026-10-11"}
+	r := DateRange{From: "2026-10-11", To: "2026-10-11"}
 	cwd := "/a"
 	var events []string
 	u := &sessionUpstream{
@@ -268,17 +280,26 @@ func TestUsageProjectGroups(t *testing.T) {
 		{GroupProjectModel, []UsageGroup{{Project: a, Model: "a", Totals: UsageTotals{Calls: 1, Input: 1}}, {Project: b, Model: "z", Totals: UsageTotals{Calls: 1, Input: 2}}, {Project: blank, Model: "a", Totals: UsageTotals{Calls: 1, Input: 3}}, {Project: unknown, Model: "x", Totals: UsageTotals{Calls: 1, Input: 4}}}},
 		{GroupProjectEffort, []UsageGroup{{Project: a, Effort: "high", Totals: UsageTotals{Calls: 1, Input: 1}}, {Project: b, Effort: "low", Totals: UsageTotals{Calls: 1, Input: 2}}, {Project: blank, Effort: "low", Totals: UsageTotals{Calls: 1, Input: 3}}, {Project: unknown, Effort: "high", Totals: UsageTotals{Calls: 1, Input: 4}}}},
 	}
-	for _, test := range tests {
+	for i, test := range tests {
 		events = nil
 		got, err := s.Usage(ctx, UsageQuery{Range: r, GroupBy: test.by})
-		if err != nil || got.Totals != (UsageTotals{Calls: 4, Input: 10}) || !reflect.DeepEqual(got.Groups, test.groups) || !reflect.DeepEqual(events, []string{"refresh", "requests", "one"}) {
+		// Only the first query loads sessions, rows and the fallback lookup;
+		// later queries reuse all three.
+		wantEvents := []string(nil)
+		if i == 0 {
+			wantEvents = []string{"refresh", "requests", "one"}
+		}
+		if err != nil || got.Totals != (UsageTotals{Calls: 4, Input: 10}) || !reflect.DeepEqual(got.Groups, test.groups) || !reflect.DeepEqual(events, wantEvents) {
 			t.Fatalf("project group %q = %+v, %v, events %v; want %+v", test.by, got, err, events, test.groups)
 		}
 	}
 	cwd = "/new"
 	events = nil
+	if _, err := s.RefreshSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
 	got, err := s.Usage(ctx, UsageQuery{Range: r, Filter: UsageFilter{Projects: []ProjectSelection{{Kind: ProjectKindProject, Path: cwd}, {Kind: ProjectKindProjectless}}}})
-	if err != nil || got.Totals != (UsageTotals{Calls: 2, Input: 4}) || !reflect.DeepEqual(events, []string{"refresh", "requests", "one"}) {
+	if err != nil || got.Totals != (UsageTotals{Calls: 2, Input: 4}) || !reflect.DeepEqual(events, []string{"refresh", "one"}) {
 		t.Fatalf("project filter after refresh = %+v, %v, events %v", got, err, events)
 	}
 }
@@ -340,10 +361,13 @@ func TestUsageRows(t *testing.T) {
 		t.Fatalf("full row = %+v, want %+v", got.Rows[len(wantKeys)], wantFull)
 	}
 	cwd = "/fresh"
+	if _, err := s.RefreshSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
 	q.Filter = UsageFilter{Agents: []string{"codex", "", "a", "codex"}, Models: []ModelSelection{{ProviderID: "p", Model: "z"}, {ProviderID: "p", Model: "m"}, {ProviderID: "p", Model: "m"}}, Projects: []ProjectSelection{{Kind: ProjectKindProject, Path: cwd}}}
 	got, err = s.UsageRows(ctx, q)
 	wantFull.Project = ProjectRef{Kind: ProjectKindProject, Path: cwd, Name: "fresh"}
-	if err != nil || !reflect.DeepEqual(got.Rows, []UsageRow{wantFull}) || refreshes != 2 || !reflect.DeepEqual(events, []string{"refresh", "requests", "refresh", "requests"}) {
+	if err != nil || !reflect.DeepEqual(got.Rows, []UsageRow{wantFull}) || refreshes != 2 || !reflect.DeepEqual(events, []string{"refresh", "requests", "refresh"}) {
 		t.Fatalf("filtered UsageRows = %+v, %v, refreshes %d, events %v", got, err, refreshes, events)
 	}
 }
