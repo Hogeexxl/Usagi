@@ -129,9 +129,9 @@ func TestClientEndpoints(t *testing.T) {
 			},
 		},
 		{
-			name:  "sessions omit zero limit",
+			name:  "sessions full list limit zero",
 			path:  "/api/sessions",
-			query: url.Values{},
+			query: url.Values{"limit": {"0"}},
 			call: func(t *testing.T, client *Client) {
 				if _, err := client.Sessions(context.Background(), 0); err != nil {
 					t.Fatal(err)

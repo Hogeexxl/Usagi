@@ -77,7 +77,7 @@ func TestRefresh(t *testing.T) {
 			return magpie.SessionsResponse{}, failure
 		}
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	if err := s.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestSessionLookup(t *testing.T) {
 			}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	if err := s.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestProject(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	if err := s.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestSessions(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	q := SessionQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}}
 	known := SessionUsage{Agent: "codex", ID: "a", Title: "old", Cwd: "/old", Project: ProjectRef{Kind: ProjectKindProject, Path: "/old", Name: "old"}, Start: tm, Last: t3, FirstUsage: t1, LastUsage: t3,
 		ModelEffort: []ModelEffortUsage{{Model: "a", Effort: "high", Totals: UsageTotals{Calls: 1, Input: 2}}, {Model: "a", Effort: "low", Totals: UsageTotals{Calls: 1, Input: 3}}, {Model: "z", Effort: "low", Totals: UsageTotals{Calls: 1, Input: 1}}}, Totals: UsageTotals{Calls: 3, Input: 6}}
@@ -321,7 +321,7 @@ func TestSessions(t *testing.T) {
 func TestSessionsInputAndLookupErrors(t *testing.T) {
 	ctx := context.Background()
 	r := DateRange{From: "2026-10-11", To: "2026-10-11"}
-	s := newService(&sessionUpstream{})
+	s := newService(queryTestDB(t), &sessionUpstream{}, time.Local)
 	if _, err := s.Sessions(ctx, SessionQuery{Range: DateRange{From: r.From, To: "bad"}}); !errors.Is(err, ErrInvalidRange) {
 		t.Fatalf("Sessions range error = %v", err)
 	}
@@ -344,7 +344,7 @@ func TestSessionsInputAndLookupErrors(t *testing.T) {
 				return magpie.Session{}, failure
 			},
 		}
-		s = newService(u)
+		s = newService(queryTestDB(t), u, time.Local)
 		if i == 0 {
 			got, err := s.Sessions(ctx, SessionQuery{Range: r})
 			if !errors.Is(err, failure) || !reflect.DeepEqual(got, SessionResult{}) {

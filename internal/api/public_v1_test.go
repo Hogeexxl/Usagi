@@ -44,7 +44,7 @@ func TestPublicV1FrozenPathsAndInfoRevision(t *testing.T) {
 	}
 
 	for range 41 {
-		server.revisions.BumpData()
+		server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	}
 	for range 9 {
 		server.revisions.BumpStatus()
@@ -109,7 +109,7 @@ func TestPublicV1StatusCompatibilityUsesOnlyLegacyEnums(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server, _, runtime, _ := newServerFixture(t)
 			runtime.SetStatus(test.state)
-			server.revisions.BumpData()
+			server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 			server.revisions.BumpStatus()
 			response := request(server, http.MethodGet, publicV1StatusPath)
 			if response.Code != http.StatusOK {
@@ -292,7 +292,7 @@ func TestPublicV1SummaryLegacyMappingsAndSingleCodexProjection(t *testing.T) {
 			server, service, runtime, _ := newServerFixture(t)
 			runtime.SetStatus(magpie.RuntimeStatusReady)
 			service.SummaryResult = test.view
-			server.revisions.BumpData()
+			server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 			response := request(server, http.MethodGet, publicV1SummaryPath+"?range=today")
 			if response.Code != http.StatusOK {
 				t.Fatalf("GET %s = %d %s", publicV1SummaryPath, response.Code, response.Body.String())
@@ -358,7 +358,7 @@ func TestPublicV1SummaryRejectsFiltersAndRequiresReadyRuntime(t *testing.T) {
 func TestPublicV1EventsSendsInitialAndChangedPublicRevisionFrames(t *testing.T) {
 	server, _, _, _ := newServerFixture(t)
 	for range 41 {
-		server.revisions.BumpData()
+		server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	}
 	for range 9 {
 		server.revisions.BumpStatus()
@@ -380,7 +380,7 @@ func TestPublicV1EventsSendsInitialAndChangedPublicRevisionFrames(t *testing.T) 
 	if writer.Header().Get("Content-Type") != "text/event-stream" || writer.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Public event headers = %v", writer.Header())
 	}
-	server.revisions.BumpData()
+	server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	writer.waitFlushes(t, 2)
 	server.revisions.BumpStatus()
 	writer.waitFlushes(t, 3)
@@ -424,7 +424,7 @@ func TestExportPublicV1HTTPResponsesForSwiftDecode(t *testing.T) {
 	seedRevisions := func(server *Server) {
 		t.Helper()
 		for range 41 {
-			server.revisions.BumpData()
+			server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 		}
 		for range 9 {
 			server.revisions.BumpStatus()

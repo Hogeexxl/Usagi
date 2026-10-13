@@ -1,25 +1,14 @@
 package api
 
 import (
-	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
-	"slices"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/projection"
-	"github.com/Hogeexxl/Usagi/internal/query"
 )
-
-type watcherQuery interface {
-	UsageSnapshot(context.Context) (magpie.UsageSummary, error)
-	RefreshUsageRows(context.Context, bool) (bool, error)
-	RefreshSessions(context.Context) ([]query.SessionRefreshFact, error)
-}
 
 type watcherQuotaService interface {
 	Quotas(context.Context, bool) (projection.QuotaView, error)
@@ -53,39 +42,45 @@ func (s *QuotaSnapshot) RecordError(err error) {
 }
 
 type watchers struct {
-	query              watcherQuery
-	quotaService       watcherQuotaService
-	revisions          RevisionService
-	quotaSnapshot      *QuotaSnapshot
-	usageInterval      time.Duration
-	sessionInterval    time.Duration
-	quotaInterval      time.Duration
-	usageMu            sync.Mutex
-	usageFingerprint   [32]byte
-	usageHasBaseline   bool
-	sessionMu          sync.Mutex
-	sessionFingerprint [32]byte
-	sessionHasBaseline bool
+	query         WatcherQuery
+	quotaService  watcherQuotaService
+	revisions     RevisionService
+	quotaSnapshot *QuotaSnapshot
+	usageInterval time.Duration
+	quotaInterval time.Duration
+	usageMu       sync.Mutex
 }
 
-const quotaReadingPollInterval = time.Second
+const quotaReadingPollInterval = 60 * time.Second
 
-func newWatchers(queryService watcherQuery, quotaService watcherQuotaService, revisions RevisionService, quotaSnapshot *QuotaSnapshot, usageInterval, sessionInterval, quotaInterval time.Duration) *watchers {
+func newWatchers(queryService WatcherQuery, quotaService watcherQuotaService, revisions RevisionService, quotaSnapshot *QuotaSnapshot, usageInterval, quotaInterval time.Duration) *watchers {
 	return &watchers{
-		query:           queryService,
-		quotaService:    quotaService,
-		revisions:       revisions,
-		quotaSnapshot:   quotaSnapshot,
-		usageInterval:   usageInterval,
-		sessionInterval: sessionInterval,
-		quotaInterval:   quotaInterval,
+		query:         queryService,
+		quotaService:  quotaService,
+		revisions:     revisions,
+		quotaSnapshot: quotaSnapshot,
+		usageInterval: usageInterval,
+		quotaInterval: quotaInterval,
 	}
 }
 
-func (w *watchers) start(ctx context.Context, runtime RuntimeStatusSource) {
-	go w.runUsage(ctx, runtime)
-	go w.run(ctx, w.sessionInterval, w.refreshSessions)
-	go w.runQuota(ctx, runtime, quotaReadingPollInterval)
+func (w *watchers) start(ctx context.Context, runtime RuntimeStatusSource) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			w.runSync(ctx, runtime)
+		}()
+		go func() {
+			defer workers.Done()
+			w.runQuota(ctx, runtime, quotaReadingPollInterval)
+		}()
+		workers.Wait()
+		close(done)
+	}()
+	return done
 }
 
 func (w *watchers) run(ctx context.Context, interval time.Duration, refresh func(context.Context)) {
@@ -102,9 +97,9 @@ func (w *watchers) run(ctx context.Context, interval time.Duration, refresh func
 	}
 }
 
-// runUsage refreshes on every tick and also as soon as Magpie becomes ready,
-// so the row cache is warm before the first Dashboard request.
-func (w *watchers) runUsage(ctx context.Context, runtime RuntimeStatusSource) {
+// runSync owns the single synchronization loop. It runs immediately, on the
+// interval, and when Magpie becomes ready again.
+func (w *watchers) runSync(ctx context.Context, runtime RuntimeStatusSource) {
 	var statuses <-chan magpie.RuntimeStatus
 	if runtime != nil {
 		subscription, cancel := runtime.Subscribe()
@@ -114,7 +109,8 @@ func (w *watchers) runUsage(ctx context.Context, runtime RuntimeStatusSource) {
 	w.refreshUsage(ctx)
 	ticker := time.NewTicker(w.usageInterval)
 	defer ticker.Stop()
-	previous := magpie.RuntimeStatus("")
+	var previous magpie.RuntimeStatus
+	seenStatus := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,55 +122,24 @@ func (w *watchers) runUsage(ctx context.Context, runtime RuntimeStatusSource) {
 				statuses = nil
 				continue
 			}
-			if status == magpie.RuntimeStatusReady && previous != magpie.RuntimeStatusReady {
+			if seenStatus && status == magpie.RuntimeStatusReady && previous != magpie.RuntimeStatusReady {
 				w.refreshUsage(ctx)
 			}
 			previous = status
+			seenStatus = true
 		}
 	}
 }
 
-// refreshUsage updates the row cache before bumping the data revision, so
-// clients refetching on that revision already read the new rows.
+// refreshUsage publishes the revision returned by the persistent sync even
+// when another day's fetch failed after earlier days committed.
 func (w *watchers) refreshUsage(ctx context.Context) {
 	w.usageMu.Lock()
 	defer w.usageMu.Unlock()
-	summary, err := w.query.UsageSnapshot(ctx)
-	if err != nil {
-		return
-	}
-	fingerprint, err := usageFingerprint(summary)
-	if err != nil {
-		return
-	}
-	summaryChanged := w.usageHasBaseline && fingerprint != w.usageFingerprint
-	w.usageFingerprint = fingerprint
-	w.usageHasBaseline = true
-	rowsChanged, _ := w.query.RefreshUsageRows(ctx, summaryChanged)
-	if summaryChanged || rowsChanged {
-		w.revisions.BumpData()
-	}
-}
-
-func (w *watchers) refreshSessions(ctx context.Context) {
-	facts, err := w.query.RefreshSessions(ctx)
-	if err != nil {
-		return
-	}
-	fingerprint, err := jsonFingerprint(facts)
-	if err != nil {
-		return
-	}
-	w.sessionMu.Lock()
-	defer w.sessionMu.Unlock()
-	if !w.sessionHasBaseline {
-		w.sessionFingerprint = fingerprint
-		w.sessionHasBaseline = true
-		return
-	}
-	if fingerprint != w.sessionFingerprint {
-		w.sessionFingerprint = fingerprint
-		w.revisions.BumpData()
+	revision, err := w.query.Sync(ctx)
+	w.revisions.SetDataRevision(revision)
+	if err != nil && ctx.Err() == nil {
+		slog.Error("synchronize local usage database", "error", err)
 	}
 }
 
@@ -249,99 +214,4 @@ func (w *watchers) refreshQuota(ctx context.Context) bool {
 	}
 	w.quotaSnapshot.Replace(view)
 	return view.Reading
-}
-
-func usageFingerprint(summary magpie.UsageSummary) ([32]byte, error) {
-	type totals struct {
-		Calls        int
-		Errors       int
-		Input        int
-		Output       int
-		CacheRead    int
-		CacheWrite   int
-		CacheWrite1h int
-		Reasoning    int
-		Cost         float64
-		Unpriced     int
-	}
-	type group struct {
-		ID       string
-		Provider string
-		Model    string
-		Account  string
-		Agent    string
-		Name     string
-		Sub      string
-		Icon     string
-		totals
-	}
-	type point struct {
-		Label string
-		Time  time.Time
-		totals
-	}
-	toTotals := func(value magpie.UsageTotals) totals {
-		return totals{
-			Calls: value.Calls, Errors: value.Errors, Input: value.Input, Output: value.Output,
-			CacheRead: value.CacheRead, CacheWrite: value.CacheWrite, CacheWrite1h: value.CacheWrite1h,
-			Reasoning: value.Reasoning, Cost: value.Cost, Unpriced: value.Unpriced,
-		}
-	}
-	toGroup := func(value magpie.UsageGroup) group {
-		return group{
-			ID: value.ID, Provider: value.Provider, Model: value.Model, Account: value.Account,
-			Agent: value.Agent, Name: value.Name, Sub: value.Sub, Icon: value.Icon,
-			totals: toTotals(value.UsageTotals),
-		}
-	}
-	type usageFacts struct {
-		Totals     totals
-		Series     []point
-		Agents     []group
-		Models     []group
-		Accounts   []group
-		CallerKeys []group
-	}
-	facts := usageFacts{Totals: toTotals(summary.UsageTotals)}
-	for _, value := range summary.Series {
-		facts.Series = append(facts.Series, point{Label: value.Label, Time: value.Time, totals: toTotals(value.UsageTotals)})
-	}
-	for _, value := range summary.Agents {
-		facts.Agents = append(facts.Agents, toGroup(value))
-	}
-	for _, value := range summary.Models {
-		facts.Models = append(facts.Models, toGroup(value))
-	}
-	for _, value := range summary.Accounts {
-		facts.Accounts = append(facts.Accounts, toGroup(value))
-	}
-	for _, value := range summary.CallerKeys {
-		facts.CallerKeys = append(facts.CallerKeys, toGroup(value))
-	}
-	sortValuesJSON(facts.Series)
-	sortValuesJSON(facts.Agents)
-	sortValuesJSON(facts.Models)
-	sortValuesJSON(facts.Accounts)
-	sortValuesJSON(facts.CallerKeys)
-	data, err := json.Marshal(facts)
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("api: fingerprint usage snapshot: %w", err)
-	}
-	return sha256.Sum256(data), nil
-}
-
-func sortValuesJSON[T any](values []T) {
-	slices.SortFunc(values, func(a, b T) int {
-		left, _ := json.Marshal(a)
-		right, _ := json.Marshal(b)
-		return cmp.Compare(string(left), string(right))
-	})
-}
-
-func jsonFingerprint(value any) ([32]byte, error) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("api: fingerprint snapshot: %w", err)
-	}
-	return sha256.Sum256(data), nil
 }

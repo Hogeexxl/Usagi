@@ -15,7 +15,6 @@ import (
 	"github.com/Hogeexxl/Usagi/internal/api/testsupport"
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/projection"
-	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 type p1aRuntimeProvider struct {
@@ -30,16 +29,14 @@ type p1aWatcherQueryProbe struct {
 	initialReadDone chan<- struct{}
 }
 
-func (q p1aWatcherQueryProbe) UsageSnapshot(ctx context.Context) (magpie.UsageSummary, error) {
-	value, err := q.WatcherQuery.UsageSnapshot(ctx)
+func (q p1aWatcherQueryProbe) Sync(ctx context.Context) (int64, error) {
+	value, err := q.WatcherQuery.Sync(ctx)
 	q.initialReadDone <- struct{}{}
 	return value, err
 }
 
-func (q p1aWatcherQueryProbe) RefreshSessions(ctx context.Context) ([]query.SessionRefreshFact, error) {
-	value, err := q.WatcherQuery.RefreshSessions(ctx)
-	q.initialReadDone <- struct{}{}
-	return value, err
+func (q p1aWatcherQueryProbe) InitialSyncComplete(ctx context.Context) (bool, error) {
+	return q.WatcherQuery.InitialSyncComplete(ctx)
 }
 
 type p1aWatcherProjectionProbe struct {
@@ -124,16 +121,15 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	defer magpieServer.Close()
 
 	runtime := &p1aRuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting)}
-	queryService := query.NewRuntimeService(runtime)
+	queryService := newReadyRuntimeQueryForTest(t, runtime)
 	projectionService := projection.NewService(queryService)
-	revisions := NewRevisionService()
+	revisions := NewRevisionService(0)
 	quotaSnapshot := &QuotaSnapshot{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	watcher := newWatchers(queryService, projectionService, revisions, quotaSnapshot, time.Hour, time.Hour, time.Hour)
+	watcher := newWatchers(queryService, projectionService, revisions, quotaSnapshot, time.Hour, time.Hour)
 	watcher.refreshUsage(ctx)
-	watcher.refreshSessions(ctx)
 	config := DefaultConfig()
 	config.StaticFS = fstest.MapFS{}
 	initialWatcherReads := make(chan struct{}, 3)
@@ -145,6 +141,7 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
+	t.Cleanup(server.stopBackground)
 	server.Start(ctx)
 	for i := 0; i < 2; i++ {
 		select {
@@ -195,12 +192,10 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	})
 
 	watcher.refreshUsage(ctx)
-	watcher.refreshSessions(ctx)
 	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
 		t.Fatalf("first successful watcher baselines tuple = %+v, want ready transition only", got)
 	}
 	watcher.refreshUsage(ctx)
-	watcher.refreshSessions(ctx)
 	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
 		t.Fatalf("unchanged watcher snapshots tuple = %+v, want ready transition only", got)
 	}

@@ -7,7 +7,6 @@ import (
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/projection"
-	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 type ProjectionService interface {
@@ -99,37 +98,30 @@ type FakeQuotaService struct {
 }
 
 type FakeWatcherQuery struct {
-	mu             sync.Mutex
-	UsageResult    magpie.UsageSummary
-	UsageErr       error
-	SessionsResult []query.SessionRefreshFact
-	SessionsErr    error
-	UsageCalls     int
-	SessionsCalls  int
+	mu                 sync.Mutex
+	InitialSyncPending bool
+	SyncRevision       int64
+	SyncErr            error
+	SyncCalls          int
 }
 
-func (f *FakeWatcherQuery) UsageSnapshot(context.Context) (magpie.UsageSummary, error) {
+func (f *FakeWatcherQuery) Sync(context.Context) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.UsageCalls++
-	return f.UsageResult, f.UsageErr
+	f.SyncCalls++
+	return f.SyncRevision, f.SyncErr
 }
 
-func (f *FakeWatcherQuery) RefreshUsageRows(context.Context, bool) (bool, error) {
-	return false, nil
-}
-
-func (f *FakeWatcherQuery) RefreshSessions(context.Context) ([]query.SessionRefreshFact, error) {
+func (f *FakeWatcherQuery) InitialSyncComplete(context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.SessionsCalls++
-	return f.SessionsResult, f.SessionsErr
+	return !f.InitialSyncPending, nil
 }
 
-func (f *FakeWatcherQuery) CallCounts() (int, int) {
+func (f *FakeWatcherQuery) SyncCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.UsageCalls, f.SessionsCalls
+	return f.SyncCalls
 }
 
 func (f *FakeQuotaService) Quotas(_ context.Context, asked bool) (projection.QuotaView, error) {
@@ -300,7 +292,7 @@ type RevisionTuple struct {
 
 type RevisionService interface {
 	Current() RevisionTuple
-	BumpData() RevisionTuple
+	SetDataRevision(int64) RevisionTuple
 	BumpStatus() RevisionTuple
 	Subscribe() (<-chan RevisionTuple, func())
 }
@@ -322,11 +314,13 @@ func (f *FakeRevisionService) Current() RevisionTuple {
 	return f.current
 }
 
-func (f *FakeRevisionService) BumpData() RevisionTuple {
+func (f *FakeRevisionService) SetDataRevision(value int64) RevisionTuple {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.current.DataRevision++
-	f.publishLocked()
+	if f.current.DataRevision != value {
+		f.current.DataRevision = value
+		f.publishLocked()
+	}
 	return f.current
 }
 

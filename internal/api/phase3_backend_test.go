@@ -21,7 +21,6 @@ import (
 	"github.com/Hogeexxl/Usagi/internal/api/testsupport"
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/projection"
-	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 type phase3RuntimeProvider struct {
@@ -181,7 +180,6 @@ func phase3NewServer(t *testing.T, projectionService ProjectionService, querySer
 	config := DefaultConfig()
 	config.StaticFS = assets
 	config.UsageRefreshInterval = time.Hour
-	config.SessionRefreshInterval = 2 * time.Hour
 	config.QuotaRefreshInterval = 3 * time.Hour
 	server, err := NewServer(config, Dependencies{
 		Projection: projectionService, Query: queryService, RuntimeStatus: runtime,
@@ -267,7 +265,7 @@ func phase3AssertRevisionFrames(t *testing.T, body string, want ...RevisionTuple
 
 func TestPhase3SSEContractsFanoutKeepaliveAndCancellation(t *testing.T) {
 	server, _, _, _ := newServerFixture(t)
-	server.revisions.BumpData()
+	server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	server.revisions.BumpStatus()
 	internalWriter, stopInternal, internalDone := phase3OpenStream(t, server, "/api/events")
 	publicWriter, stopPublic, publicDone := phase3OpenStream(t, server, publicV1EventsPath)
@@ -287,7 +285,7 @@ func TestPhase3SSEContractsFanoutKeepaliveAndCancellation(t *testing.T) {
 	phase3AssertRevisionFrames(t, internalWriter.bodyString(), initial)
 	phase3AssertRevisionFrames(t, publicWriter.bodyString(), initial)
 
-	dataTuple := server.revisions.BumpData()
+	dataTuple := server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	internalWriter.waitFlushes(t, 2)
 	publicWriter.waitFlushes(t, 2)
 	statusTuple := server.revisions.BumpStatus()
@@ -330,10 +328,10 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 	defer secondMagpie.Close()
 
 	runtime := &phase3RuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting)}
-	queryService := query.NewRuntimeService(runtime)
+	queryService := newReadyRuntimeQueryForTest(t, runtime)
 	projectionGraph := projection.NewService(queryService)
 	projectionService := &phase3ProjectionProbe{ProjectionService: projectionGraph}
-	revisions := NewRevisionService()
+	revisions := NewRevisionService(0)
 	quotas := &QuotaSnapshot{}
 	server := phase3NewServer(t, projectionService, queryService, runtime, revisions, quotas, fstest.MapFS{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -357,16 +355,15 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 		t.Fatalf("ready Summary = %d %s, want revision 1 and input 12", firstSummary.Code, firstSummary.Body.String())
 	}
 
-	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 2*time.Hour, 3*time.Hour)
+	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 3*time.Hour)
 	watcher.refreshUsage(ctx)
-	watcher.refreshSessions(ctx)
 	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
 		t.Fatalf("first successful Usage/Sessions baselines tuple = %+v, want only ready transition", got)
 	}
 
 	sessionCallsBeforeTick := firstFixture.count("/api/sessions")
 	firstFixture.setSessionMetadata("After", "/new/project", now.Add(2*time.Minute))
-	watcher.refreshSessions(ctx)
+	watcher.refreshUsage(ctx)
 	if got := firstFixture.count("/api/sessions") - sessionCallsBeforeTick; got != 1 {
 		t.Fatalf("one Sessions watcher tick made %d /api/sessions calls, want exactly 1", got)
 	}
@@ -459,12 +456,12 @@ func TestPhase3QuotaRefreshAndCachedInternalPublicReads(t *testing.T) {
 	defer magpieServer.Close()
 	runtime := &phase3RuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusReady)}
 	runtime.set(magpie.RuntimeStatusReady, magpie.NewClient(magpieServer.URL, magpieServer.Client()))
-	queryService := query.NewRuntimeService(runtime)
+	queryService := newReadyRuntimeQueryForTest(t, runtime)
 	projectionService := projection.NewService(queryService)
-	revisions := NewRevisionService()
+	revisions := NewRevisionService(0)
 	quotas := &QuotaSnapshot{}
 	server := phase3NewServer(t, projectionService, queryService, runtime, revisions, quotas, fstest.MapFS{})
-	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 2*time.Hour, 3*time.Hour)
+	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 3*time.Hour)
 
 	watcher.refreshQuota(context.Background())
 	if got := fixture.askedValues(); len(got) != 1 || got[0] != "" {

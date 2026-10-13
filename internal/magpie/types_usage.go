@@ -82,6 +82,9 @@ type UsageRequest struct {
 	Cost            float64   `json:"cost"`
 	Priced          bool      `json:"priced"`
 	Source          string    `json:"source,omitempty"`
+	RouteID         int       `json:"route_id,omitempty"`
+	RID             string    `json:"rid,omitempty"`
+	ResponseID      string    `json:"response_id,omitempty"`
 }
 
 type UsageShare struct {
@@ -126,6 +129,7 @@ type UsageRequestsPage struct {
 // change that moves that day's totals or per-agent/model breakdown changes it.
 type UsageDayDigest struct {
 	Day    string // YYYY-MM-DD in Magpie's local time
+	Time   time.Time
 	Calls  int
 	Digest [32]byte
 }

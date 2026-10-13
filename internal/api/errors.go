@@ -17,6 +17,7 @@ const (
 	ErrorMagpieUnavailable = "MAGPIE_UNAVAILABLE"
 	ErrorUpstreamFailed    = "UPSTREAM_FAILED"
 	ErrorInternal          = "INTERNAL_ERROR"
+	ErrorDataLoading       = "DATA_LOADING"
 	ErrorNotFound          = "NOT_FOUND"
 	ErrorForbiddenHost     = "FORBIDDEN_HOST"
 	ErrorForbiddenOrigin   = "FORBIDDEN_ORIGIN"

@@ -9,7 +9,7 @@ type RevisionTuple struct {
 
 type RevisionService interface {
 	Current() RevisionTuple
-	BumpData() RevisionTuple
+	SetDataRevision(int64) RevisionTuple
 	BumpStatus() RevisionTuple
 	Subscribe() (<-chan RevisionTuple, func())
 }
@@ -21,8 +21,8 @@ type revisionService struct {
 	subscribers map[uint64]chan RevisionTuple
 }
 
-func NewRevisionService() RevisionService {
-	return &revisionService{subscribers: make(map[uint64]chan RevisionTuple)}
+func NewRevisionService(dataRevision int64) RevisionService {
+	return &revisionService{current: RevisionTuple{DataRevision: dataRevision}, subscribers: make(map[uint64]chan RevisionTuple)}
 }
 
 func (s *revisionService) Current() RevisionTuple {
@@ -31,11 +31,13 @@ func (s *revisionService) Current() RevisionTuple {
 	return s.current
 }
 
-func (s *revisionService) BumpData() RevisionTuple {
+func (s *revisionService) SetDataRevision(value int64) RevisionTuple {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.current.DataRevision++
-	s.publishLocked()
+	if s.current.DataRevision != value {
+		s.current.DataRevision = value
+		s.publishLocked()
+	}
 	return s.current
 }
 

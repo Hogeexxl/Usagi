@@ -38,7 +38,7 @@ func newServerFixtureWithShutdown(t *testing.T, shutdownRequester ShutdownReques
 		"assets/theme.css": &fstest.MapFile{Data: []byte("dashboard-style")},
 	}
 	server, err := NewServer(config, Dependencies{
-		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(),
+		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(0),
 		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{}, ShutdownRequester: shutdownRequester,
 	})
 	if err != nil {
@@ -57,8 +57,8 @@ func request(server http.Handler, method, target string) *httptest.ResponseRecor
 
 func TestDefaultConfigAndServerAcceptsStartingRuntime(t *testing.T) {
 	config := DefaultConfig()
-	if config.ListenAddress != "127.0.0.1:37991" || config.UsageRefreshInterval != 30*time.Second ||
-		config.SessionRefreshInterval != 30*time.Second || config.QuotaRefreshInterval != 60*time.Second {
+	if config.ListenAddress != "127.0.0.1:37991" || config.UsageRefreshInterval != 60*time.Second ||
+		config.QuotaRefreshInterval != 60*time.Second {
 		t.Fatalf("DefaultConfig() = %+v", config)
 	}
 	server, _, _, _ := newServerFixture(t)
@@ -82,7 +82,7 @@ func TestNewServerRejectsNonLoopbackAndNonpositiveIntervals(t *testing.T) {
 	runtime := testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting)
 	queryService := &testsupport.FakeWatcherQuery{}
 	dependencies := Dependencies{
-		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(),
+		Projection: projectionService, Query: queryService, Revisions: NewRevisionService(0),
 		RuntimeStatus: runtime, QuotaSnapshot: &QuotaSnapshot{}, ShutdownRequester: func() {},
 	}
 	config := DefaultConfig()
@@ -100,19 +100,18 @@ func TestNewServerRejectsNonLoopbackAndNonpositiveIntervals(t *testing.T) {
 func TestServerStartConnectsRuntimeSubscriptionAndWatchers(t *testing.T) {
 	server, _, runtime, queryService := newServerFixture(t)
 	beforeReady := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if beforeReady.Code != http.StatusServiceUnavailable || !strings.Contains(beforeReady.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("business endpoint before ready = %d %s", beforeReady.Code, beforeReady.Body.String())
+	if beforeReady.Code != http.StatusOK {
+		t.Fatalf("library endpoint before ready = %d %s, want cached DB read", beforeReady.Code, beforeReady.Body.String())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server.Start(ctx)
 	waitFor(t, func() bool {
-		usageCalls, sessionCalls := queryService.CallCounts()
-		return usageCalls == 1 && sessionCalls == 1
+		return queryService.SyncCallCount() == 1
 	})
 	runtime.SetStatus(magpie.RuntimeStatusReady)
 	waitFor(t, func() bool {
-		return server.revisions.Current() == (RevisionTuple{DataRevision: 1, StatusRevision: 1})
+		return server.revisions.Current() == (RevisionTuple{StatusRevision: 1})
 	})
 	afterReady := request(server, http.MethodGet, "/api/usage/summary?range=today")
 	if afterReady.Code != http.StatusOK {
@@ -422,7 +421,7 @@ func TestEventStreamSendsImmediateAndChangedRevisionOnly(t *testing.T) {
 		writer.Header().Get("Connection") != "keep-alive" || writer.Header().Get("X-Accel-Buffering") != "no" {
 		t.Fatalf("event stream headers = %v", writer.Header())
 	}
-	server.revisions.BumpData()
+	server.revisions.SetDataRevision(server.revisions.Current().DataRevision + 1)
 	writer.waitFlushes(t, 2)
 	cancel()
 	select {

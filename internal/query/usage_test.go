@@ -14,7 +14,7 @@ import (
 
 func TestUsageValidation(t *testing.T) {
 	r := DateRange{From: "2026-10-01", To: "2026-10-11"}
-	s := newService(&sessionUpstream{})
+	s := newService(queryTestDB(t), &sessionUpstream{}, time.Local)
 	tests := []struct {
 		name string
 		q    UsageQuery
@@ -57,7 +57,7 @@ func TestUsageGroupsMissingModelAsUnknown(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	s.store.warmDays = 0
 	r := DateRange{From: "2026-10-11", To: "2026-10-11"}
 	for _, by := range []UsageGroupBy{GroupModel, GroupModelEffort, GroupProjectModel} {
@@ -97,7 +97,7 @@ func TestUsageRequestsAndGroups(t *testing.T) {
 		}
 		return magpie.UsageRequestsPage{Rows: current, Total: len(current)}, nil
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	s.store.warmDays = 0
 	gateway := UsageTotals{Calls: 1, Input: 10, Output: 2, CacheRead: 3, CacheWrite: 4, CacheWrite1h: 5, Reasoning: 6, Cost: 0.5}
 	direct := UsageTotals{Calls: 1, Errors: 1, Input: 7, Output: 1, Cost: 0.25, Unpriced: 1}
@@ -159,7 +159,7 @@ func TestUsageFilters(t *testing.T) {
 		}
 		return magpie.UsageRequestsPage{Rows: pageRows, Total: len(pageRows)}, nil
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	filters := []UsageFilter{
 		{Agents: []string{"", "codex", "codex"}, Models: []ModelSelection{{ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-a", Model: "gpt-x"}}},
 		{Agents: []string{"codex", "", "claude", "codex"}, Models: []ModelSelection{{ProviderID: "provider-b", Model: "other"}, {ProviderID: "provider-a", Model: "gpt-x"}, {ProviderID: "provider-b", Model: "other"}}},
@@ -200,7 +200,7 @@ func TestProviderModelPairFiltersUsageGroupsAndSessions(t *testing.T) {
 		},
 		requests: dayRequests(rows, &queries),
 	}
-	service := newService(upstream)
+	service := newService(queryTestDB(t), upstream, time.Local)
 	for _, test := range []struct {
 		provider string
 		session  string
@@ -252,7 +252,7 @@ func TestUsagePagination(t *testing.T) {
 		end := min(q.Offset+q.Limit, len(rows))
 		return magpie.UsageRequestsPage{Rows: rows[q.Offset:end], Total: 600}, nil
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	s.store.warmDays = 0
 	q := UsageQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}}
 	got, err := s.Usage(context.Background(), q)
@@ -303,7 +303,7 @@ func TestUsageProjectGroups(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	a := ProjectRef{Kind: ProjectKindProject, Path: "/a", Name: "a"}
 	b := ProjectRef{Kind: ProjectKindProject, Path: "/b", Name: "b"}
 	blank := ProjectRef{Kind: ProjectKindProjectless}
@@ -377,7 +377,7 @@ func TestUsageRows(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	q := UsageRowsQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}}
 	got, err := s.UsageRows(ctx, q)
 	if err != nil || len(got.Rows) != len(wantKeys)+1 {
@@ -458,7 +458,7 @@ func TestUsageTotalsCountRetriedAndSpeed(t *testing.T) {
 		},
 		sessions: func(context.Context, int) (magpie.SessionsResponse, error) { return magpie.SessionsResponse{}, nil },
 	}
-	result, err := newService(u).Usage(context.Background(), UsageQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}})
+	result, err := newService(queryTestDB(t), u, time.Local).Usage(context.Background(), UsageQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}})
 	if err != nil {
 		t.Fatal(err)
 	}

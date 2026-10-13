@@ -2,7 +2,9 @@ package query
 
 import (
 	"context"
+	"database/sql"
 	"sync"
+	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
@@ -19,8 +21,8 @@ type runtimeUpstream struct {
 	generation uint64
 }
 
-func NewRuntimeService(provider ClientProvider) *Service {
-	return newService(&runtimeUpstream{provider: provider})
+func NewRuntimeService(db *sql.DB, provider ClientProvider, location *time.Location) *Service {
+	return newService(db, &runtimeUpstream{provider: provider}, location)
 }
 
 func (u *runtimeUpstream) current() (*magpie.Client, error) {

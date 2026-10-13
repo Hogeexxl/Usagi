@@ -3,6 +3,7 @@ package query
 import (
 	"cmp"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -40,15 +41,22 @@ type SessionRefreshFact struct {
 }
 
 type Service struct {
-	upstream   upstream
-	store      *usageStore
-	snapshotMu sync.RWMutex
-	refreshMu  sync.Mutex
-	snapshot   *sessionSnapshot
-	loaded     bool
-	facts      []SessionRefreshFact
-	lookups    *sessionLookups
-	generation uint64
+	upstream            upstream
+	db                  *sql.DB
+	location            *time.Location
+	now                 func() time.Time
+	store               *usageStore
+	snapshotMu          sync.RWMutex
+	refreshMu           sync.Mutex
+	syncMu              sync.Mutex
+	snapshot            *sessionSnapshot
+	loaded              bool
+	facts               []SessionRefreshFact
+	lookups             *sessionLookups
+	generation          uint64
+	usageFingerprint    [32]byte
+	hasUsageFingerprint bool
+	pendingRecent       map[string]struct{}
 }
 
 type sessionKey struct {
@@ -59,17 +67,23 @@ type sessionSnapshot struct {
 	sessions map[sessionKey]magpie.Session
 }
 
-func NewService(client *magpie.Client) *Service {
-	return newService(client)
+func NewService(db *sql.DB, client *magpie.Client, location *time.Location) *Service {
+	return newService(db, client, location)
 }
 
-func newService(client upstream) *Service {
-	return &Service{
-		upstream: client,
-		store:    newUsageStore(client),
-		snapshot: &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)},
-		lookups:  newSessionLookups(),
+func newService(db *sql.DB, client upstream, location *time.Location) *Service {
+	service := &Service{
+		upstream:      client,
+		db:            db,
+		location:      location,
+		now:           time.Now,
+		pendingRecent: make(map[string]struct{}),
+		store:         newUsageStore(client),
+		snapshot:      &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)},
+		lookups:       newSessionLookups(),
 	}
+	service.store.location = location
+	return service
 }
 
 func (s *Service) Refresh(ctx context.Context) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
@@ -60,7 +61,7 @@ func TestRuntimeServiceRechecksProviderAfterAvailabilityChanges(t *testing.T) {
 		ready  bool
 	}, 2)}
 	provider.results[1].ready = true
-	service := NewRuntimeService(provider)
+	service := NewRuntimeService(queryTestDB(t), provider, time.Local)
 	for i := 0; i < 2; i++ {
 		if _, err := service.UsageSnapshot(context.Background()); !errors.Is(err, ErrUpstreamUnavailable) {
 			t.Fatalf("UsageSnapshot call %d error = %v, want ErrUpstreamUnavailable", i, err)

@@ -40,6 +40,7 @@ type Session struct {
 	Unpriced int            `json:"unpriced"`
 	Name     string         `json:"name"`
 	Icon     string         `json:"icon"`
+	Path     string         `json:"path,omitempty"`
 	Via      []SessionVia   `json:"via,omitempty"`
 	SessionTokens
 }

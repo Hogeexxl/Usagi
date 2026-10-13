@@ -25,7 +25,7 @@ func TestQuota(t *testing.T) {
 		calls++
 		return response, nil
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	for i, want := range responses {
 		got, err := s.Quota(context.Background(), i == 0)
 		if err != nil || !reflect.DeepEqual(got, want) {
@@ -48,7 +48,7 @@ func TestOverview(t *testing.T) {
 		queries = append(queries, q)
 		return response, nil
 	}}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	if _, err := s.Overview(context.Background(), OverviewQuery{Days: -1}); !errors.Is(err, ErrInvalidFilter) || len(queries) != 0 {
 		t.Fatalf("negative Days = %v, upstream calls %d", err, len(queries))
 	}
@@ -91,7 +91,7 @@ func TestFilterOptionsListOnlyChoicesInRange(t *testing.T) {
 			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
 		},
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	s.store.warmDays = 0
 	got, err := s.FilterOptions(context.Background(), DateRange{From: "2026-10-11", To: "2026-10-11"})
 	want := FilterOptionsResult{

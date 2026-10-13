@@ -440,7 +440,7 @@ func TestServiceDropsCachesWhenMagpieClientIsReplaced(t *testing.T) {
 		sessionCalls++
 		return magpie.SessionsResponse{}, nil
 	}
-	s := newService(u)
+	s := newService(queryTestDB(t), u, time.Local)
 	s.store.warmDays = 0
 	r := DateRange{From: "2026-10-12", To: "2026-10-12"}
 	if got, err := s.Usage(ctx, UsageQuery{Range: r, GroupBy: GroupProject}); err != nil || got.Totals.Input != 1 {

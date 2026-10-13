@@ -39,9 +39,6 @@ func startRuntimeStatusSubscription(ctx context.Context, runtime RuntimeStatusSo
 					continue
 				}
 				revisions.BumpStatus()
-				if previous != magpie.RuntimeStatusReady && status == magpie.RuntimeStatusReady {
-					revisions.BumpData()
-				}
 				previous = status
 			}
 		}

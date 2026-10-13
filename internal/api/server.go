@@ -14,27 +14,24 @@ import (
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/projection"
-	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 type Config struct {
-	ListenAddress          string
-	AppVersion             string
-	StaticDir              string
-	StaticFS               fs.FS
-	UsageRefreshInterval   time.Duration
-	SessionRefreshInterval time.Duration
-	QuotaRefreshInterval   time.Duration
+	ListenAddress        string
+	AppVersion           string
+	StaticDir            string
+	StaticFS             fs.FS
+	UsageRefreshInterval time.Duration
+	QuotaRefreshInterval time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{
-		ListenAddress:          "127.0.0.1:37991",
-		AppVersion:             "0.2.6",
-		StaticDir:              "frontend/dist",
-		UsageRefreshInterval:   30 * time.Second,
-		SessionRefreshInterval: 30 * time.Second,
-		QuotaRefreshInterval:   60 * time.Second,
+		ListenAddress:        "127.0.0.1:37991",
+		AppVersion:           "0.2.6",
+		StaticDir:            "frontend/dist",
+		UsageRefreshInterval: 60 * time.Second,
+		QuotaRefreshInterval: 60 * time.Second,
 	}
 }
 
@@ -50,7 +47,7 @@ type ProjectionService interface {
 
 type RevisionSource interface {
 	Current() RevisionTuple
-	BumpData() RevisionTuple
+	SetDataRevision(int64) RevisionTuple
 	BumpStatus() RevisionTuple
 	Subscribe() (<-chan RevisionTuple, func())
 }
@@ -58,9 +55,8 @@ type RevisionSource interface {
 type ShutdownRequester func()
 
 type WatcherQuery interface {
-	UsageSnapshot(context.Context) (magpie.UsageSummary, error)
-	RefreshUsageRows(context.Context, bool) (bool, error)
-	RefreshSessions(context.Context) ([]query.SessionRefreshFact, error)
+	Sync(context.Context) (int64, error)
+	InitialSyncComplete(context.Context) (bool, error)
 }
 
 type Dependencies struct {
@@ -73,16 +69,19 @@ type Dependencies struct {
 }
 
 type Server struct {
-	config            Config
-	projection        ProjectionService
-	query             WatcherQuery
-	revisions         RevisionSource
-	runtime           RuntimeStatusSource
-	quotas            *QuotaSnapshot
-	static            http.Handler
-	startOnce         sync.Once
-	shutdownOnce      sync.Once
-	shutdownRequester ShutdownRequester
+	config             Config
+	projection         ProjectionService
+	query              WatcherQuery
+	revisions          RevisionSource
+	runtime            RuntimeStatusSource
+	quotas             *QuotaSnapshot
+	static             http.Handler
+	startOnce          sync.Once
+	shutdownOnce       sync.Once
+	backgroundStopOnce sync.Once
+	backgroundCancel   context.CancelFunc
+	backgroundDone     <-chan struct{}
+	shutdownRequester  ShutdownRequester
 }
 
 func NewServer(config Config, dependencies Dependencies) (*Server, error) {
@@ -121,9 +120,6 @@ func completeConfig(config Config) Config {
 	if config.UsageRefreshInterval == 0 {
 		config.UsageRefreshInterval = defaults.UsageRefreshInterval
 	}
-	if config.SessionRefreshInterval == 0 {
-		config.SessionRefreshInterval = defaults.SessionRefreshInterval
-	}
 	if config.QuotaRefreshInterval == 0 {
 		config.QuotaRefreshInterval = defaults.QuotaRefreshInterval
 	}
@@ -149,7 +145,7 @@ func validateListenAddress(address string) error {
 }
 
 func validateRefreshIntervals(config Config) error {
-	if config.UsageRefreshInterval <= 0 || config.SessionRefreshInterval <= 0 || config.QuotaRefreshInterval <= 0 {
+	if config.UsageRefreshInterval <= 0 || config.QuotaRefreshInterval <= 0 {
 		return errors.New("api: refresh intervals must be positive")
 	}
 	return nil
@@ -157,8 +153,21 @@ func validateRefreshIntervals(config Config) error {
 
 func (s *Server) Start(ctx context.Context) {
 	s.startOnce.Do(func() {
-		startRuntimeStatusSubscription(ctx, s.runtime, s.revisions)
-		newWatchers(s.query, s.projection, s.revisions, s.quotas, s.config.UsageRefreshInterval, s.config.SessionRefreshInterval, s.config.QuotaRefreshInterval).start(ctx, s.runtime)
+		backgroundCtx, cancel := context.WithCancel(ctx)
+		s.backgroundCancel = cancel
+		startRuntimeStatusSubscription(backgroundCtx, s.runtime, s.revisions)
+		s.backgroundDone = newWatchers(s.query, s.projection, s.revisions, s.quotas, s.config.UsageRefreshInterval, s.config.QuotaRefreshInterval).start(backgroundCtx, s.runtime)
+	})
+}
+
+func (s *Server) stopBackground() {
+	s.backgroundStopOnce.Do(func() {
+		if s.backgroundCancel != nil {
+			s.backgroundCancel()
+		}
+		if s.backgroundDone != nil {
+			<-s.backgroundDone
+		}
 	})
 }
 
@@ -181,6 +190,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if apiPath {
+		if r.Method == http.MethodGet && s.isLibraryReadEndpoint(r.URL.Path) && !s.requireInitialSync(w, r) {
+			return
+		}
 		if s.servePublicV1Route(w, r) {
 			return
 		}
@@ -188,6 +200,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.static.ServeHTTP(w, r)
+}
+
+func (s *Server) isLibraryReadEndpoint(path string) bool {
+	switch path {
+	case "/api/usage/summary", "/api/usage/model-distribution", "/api/usage/projects",
+		"/api/usage/filter-options", "/api/usage/sessions", "/api/usage/session-detail",
+		publicV1SummaryPath:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) requireInitialSync(w http.ResponseWriter, r *http.Request) bool {
+	complete, err := s.query.InitialSyncComplete(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, ErrorInternal)
+		return false
+	}
+	if !complete {
+		writeAPIError(w, http.StatusServiceUnavailable, ErrorDataLoading)
+		return false
+	}
+	return true
 }
 
 func (s *Server) servePublicV1Route(w http.ResponseWriter, r *http.Request) bool {
@@ -380,11 +416,13 @@ func (s *Server) ListenAndServe() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.Start(ctx)
+	defer s.stopBackground()
 	return s.HTTPServer().ListenAndServe()
 }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	s.Start(ctx)
+	defer s.stopBackground()
 	httpServer := &http.Server{Addr: s.config.ListenAddress, Handler: s}
 	serveResult := make(chan error, 1)
 	go func() {

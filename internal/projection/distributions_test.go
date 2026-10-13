@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/Hogeexxl/Usagi/internal/database"
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
@@ -35,7 +38,12 @@ func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
 	defer upstream.Close()
 
 	client := magpie.NewClient(upstream.URL, upstream.Client())
-	service := NewService(query.NewService(client))
+	db, err := database.Open(filepath.Join(t.TempDir(), "usagi.sqlite"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := NewService(query.NewService(db, client, time.Local))
 	rangeValue := query.DateRange{From: "2026-10-11", To: "2026-10-11"}
 	for _, test := range []struct {
 		provider string

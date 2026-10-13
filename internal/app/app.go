@@ -56,7 +56,8 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 	if err != nil {
 		return err
 	}
-	if _, _, err := api.LocalTimezone(); err != nil {
+	_, location, err := api.LocalTimezone()
+	if err != nil {
 		return fmt.Errorf("app: resolve local time zone: %w", err)
 	}
 	descriptorPath, err := RuntimeDescriptorPath()
@@ -79,6 +80,10 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 			runErr = fmt.Errorf("app: close database: %w", err)
 		}
 	}()
+	var dataRevision int64
+	if err := db.QueryRowContext(ctx, "SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'data_revision'").Scan(&dataRevision); err != nil {
+		return fmt.Errorf("app: read database revision: %w", err)
+	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	supervisorCtx, cancelSupervisor := context.WithCancel(context.Background())
@@ -86,9 +91,9 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 	defer cancelSupervisor()
 
 	supervisor := NewMagpieSupervisor(dependencies.RuntimeFactory, magpieRetryInterval)
-	queryService := query.NewRuntimeService(supervisor)
+	queryService := query.NewRuntimeService(db, supervisor, location)
 	projectionService := projection.NewService(queryService)
-	revisions := api.NewRevisionService()
+	revisions := api.NewRevisionService(dataRevision)
 	quotaSnapshot := &api.QuotaSnapshot{}
 
 	config := api.DefaultConfig()

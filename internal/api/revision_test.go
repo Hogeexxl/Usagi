@@ -5,41 +5,45 @@ import (
 	"testing"
 )
 
-func TestRevisionServiceBumpsAndPublishesCurrentTuple(t *testing.T) {
-	service := NewRevisionService()
-	if got := service.Current(); got != (RevisionTuple{}) {
-		t.Fatalf("initial Current() = %+v, want zero tuple", got)
+func TestRevisionServiceSeedsAndPublishesDatabaseRevision(t *testing.T) {
+	service := NewRevisionService(7)
+	if got := service.Current(); got != (RevisionTuple{DataRevision: 7}) {
+		t.Fatalf("initial Current() = %+v, want data revision 7", got)
 	}
 	updates, cancel := service.Subscribe()
 	defer cancel()
-
-	if got := service.BumpData(); got != (RevisionTuple{DataRevision: 1}) {
-		t.Fatalf("BumpData() = %+v", got)
+	if got := service.SetDataRevision(7); got != (RevisionTuple{DataRevision: 7}) {
+		t.Fatalf("SetDataRevision(same) = %+v", got)
 	}
-	if got := service.BumpStatus(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
+	select {
+	case got := <-updates:
+		t.Fatalf("same revision unexpectedly published %+v", got)
+	default:
+	}
+	if got := service.SetDataRevision(8); got != (RevisionTuple{DataRevision: 8}) {
+		t.Fatalf("SetDataRevision(changed) = %+v", got)
+	}
+	if got := service.BumpStatus(); got != (RevisionTuple{DataRevision: 8, StatusRevision: 1}) {
 		t.Fatalf("BumpStatus() = %+v", got)
 	}
-	if got := service.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
-		t.Fatalf("Current() = %+v", got)
-	}
-	if got := <-updates; got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
+	if got := <-updates; got != (RevisionTuple{DataRevision: 8, StatusRevision: 1}) {
 		t.Fatalf("coalesced update = %+v", got)
 	}
 }
 
-func TestRevisionServiceConcurrentBumpsAreAtomic(t *testing.T) {
-	service := NewRevisionService()
-	const bumpCount = 64
+func TestRevisionServiceConcurrentDataRevisionUpdatesAreAtomic(t *testing.T) {
+	service := NewRevisionService(0)
+	const updateCount = 64
 	var wg sync.WaitGroup
-	for range bumpCount {
+	for revision := 1; revision <= updateCount; revision++ {
 		wg.Add(1)
-		go func() {
+		go func(revision int) {
 			defer wg.Done()
-			service.BumpData()
-		}()
+			service.SetDataRevision(int64(revision))
+		}(revision)
 	}
 	wg.Wait()
-	if got := service.Current(); got.DataRevision != bumpCount || got.StatusRevision != 0 {
-		t.Fatalf("Current() after concurrent bumps = %+v, want data=%d status=0", got, bumpCount)
+	if got := service.Current(); got.DataRevision < 1 || got.DataRevision > updateCount || got.StatusRevision != 0 {
+		t.Fatalf("Current() after concurrent updates = %+v, want a published database revision and status=0", got)
 	}
 }

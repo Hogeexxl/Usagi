@@ -176,6 +176,7 @@ func usageDayDigest(raw json.RawMessage) (UsageDayDigest, error) {
 	}
 	return UsageDayDigest{
 		Day:    point.Time.Format(time.DateOnly),
+		Time:   point.Time,
 		Calls:  point.Calls,
 		Digest: sha256.Sum256(canonical),
 	}, nil
@@ -285,10 +286,7 @@ func (c *Client) gatewayQuotas(ctx context.Context, provider string) []Quota {
 }
 
 func (c *Client) Sessions(ctx context.Context, limit int) (SessionsResponse, error) {
-	query := url.Values{}
-	if limit > 0 {
-		query.Set("limit", strconv.Itoa(limit))
-	}
+	query := url.Values{"limit": {strconv.Itoa(limit)}}
 
 	var sessions SessionsResponse
 	if err := c.getJSON(ctx, "/api/sessions", query, &sessions); err != nil {

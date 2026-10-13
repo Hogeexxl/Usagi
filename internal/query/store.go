@@ -50,6 +50,7 @@ type dayDigest struct {
 type usageStore struct {
 	upstream upstream
 	now      func() time.Time
+	location *time.Location
 	warmDays int
 	slots    chan struct{}
 
@@ -64,6 +65,7 @@ func newUsageStore(client upstream) *usageStore {
 	return &usageStore{
 		upstream: client,
 		now:      time.Now,
+		location: time.Local,
 		warmDays: storeWarmDays,
 		slots:    make(chan struct{}, storeFetchWorkers),
 		days:     make(map[string]*dayBucket),
@@ -326,7 +328,11 @@ func (s *usageStore) digests(ctx context.Context, days []string) (map[string]day
 			return nil, false, fmt.Errorf("query: usage digests: %w", err)
 		}
 		for _, value := range values {
-			result[value.Day] = dayDigest{digest: value.Digest, empty: value.Calls == 0}
+			day := value.Day
+			if !value.Time.IsZero() {
+				day = value.Time.In(s.location).Format(time.DateOnly)
+			}
+			result[day] = dayDigest{digest: value.Digest, empty: value.Calls == 0}
 		}
 		start = end + 1
 	}

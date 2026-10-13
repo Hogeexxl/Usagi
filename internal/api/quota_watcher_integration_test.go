@@ -140,7 +140,6 @@ func newQuotaWorkerServer(t *testing.T, runtime RuntimeStatusSource, revisions R
 	config := DefaultConfig()
 	config.StaticFS = fstest.MapFS{}
 	config.UsageRefreshInterval = time.Hour
-	config.SessionRefreshInterval = time.Hour
 	config.QuotaRefreshInterval = quotaInterval
 	server, err := NewServer(config, Dependencies{
 		Projection: quotaWorkerProjection{FakeProjectionService: &testsupport.FakeProjectionService{}, quota: quota},
@@ -159,7 +158,7 @@ func TestServerQuotaWatcherStartsOnReadyAndFollowsReading(t *testing.T) {
 	third := projection.QuotaView{Items: []projection.QuotaProviderView{{Provider: "codex", Name: "Codex", Plan: "reloaded"}}}
 	service := newQuotaWorkerService([]quotaResult{{view: first}, {view: second}, {view: third}})
 	runtime := newQuotaStatusSource(magpie.RuntimeStatusUnavailable)
-	revisions := NewRevisionService()
+	revisions := NewRevisionService(0)
 	snapshot := &QuotaSnapshot{}
 	server := newQuotaWorkerServer(t, runtime, revisions, snapshot, service, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -246,8 +245,8 @@ func TestQuotaWorkerBoundsFailuresAndSerializesReads(t *testing.T) {
 	service.firstGate = make(chan struct{})
 	runtime := newQuotaStatusSource(magpie.RuntimeStatusReady)
 	snapshot := &QuotaSnapshot{}
-	revisions := NewRevisionService()
-	watcher := newWatchers(nil, service, revisions, snapshot, time.Hour, time.Hour, 200*time.Millisecond)
+	revisions := NewRevisionService(0)
+	watcher := newWatchers(nil, service, revisions, snapshot, time.Hour, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -311,7 +310,7 @@ func TestQuotaWorkerRetriesInitialFailureWithShortInterval(t *testing.T) {
 	service := newQuotaWorkerService([]quotaResult{{err: failure}, {view: loaded}})
 	runtime := newQuotaStatusSource(magpie.RuntimeStatusReady)
 	snapshot := &QuotaSnapshot{}
-	watcher := newWatchers(nil, service, NewRevisionService(), snapshot, time.Hour, time.Hour, time.Second)
+	watcher := newWatchers(nil, service, NewRevisionService(0), snapshot, time.Hour, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -352,7 +351,7 @@ func TestQuotaWorkerKeepsCompletedSnapshotFailuresOnRegularInterval(t *testing.T
 	runtime := newQuotaStatusSource(magpie.RuntimeStatusReady)
 	snapshot := &QuotaSnapshot{}
 	snapshot.Replace(previous)
-	watcher := newWatchers(nil, service, NewRevisionService(), snapshot, time.Hour, time.Hour, 250*time.Millisecond)
+	watcher := newWatchers(nil, service, NewRevisionService(0), snapshot, time.Hour, 250*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})

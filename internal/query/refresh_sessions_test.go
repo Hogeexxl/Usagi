@@ -29,7 +29,7 @@ func TestRefreshSessionsReturnsSortedFactsFromSinglePublishedSnapshot(t *testing
 		}
 		return response, nil
 	}}
-	service := newService(u)
+	service := newService(queryTestDB(t), u, time.Local)
 
 	facts, err := service.RefreshSessions(context.Background())
 	if err != nil {
@@ -62,7 +62,7 @@ func TestUsageSnapshotAlwaysRequestsPeriodAll(t *testing.T) {
 		periods = append(periods, period)
 		return want, nil
 	}}
-	service := newService(u)
+	service := newService(queryTestDB(t), u, time.Local)
 	got, err := service.UsageSnapshot(context.Background())
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("UsageSnapshot() = %+v, %v; want %+v", got, err, want)
