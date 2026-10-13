@@ -41,8 +41,6 @@ func writeProjectionError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusNotFound, ErrorThreadNotFound)
 	case errors.Is(err, query.ErrUpstreamUnavailable):
 		writeAPIError(w, http.StatusServiceUnavailable, ErrorMagpieUnavailable)
-	case errors.Is(err, projection.ErrConflictingThreadParent):
-		writeAPIError(w, http.StatusInternalServerError, ErrorInternal)
 	case isUpstreamFailure(err):
 		writeAPIError(w, http.StatusBadGateway, ErrorUpstreamFailed)
 	default:

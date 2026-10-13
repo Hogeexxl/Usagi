@@ -43,6 +43,7 @@ type ProjectionService interface {
 	Sessions(context.Context, projection.ScopeQuery) (projection.SessionListView, error)
 	SessionDetail(context.Context, projection.ScopeQuery, projection.ThreadKey) (projection.SessionDetailView, error)
 	Quotas(context.Context, bool) (projection.QuotaView, error)
+	ToolUsage(context.Context, int) (projection.ToolUsageView, error)
 }
 
 type RevisionSource interface {
@@ -326,6 +327,11 @@ func (s *Server) serveInternalAPI(w http.ResponseWriter, r *http.Request) {
 	case "/api/usage/session-detail":
 		if r.Method == http.MethodGet {
 			s.handleSessionDetail(w, r)
+			return
+		}
+	case "/api/usage/tools":
+		if r.Method == http.MethodGet {
+			s.handleToolUsage(w, r)
 			return
 		}
 	case "/api/quota":

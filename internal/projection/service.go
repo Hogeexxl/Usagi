@@ -12,11 +12,10 @@ type Service struct {
 }
 
 type queryAPI interface {
-	Usage(context.Context, query.UsageQuery) (query.UsageResult, error)
-	UsageRows(context.Context, query.UsageRowsQuery) (query.UsageRowsResult, error)
-	Sessions(context.Context, query.SessionQuery) (query.SessionResult, error)
+	SessionDataset(context.Context, query.SessionQuery) (query.SessionDatasetResult, error)
 	FilterOptions(context.Context, query.DateRange) (query.FilterOptionsResult, error)
 	Quota(context.Context, bool) (magpie.QuotasResponse, error)
+	Overview(context.Context, query.OverviewQuery) (magpie.SessionOverview, error)
 }
 
 func NewService(q *query.Service) *Service {

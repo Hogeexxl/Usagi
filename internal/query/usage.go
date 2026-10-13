@@ -34,6 +34,11 @@ func normalizeUsageInput(r DateRange, filter UsageFilter) (UsageFilter, error) {
 		}
 	}
 	filter.Agents = normalizeValues(filter.Agents)
+	for index := range filter.Agents {
+		filter.Agents[index] = agentFamily(filter.Agents[index])
+	}
+	slices.Sort(filter.Agents)
+	filter.Agents = slices.Compact(filter.Agents)
 	filter.Models = normalizeModelSelections(filter.Models)
 	return filter, nil
 }

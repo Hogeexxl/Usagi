@@ -153,9 +153,6 @@ func (s *Server) handlePublicV1Summary(w http.ResponseWriter, r *http.Request) {
 		writeProjectionError(w, err)
 		return
 	}
-	if !s.requireRuntimeReady(w) {
-		return
-	}
 	dataRevision := s.revisions.Current().DataRevision
 	view, err := s.projection.Summary(r.Context(), projection.ScopeQuery{
 		Range: resolved.Query, Filter: query.UsageFilter{Agents: []string{"codex"}},

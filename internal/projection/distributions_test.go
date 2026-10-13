@@ -2,49 +2,28 @@ package projection
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/database"
-	"github.com/Hogeexxl/Usagi/internal/magpie"
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
-	rows := []magpie.UsageRequest{
-		{Agent: "codex", Provider: "provider-a", Model: "gpt-x", Input: 1, Priced: true},
-		{Agent: "codex", Provider: "provider-b", Model: "gpt-x", Input: 10, Priced: true},
-	}
-	var requests []magpie.UsageRequestsQuery
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/usage/requests" {
-			t.Errorf("unexpected Magpie path %q", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		provider, model := r.URL.Query().Get("provider"), r.URL.Query().Get("model")
-		requests = append(requests, magpie.UsageRequestsQuery{
-			Provider: provider, Model: model, Period: r.URL.Query().Get("period"),
-		})
-		if err := json.NewEncoder(w).Encode(magpie.UsageRequestsPage{Rows: rows, Total: len(rows)}); err != nil {
-			t.Errorf("encode usage page: %v", err)
-		}
-	}))
-	defer upstream.Close()
-
-	client := magpie.NewClient(upstream.URL, upstream.Client())
 	db, err := database.Open(filepath.Join(t.TempDir(), "usagi.sqlite"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	service := NewService(query.NewService(db, client, time.Local))
+	service := NewService(query.NewService(db, nil, time.UTC))
 	rangeValue := query.DateRange{From: "2026-10-11", To: "2026-10-11"}
+	insertDistributionSession(t, db, "session-a", "/repo/a")
+	insertDistributionSession(t, db, "session-b", "/repo/b")
+	insertDistributionRequest(t, db, "session-a", "provider-a", "gpt-x", 1)
+	insertDistributionRequest(t, db, "session-b", "provider-b", "gpt-x", 10)
 	for _, test := range []struct {
 		provider string
 		input    int64
@@ -60,15 +39,23 @@ func TestModelDistributionSeparatesSameModelAcrossProviders(t *testing.T) {
 			t.Fatalf("ModelDistribution(%s/gpt-x) = %+v, %v", test.provider, view, err)
 		}
 	}
-	// The day is fetched once, unfiltered (a digest probe plus one page), and
-	// both provider selections are split from the cached rows.
-	if len(requests) != 2 {
-		t.Fatalf("UsageRequests query count = %d, want 2", len(requests))
+}
+
+func insertDistributionSession(t *testing.T, db *sql.DB, id, cwd string) {
+	t.Helper()
+	stamp := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC).UnixNano()
+	if _, err := db.Exec(`INSERT INTO sessions (agent, id, cwd, start_ns, last_ns, first_seen_ns, last_seen_ns)
+		VALUES ('codex', ?, ?, ?, ?, ?, ?)`, id, cwd, stamp, stamp, stamp, stamp); err != nil {
+		t.Fatalf("insert distribution session: %v", err)
 	}
-	for index, request := range requests {
-		if request.Provider != "" || request.Model != "" || request.Period != "2026-10-11..2026-10-11" {
-			t.Fatalf("UsageRequests query %d = %+v", index, request)
-		}
+}
+
+func insertDistributionRequest(t *testing.T, db *sql.DB, session, provider, model string, input int64) {
+	t.Helper()
+	stamp := time.Date(2026, 10, 11, 12, 1, 0, 0, time.UTC).UnixNano()
+	if _, err := db.Exec(`INSERT INTO requests (t_ns, local_day, agent, provider, model, session, input)
+		VALUES (?, '2026-10-11', 'codex', ?, ?, ?, ?)`, stamp, provider, model, session, input); err != nil {
+		t.Fatalf("insert distribution request: %v", err)
 	}
 }
 
@@ -77,38 +64,14 @@ func TestDistribution(t *testing.T) {
 		Range:  query.DateRange{From: "2026-10-01", To: "2026-10-11"},
 		Filter: query.UsageFilter{Agents: []string{"codex"}, Models: []query.ModelSelection{{ProviderID: "openai", Model: "gpt"}}},
 	}
-	call := 0
-	fake := &fakeQuery{onUsage: func(_ context.Context, got query.UsageQuery) (query.UsageResult, error) {
-		want := query.UsageQuery{Range: scope.Range, Filter: scope.Filter}
-		call++
-		switch call {
-		case 1:
-			want.GroupBy = query.GroupModel
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("model query = %+v, want %+v", got, want)
-			}
-			return query.UsageResult{Groups: []query.UsageGroup{
-				{Model: "zeta", Totals: query.UsageTotals{Input: 20, Output: 5, Cost: 0.25}},
-				{Model: "mid", Totals: query.UsageTotals{Input: 10}},
-				{Model: "alpha", Totals: query.UsageTotals{Input: 20, Output: 5, Unpriced: 1}},
-			}}, nil
-		case 2:
-			want.GroupBy = query.GroupProject
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("project query = %+v, want %+v", got, want)
-			}
-			return query.UsageResult{Groups: []query.UsageGroup{
-				{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, Totals: query.UsageTotals{Input: 5}},
-				{Project: query.ProjectRef{Kind: query.ProjectKindUnknown}, Totals: query.UsageTotals{Input: 5}},
-				{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, Totals: query.UsageTotals{Input: 8}},
-				{Project: query.ProjectRef{Kind: query.ProjectKindProjectless}, Totals: query.UsageTotals{Input: 5}},
-				{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, Totals: query.UsageTotals{Input: 5}},
-			}}, nil
-		default:
-			t.Fatalf("unexpected Usage call %d", call)
-			return query.UsageResult{}, nil
-		}
-	}}
+	rows := []query.UsageRow{
+		distributionRow(testTime(9, 0), "codex", "zeta", "provider-a", 5, 5, query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, true, .25),
+		distributionRow(testTime(9, 1), "codex", "alpha", "provider-a", 5, 0, query.ProjectRef{Kind: query.ProjectKindUnknown}, false, 0),
+		distributionRow(testTime(9, 2), "codex", "mid", "provider-a", 8, 0, query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, true, 0),
+		distributionRow(testTime(9, 3), "codex", "alpha", "provider-a", 5, 0, query.ProjectRef{Kind: query.ProjectKindProjectless}, true, 0),
+		distributionRow(testTime(9, 4), "codex", "zeta", "provider-a", 5, 0, query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, true, 0),
+	}
+	fake := &fakeQuery{dataset: query.SessionDatasetResult{Rows: rows}}
 
 	service := newService(fake)
 	models, err := service.ModelDistribution(context.Background(), scope)
@@ -116,9 +79,9 @@ func TestDistribution(t *testing.T) {
 		t.Fatalf("ModelDistribution() error = %v", err)
 	}
 	wantModels := ModelDistributionView{Items: []ModelDistributionItem{
-		{Model: "alpha", Usage: usageFromTotals(query.UsageTotals{Input: 20, Output: 5, Unpriced: 1})},
-		{Model: "zeta", Usage: usageFromTotals(query.UsageTotals{Input: 20, Output: 5, Cost: 0.25})},
-		{Model: "mid", Usage: usageFromTotals(query.UsageTotals{Input: 10})},
+		{Model: "zeta", Usage: usageFromTotals(query.UsageTotals{Calls: 2, Input: 10, Output: 5, Cost: 0.25})},
+		{Model: "alpha", Usage: usageFromTotals(query.UsageTotals{Calls: 2, Input: 10, Unpriced: 1})},
+		{Model: "mid", Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 8})},
 	}}
 	if !reflect.DeepEqual(models, wantModels) {
 		t.Fatalf("ModelDistribution() = %+v, want %+v", models, wantModels)
@@ -129,16 +92,18 @@ func TestDistribution(t *testing.T) {
 		t.Fatalf("ProjectDistribution() error = %v", err)
 	}
 	wantProjects := ProjectDistributionView{Items: []ProjectDistributionItem{
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, Usage: usageFromTotals(query.UsageTotals{Input: 8})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, Usage: usageFromTotals(query.UsageTotals{Input: 5})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, Usage: usageFromTotals(query.UsageTotals{Input: 5})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProjectless}, Usage: usageFromTotals(query.UsageTotals{Input: 5})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindUnknown}, Usage: usageFromTotals(query.UsageTotals{Input: 5})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5, Output: 5, Cost: .25})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 8})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProjectless}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindUnknown}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5, Unpriced: 1})},
 	}}
 	if !reflect.DeepEqual(projects, wantProjects) {
 		t.Fatalf("ProjectDistribution() = %+v, want %+v", projects, wantProjects)
 	}
-	if call != 2 {
-		t.Fatalf("Usage calls = %d, want 2", call)
-	}
+}
+
+func distributionRow(at time.Time, agent, model, provider string, input, output int64, project query.ProjectRef, priced bool, cost float64) query.UsageRow {
+	return query.UsageRow{Time: at, Agent: agent, Model: model, Provider: provider, Input: input, Output: output,
+		Project: project, Priced: priced, Cost: cost, ResolvedSession: query.SessionRef{Agent: agent, ID: "session", Matched: project.Kind != query.ProjectKindUnknown}}
 }

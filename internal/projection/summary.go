@@ -2,31 +2,29 @@ package projection
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 func (s *Service) Summary(ctx context.Context, q ScopeQuery) (SummaryView, error) {
-	usage, err := s.query.Usage(ctx, query.UsageQuery{
-		Range: q.Range, Filter: q.Filter, GroupBy: query.GroupNone,
-	})
-	if err != nil {
-		return SummaryView{}, fmt.Errorf("projection: summary usage: %w", err)
-	}
-	threads, err := s.loadThreadProjection(ctx, q)
+	list, err := s.Sessions(ctx, q)
 	if err != nil {
 		return SummaryView{}, err
 	}
-	result := SummaryView{Usage: usageFromTotals(usage.Totals)}
-	for index, thread := range threads.Threads {
-		if thread.Type != ThreadMain {
-			continue
-		}
-		result.RootSessionCount++
-		if threads.inclusiveRollup(index).inclusiveUsage.Unpriced > 0 {
-			result.RootUnpricedSessionCount++
-		}
+	return list.Summary, nil
+}
+
+func (s *Service) ToolUsage(ctx context.Context, days int) (ToolUsageView, error) {
+	if days != 1 && days != 7 && days != 30 {
+		return ToolUsageView{}, query.ErrInvalidFilter
+	}
+	overview, err := s.query.Overview(ctx, query.OverviewQuery{Days: days})
+	if err != nil {
+		return ToolUsageView{}, err
+	}
+	result := ToolUsageView{Days: days, Calls: int64(overview.Tools.Calls), Top: make([]ToolUsageItem, 0, len(overview.Tools.Top))}
+	for _, tool := range overview.Tools.Top {
+		result.Top = append(result.Top, ToolUsageItem{Name: tool.Name, Calls: int64(tool.Calls)})
 	}
 	return result, nil
 }

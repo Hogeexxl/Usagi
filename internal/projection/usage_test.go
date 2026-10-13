@@ -69,7 +69,7 @@ func TestUsageMerge(t *testing.T) {
 	}
 }
 
-func TestUsageViewDerivesOutputSpeedAndRetries(t *testing.T) {
+func TestSessionFieldsOutputSpeedAndRetries(t *testing.T) {
 	view := usageFromTotals(query.UsageTotals{Calls: 3, Retried: 1, DecodeMs: 10_000, DecodeOut: 600, DecodeN: 2})
 	if view.Retried != 1 || view.DecodeN != 2 || view.OutputSpeed == nil || *view.OutputSpeed != 60 {
 		t.Fatalf("usageFromTotals() = %+v, want retried 1, 2 samples, 60 tokens/s", view)

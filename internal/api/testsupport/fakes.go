@@ -32,6 +32,8 @@ type FakeProjectionService struct {
 	SessionsErr               error
 	SessionDetailResult       projection.SessionDetailView
 	SessionDetailErr          error
+	ToolUsageResult           projection.ToolUsageView
+	ToolUsageErr              error
 	Quota                     FakeQuotaService
 
 	mu                         sync.Mutex
@@ -41,6 +43,7 @@ type FakeProjectionService struct {
 	SessionQueries             []projection.ScopeQuery
 	SessionDetailQueries       []projection.ScopeQuery
 	SessionDetailKeys          []projection.ThreadKey
+	ToolUsageQueries           []int
 }
 
 func (f *FakeProjectionService) Summary(_ context.Context, q projection.ScopeQuery) (projection.SummaryView, error) {
@@ -83,6 +86,13 @@ func (f *FakeProjectionService) SessionDetail(_ context.Context, q projection.Sc
 	f.SessionDetailQueries = append(f.SessionDetailQueries, q)
 	f.SessionDetailKeys = append(f.SessionDetailKeys, key)
 	return f.SessionDetailResult, f.SessionDetailErr
+}
+
+func (f *FakeProjectionService) ToolUsage(_ context.Context, days int) (projection.ToolUsageView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ToolUsageQueries = append(f.ToolUsageQueries, days)
+	return f.ToolUsageResult, f.ToolUsageErr
 }
 
 func (f *FakeProjectionService) Quotas(ctx context.Context, asked bool) (projection.QuotaView, error) {

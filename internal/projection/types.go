@@ -71,11 +71,14 @@ type SessionListItemView struct {
 	SelfUsage      UsageView
 	SubagentUsage  UsageView
 	InclusiveUsage UsageView
-	SubagentCount  int64
+	HasUsageRows   bool
+	LastActivity   time.Time
+	SubagentCount  *int64
 }
 
 type SessionListView struct {
-	Items []SessionListItemView
+	Items   []SessionListItemView
+	Summary SummaryView
 }
 
 type SessionDetailView struct {
@@ -90,6 +93,19 @@ type SummaryView struct {
 	Usage                    UsageView
 	RootSessionCount         int64
 	RootUnpricedSessionCount int64
+	SessionMedian            *int64
+	SessionP90               *int64
+}
+
+type ToolUsageItem struct {
+	Name  string
+	Calls int64
+}
+
+type ToolUsageView struct {
+	Days  int
+	Calls int64
+	Top   []ToolUsageItem
 }
 
 type ModelDistributionItem struct {
@@ -169,6 +185,5 @@ type QuotaView struct {
 }
 
 var (
-	ErrThreadNotFound          = errors.New("projection: thread not found")
-	ErrConflictingThreadParent = errors.New("projection: conflicting thread parent")
+	ErrThreadNotFound = errors.New("projection: thread not found")
 )

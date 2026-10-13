@@ -26,9 +26,11 @@ type usageDTO struct {
 }
 
 type summaryResponseDTO struct {
-	DataRevision int64    `json:"data_revision"`
-	Usage        usageDTO `json:"usage"`
-	SessionCount int64    `json:"session_count"`
+	DataRevision  int64    `json:"data_revision"`
+	Usage         usageDTO `json:"usage"`
+	SessionCount  int64    `json:"session_count"`
+	SessionMedian *int64   `json:"session_median"`
+	SessionP90    *int64   `json:"session_p90"`
 }
 
 type modelDistributionItemDTO struct {
@@ -107,12 +109,26 @@ type sessionListItemDTO struct {
 	SelfUsage      usageDTO         `json:"self_usage"`
 	SubagentUsage  usageDTO         `json:"subagent_usage"`
 	InclusiveUsage usageDTO         `json:"inclusive_usage"`
-	SubagentCount  int64            `json:"subagent_count"`
+	HasUsageRows   bool             `json:"has_usage_rows"`
+	LastActivityMS *int64           `json:"last_activity_ms"`
+	SubagentCount  *int64           `json:"subagent_count"`
 }
 
 type sessionsResponseDTO struct {
 	DataRevision int64                `json:"data_revision"`
+	Summary      summaryResponseDTO   `json:"summary"`
 	Items        []sessionListItemDTO `json:"items"`
+}
+
+type toolUsageItemDTO struct {
+	Name  string `json:"name"`
+	Calls int64  `json:"calls"`
+}
+
+type toolUsageResponseDTO struct {
+	Days  int                `json:"days"`
+	Calls int64              `json:"calls"`
+	Top   []toolUsageItemDTO `json:"top"`
 }
 
 type sessionDetailResponseDTO struct {

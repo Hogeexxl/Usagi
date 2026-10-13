@@ -26,27 +26,19 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		writeProjectionError(w, err)
 		return
 	}
-	if !s.requireRuntimeReady(w) {
-		return
-	}
 	dataRevision := s.revisions.Current().DataRevision
 	view, err := s.projection.Summary(r.Context(), scope)
 	if err != nil {
 		writeProjectionError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, summaryResponseDTO{
-		DataRevision: dataRevision, Usage: mapUsageDTO(view.Usage), SessionCount: view.RootSessionCount,
-	})
+	writeJSON(w, http.StatusOK, mapSummaryDTO(dataRevision, view))
 }
 
 func (s *Server) handleModelDistribution(w http.ResponseWriter, r *http.Request) {
 	scope, _, err := parseScopeRequest(r, false)
 	if err != nil {
 		writeProjectionError(w, err)
-		return
-	}
-	if !s.requireRuntimeReady(w) {
 		return
 	}
 	dataRevision := s.revisions.Current().DataRevision
@@ -66,9 +58,6 @@ func (s *Server) handleProjectDistribution(w http.ResponseWriter, r *http.Reques
 	scope, _, err := parseScopeRequest(r, false)
 	if err != nil {
 		writeProjectionError(w, err)
-		return
-	}
-	if !s.requireRuntimeReady(w) {
 		return
 	}
 	dataRevision := s.revisions.Current().DataRevision
@@ -104,9 +93,6 @@ func (s *Server) handleFilterOptions(w http.ResponseWriter, r *http.Request) {
 		writeProjectionError(w, err)
 		return
 	}
-	if !s.requireRuntimeReady(w) {
-		return
-	}
 	dataRevision := s.revisions.Current().DataRevision
 	view, err := s.projection.FilterOptions(r.Context(), projection.ScopeQuery{Range: rangeValue.Query})
 	if err != nil {
@@ -139,21 +125,23 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeProjectionError(w, err)
 		return
 	}
-	if !s.requireRuntimeReady(w) {
-		return
-	}
 	dataRevision := s.revisions.Current().DataRevision
 	view, err := s.projection.Sessions(r.Context(), scope)
 	if err != nil {
 		writeProjectionError(w, err)
 		return
 	}
-	response := sessionsResponseDTO{DataRevision: dataRevision, Items: make([]sessionListItemDTO, 0, len(view.Items))}
+	response := sessionsResponseDTO{DataRevision: dataRevision, Summary: mapSummaryDTO(dataRevision, view.Summary), Items: make([]sessionListItemDTO, 0, len(view.Items))}
 	for _, item := range view.Items {
+		var lastActivityMS *int64
+		if !item.LastActivity.IsZero() {
+			value := item.LastActivity.UnixMilli()
+			lastActivityMS = &value
+		}
 		response.Items = append(response.Items, sessionListItemDTO{
 			Thread: mapSessionThreadDTO(item.Thread), SelfUsage: mapUsageDTO(item.SelfUsage),
 			SubagentUsage: mapUsageDTO(item.SubagentUsage), InclusiveUsage: mapUsageDTO(item.InclusiveUsage),
-			SubagentCount: item.SubagentCount,
+			HasUsageRows: item.HasUsageRows, LastActivityMS: lastActivityMS, SubagentCount: item.SubagentCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -163,9 +151,6 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	scope, key, err := parseScopeRequest(r, true)
 	if err != nil {
 		writeProjectionError(w, err)
-		return
-	}
-	if !s.requireRuntimeReady(w) {
 		return
 	}
 	dataRevision := s.revisions.Current().DataRevision
@@ -183,6 +168,46 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		response.Children = append(response.Children, mapSessionThreadDTO(child))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleToolUsage(w http.ResponseWriter, r *http.Request) {
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(values) != 1 || len(values["days"]) != 1 {
+		writeProjectionError(w, query.ErrInvalidFilter)
+		return
+	}
+	var days int
+	switch values.Get("days") {
+	case "1":
+		days = 1
+	case "7":
+		days = 7
+	case "30":
+		days = 30
+	default:
+		writeProjectionError(w, query.ErrInvalidFilter)
+		return
+	}
+	if !s.requireRuntimeReady(w) {
+		return
+	}
+	view, err := s.projection.ToolUsage(r.Context(), days)
+	if err != nil {
+		writeProjectionError(w, err)
+		return
+	}
+	response := toolUsageResponseDTO{Days: view.Days, Calls: view.Calls, Top: make([]toolUsageItemDTO, 0, len(view.Top))}
+	for _, item := range view.Top {
+		response.Top = append(response.Top, toolUsageItemDTO{Name: item.Name, Calls: item.Calls})
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func mapSummaryDTO(dataRevision int64, view projection.SummaryView) summaryResponseDTO {
+	return summaryResponseDTO{
+		DataRevision: dataRevision, Usage: mapUsageDTO(view.Usage), SessionCount: view.RootSessionCount,
+		SessionMedian: view.SessionMedian, SessionP90: view.SessionP90,
+	}
 }
 
 func parseScopeRequest(r *http.Request, detail bool) (projection.ScopeQuery, projection.ThreadKey, error) {

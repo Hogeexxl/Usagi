@@ -26,14 +26,12 @@ func TestSessionProjectionClaudeThreads(t *testing.T) {
 	}
 	session := query.SessionUsage{
 		Agent: "claude", ID: "A", Title: "Claude session", Project: project,
+		HasRows: true, Matched: true,
 		FirstUsage: cTime, LastUsage: mainTime,
 		Totals:      query.UsageTotals{Calls: 4, Input: 23, Output: 8, Cost: 1.05},
 		ModelEffort: []query.ModelEffortUsage{{Model: "main-model", Effort: "high", Totals: query.UsageTotals{Input: 23}}},
 	}
-	service := newService(&fakeQuery{
-		sessions:  query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: rows},
-	})
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{Sessions: []query.SessionUsage{session}, Rows: rows}})
 
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
@@ -42,10 +40,10 @@ func TestSessionProjectionClaudeThreads(t *testing.T) {
 	if len(list.Items) != 1 {
 		t.Fatalf("main session item count = %d, want 1: %+v", len(list.Items), list.Items)
 	}
-	if list.Items[0].Thread.Type != ThreadMain || list.Items[0].SubagentCount != 2 || list.Items[0].SelfUsage.Input != 10 || list.Items[0].SubagentUsage.Input != 13 || list.Items[0].InclusiveUsage.Total != 31 {
+	if list.Items[0].Thread.Type != ThreadMain || list.Items[0].SubagentCount == nil || *list.Items[0].SubagentCount != 2 || list.Items[0].SelfUsage.Input != 10 || list.Items[0].SubagentUsage.Input != 13 || list.Items[0].InclusiveUsage.Total != 31 {
 		t.Fatalf("main session list rollup = %+v", list.Items[0])
 	}
-	threadsProjection, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
+	threadsProjection, _, _, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("loadThreadProjection() error = %v", err)
 	}
@@ -122,11 +120,10 @@ func TestSessionProjectionClaudeWithoutMainRows(t *testing.T) {
 	project := query.ProjectRef{Kind: query.ProjectKindProject, Path: "/workspace/project", Name: "project"}
 	first, last := testTime(8, 0), testTime(11, 0)
 	service := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{{
+		dataset: query.SessionDatasetResult{Sessions: []query.SessionUsage{{
 			Agent: "claude", ID: "A", Title: "Claude session", Project: project,
-			FirstUsage: first, LastUsage: last, Totals: query.UsageTotals{Calls: 1, Input: 5},
-		}}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+			Start: first, Last: last, HasRows: true, Matched: true,
+		}}, Rows: []query.UsageRow{
 			testUsageRow("claude", "A", "B", "", testTime(11, 0), "worker", "low", 5, 1, 0, 0, "", ""),
 		}},
 	})
@@ -142,18 +139,19 @@ func TestSessionProjectionClaudeWithoutMainRows(t *testing.T) {
 	if main.Key.ThreadID != "A" || main.Type != ThreadMain || main.Usage != (UsageView{}) {
 		t.Fatalf("main without self rows = %+v", main)
 	}
-	if !main.FirstUsage.Equal(first) || !main.LastUsage.Equal(last) {
-		t.Fatalf("main fallback activity = %v..%v, want %v..%v", main.FirstUsage, main.LastUsage, first, last)
+	if !main.FirstUsage.IsZero() || !main.LastUsage.IsZero() || !list.Items[0].LastActivity.Equal(testTime(11, 0)) {
+		t.Fatalf("main own thread activity = %v..%v, session last activity = %v", main.FirstUsage, main.LastUsage, list.Items[0].LastActivity)
 	}
-	if list.Items[0].SubagentCount != 1 || list.Items[0].SubagentUsage.Input != 5 || list.Items[0].InclusiveUsage.Input != 5 {
+	if list.Items[0].SubagentCount == nil || *list.Items[0].SubagentCount != 1 || list.Items[0].SubagentUsage.Input != 5 || list.Items[0].InclusiveUsage.Input != 5 {
 		t.Fatalf("subagent rollup = %+v", list.Items[0])
 	}
 }
 
-func TestCompactionTokens(t *testing.T) {
+func TestSessionFieldsCompactionTokens(t *testing.T) {
 	project := query.ProjectRef{Kind: query.ProjectKindProject, Path: "/workspace/codex", Name: "codex"}
 	session := query.SessionUsage{
 		Agent: "codex", ID: "X", Title: "Codex session", Project: project,
+		HasRows: true, Matched: true,
 		FirstUsage: testTime(9, 0), LastUsage: testTime(10, 0),
 		Totals: query.UsageTotals{Calls: 6, Input: 21, Output: 7, CacheRead: 1, CacheWrite: 4, Cost: 1.5},
 		ModelEffort: []query.ModelEffortUsage{
@@ -176,10 +174,7 @@ func TestCompactionTokens(t *testing.T) {
 	rows[3].Cost = 0.25
 	rows[4].Cost = 0.125
 	rows[5].Cost = 0.25
-	service := newService(&fakeQuery{
-		sessions:  query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: rows},
-	})
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{Sessions: []query.SessionUsage{session}, Rows: rows}})
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
@@ -188,9 +183,9 @@ func TestCompactionTokens(t *testing.T) {
 		t.Fatalf("session item count = %d, want 1", len(list.Items))
 	}
 	thread := list.Items[0].Thread
-	wantUsage := usageFromTotals(session.Totals)
+	wantUsage := usageFromTotals(query.UsageTotals{Calls: 6, Input: 21, Output: 7, CacheRead: 1, CacheWrite: 4, Cost: 1.5})
 	if thread.Type != ThreadMain || thread.ParentThreadID != "" || !reflect.DeepEqual(thread.Usage, wantUsage) || thread.Usage.Total != 33 || thread.Usage.Cost != 1.5 {
-		t.Fatalf("Codex flat Usage must come from SessionUsage: %+v", thread)
+		t.Fatalf("Codex main-thread usage = %+v, want %+v", thread.Usage, wantUsage)
 	}
 	if len(thread.ModelEffort) != 3 {
 		t.Fatalf("ModelEffort count = %d, want 3: %+v", len(thread.ModelEffort), thread.ModelEffort)
@@ -198,11 +193,11 @@ func TestCompactionTokens(t *testing.T) {
 	if thread.ModelEffort[0].Model != "gpt" || thread.ModelEffort[0].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[0].Usage, usageFromTotals(session.ModelEffort[0].Totals)) || thread.ModelEffort[0].CompactionTokens == nil || *thread.ModelEffort[0].CompactionTokens != 7 {
 		t.Fatalf("known compaction group = %+v", thread.ModelEffort[0])
 	}
-	if thread.ModelEffort[1].Model != "gpt" || thread.ModelEffort[1].Effort != "low" || !reflect.DeepEqual(thread.ModelEffort[1].Usage, usageFromTotals(session.ModelEffort[1].Totals)) || thread.ModelEffort[1].CompactionTokens == nil || *thread.ModelEffort[1].CompactionTokens != 0 {
-		t.Fatalf("known zero compaction group = %+v", thread.ModelEffort[1])
+	if thread.ModelEffort[1].Model != "o3" || thread.ModelEffort[1].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[1].Usage, usageFromTotals(session.ModelEffort[2].Totals)) || thread.ModelEffort[1].CompactionTokens != nil {
+		t.Fatalf("unavailable compaction group = %+v", thread.ModelEffort[1])
 	}
-	if thread.ModelEffort[2].Model != "o3" || thread.ModelEffort[2].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[2].Usage, usageFromTotals(session.ModelEffort[2].Totals)) || thread.ModelEffort[2].CompactionTokens != nil {
-		t.Fatalf("unavailable compaction group = %+v", thread.ModelEffort[2])
+	if thread.ModelEffort[2].Model != "gpt" || thread.ModelEffort[2].Effort != "low" || !reflect.DeepEqual(thread.ModelEffort[2].Usage, usageFromTotals(session.ModelEffort[1].Totals)) || thread.ModelEffort[2].CompactionTokens == nil || *thread.ModelEffort[2].CompactionTokens != 0 {
+		t.Fatalf("known zero compaction group = %+v", thread.ModelEffort[2])
 	}
 	for _, modelEffort := range thread.ModelEffort {
 		if modelEffort.CompactionTokens == nil {
@@ -223,22 +218,22 @@ func TestCompactionTokens(t *testing.T) {
 }
 
 func TestSessionProjectionRangeOrphan(t *testing.T) {
-	session := query.SessionUsage{Agent: "claude", ID: "A", LastUsage: testTime(12, 0)}
-	service := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+	session := query.SessionUsage{Agent: "claude", ID: "A", Last: testTime(12, 0), HasRows: true, Matched: true}
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{session},
+		Rows: []query.UsageRow{
 			testUsageRow("claude", "A", "P", "A", testTime(11, 0), "worker", "low", 2, 0, 0, 0, "", ""),
 			testUsageRow("claude", "A", "C", "B", testTime(10, 0), "nested", "medium", 3, 0, 0, 0, "", ""),
-		}},
-	})
+		},
+	}})
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "A" || list.Items[0].SubagentCount != 2 {
+	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "A" || list.Items[0].SubagentCount == nil || *list.Items[0].SubagentCount != 2 {
 		t.Fatalf("root list item must include all real subagents: %+v", list.Items)
 	}
-	projected, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
+	projected, _, _, err := service.loadThreadProjection(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("loadThreadProjection() error = %v", err)
 	}
@@ -256,17 +251,17 @@ func TestSessionProjectionRangeOrphan(t *testing.T) {
 
 func TestThreadIdentityAndSort(t *testing.T) {
 	at := testTime(10, 0)
-	service := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{
 			{Agent: "claude", ID: "A2", FirstUsage: at, LastUsage: at},
 			{Agent: "codex", ID: "B", FirstUsage: at, LastUsage: at},
 			{Agent: "claude", ID: "A1", FirstUsage: at, LastUsage: at},
-		}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+		},
+		Rows: []query.UsageRow{
 			testUsageRow("claude", "A2", "B", "", at, "worker", "low", 1, 0, 0, 0, "", ""),
 			testUsageRow("claude", "A1", "B", "", at, "worker", "low", 1, 0, 0, 0, "", ""),
-		}},
-	})
+		},
+	}})
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
@@ -293,71 +288,71 @@ func TestSessionProjectionErrors(t *testing.T) {
 		t.Fatalf("missing thread error = %v, want %v", err, ErrThreadNotFound)
 	}
 
-	wantErr := errors.New("sessions query failed")
-	service := newService(&fakeQuery{onSessions: func(context.Context, query.SessionQuery) (query.SessionResult, error) {
-		return query.SessionResult{}, wantErr
+	wantErr := errors.New("session dataset query failed")
+	service := newService(&fakeQuery{onSessionDataset: func(context.Context, query.SessionQuery) (query.SessionDatasetResult, error) {
+		return query.SessionDatasetResult{}, wantErr
 	}})
 	if _, err := service.Sessions(context.Background(), ScopeQuery{}); !errors.Is(err, wantErr) {
-		t.Fatalf("wrapped Sessions query error = %v, want chain to %v", err, wantErr)
-	}
-
-	wantErr = errors.New("usage rows query failed")
-	service = newService(&fakeQuery{
-		onUsageRows: func(context.Context, query.UsageRowsQuery) (query.UsageRowsResult, error) {
-			return query.UsageRowsResult{}, wantErr
-		},
-	})
-	if _, err := service.Sessions(context.Background(), ScopeQuery{}); !errors.Is(err, wantErr) {
-		t.Fatalf("wrapped UsageRows query error = %v, want chain to %v", err, wantErr)
+		t.Fatalf("wrapped SessionDataset error = %v, want chain to %v", err, wantErr)
 	}
 }
 
 func TestThreadCodexKindsStayFlat(t *testing.T) {
-	service := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{{
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{{
 			Agent: "codex", ID: "X", Totals: query.UsageTotals{Calls: 2, Input: 3},
 			ModelEffort: []query.ModelEffortUsage{{Model: "gpt", Effort: "high", Totals: query.UsageTotals{Calls: 2, Input: 3}}},
-		}}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+		}},
+		Rows: []query.UsageRow{
 			testUsageRow("codex", "X", "", "", testTime(9, 0), "gpt", "high", 1, 0, 0, 0, "review", "gateway"),
 			testUsageRow("codex", "X", "", "", testTime(10, 0), "gpt", "high", 2, 0, 0, 0, "collab_spawn", "gateway"),
-		}},
-	})
+		},
+	}})
 
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("Sessions() error = %v", err)
 	}
-	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "X" || list.Items[0].Thread.Type != ThreadMain || list.Items[0].Thread.Usage.Input != 3 || list.Items[0].SelfUsage.Input != 3 || list.Items[0].SubagentUsage != (UsageView{}) || list.Items[0].InclusiveUsage.Input != 3 || list.Items[0].SubagentCount != 0 {
+	if len(list.Items) != 1 || list.Items[0].Thread.Key.ThreadID != "X" || list.Items[0].Thread.Type != ThreadMain || list.Items[0].Thread.Usage.Input != 1 || list.Items[0].SelfUsage.Input != 1 || list.Items[0].SubagentUsage.Input != 2 || list.Items[0].InclusiveUsage.Input != 3 || list.Items[0].SubagentCount != nil {
 		t.Fatalf("Codex kind rows produced non-flat root item: %+v", list.Items)
 	}
 }
 
 func TestThreadParentConflict(t *testing.T) {
-	session := query.SessionUsage{Agent: "claude", ID: "A"}
-	conflicting := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+	session := query.SessionUsage{Agent: "claude", ID: "A", HasRows: true, Matched: true}
+	conflicting := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{session},
+		Rows: []query.UsageRow{
 			testUsageRow("claude", "A", "B", "P", testTime(9, 0), "m", "", 1, 0, 0, 0, "", ""),
 			testUsageRow("claude", "A", "B", "Q", testTime(10, 0), "m", "", 1, 0, 0, 0, "", ""),
-		}},
-	})
-	if _, err := conflicting.Sessions(context.Background(), ScopeQuery{}); !errors.Is(err, ErrConflictingThreadParent) {
-		t.Fatalf("conflicting parents error = %v, want %v", err, ErrConflictingThreadParent)
+		},
+	}})
+	list, err := conflicting.Sessions(context.Background(), ScopeQuery{})
+	if err != nil || len(list.Items) != 1 || list.Items[0].InclusiveUsage.Input != 2 {
+		t.Fatalf("conflicting parent rows must remain in flat session totals: %+v, %v", list, err)
+	}
+	projection, _, _, err := conflicting.loadThreadProjection(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("loadThreadProjection() error = %v", err)
+	}
+	for _, thread := range projection.Threads {
+		if thread.Key.ThreadID == "B" && thread.ParentThreadID != "" {
+			t.Fatalf("conflicting parent values selected %q, want empty", thread.ParentThreadID)
+		}
 	}
 
-	missingThenKnown := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+	missingThenKnown := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{session},
+		Rows: []query.UsageRow{
 			testUsageRow("claude", "A", "B", "", testTime(9, 0), "m", "", 1, 0, 0, 0, "", ""),
 			testUsageRow("claude", "A", "B", "P", testTime(10, 0), "m", "", 1, 0, 0, 0, "", ""),
-		}},
-	})
-	list, err := missingThenKnown.Sessions(context.Background(), ScopeQuery{})
+		},
+	}})
+	list, err = missingThenKnown.Sessions(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("empty and known parent error = %v", err)
 	}
-	projected, err := missingThenKnown.loadThreadProjection(context.Background(), ScopeQuery{})
+	projected, _, _, err := missingThenKnown.loadThreadProjection(context.Background(), ScopeQuery{})
 	if err != nil {
 		t.Fatalf("loadThreadProjection() error = %v", err)
 	}
@@ -383,18 +378,18 @@ func testUsageRow(agent, sessionID, subagent, parent string, at time.Time, model
 	}
 }
 
-func TestSessionProjectionMatchesCompactionOnUnknownModel(t *testing.T) {
+func TestSessionFieldsCompactionOnUnknownModel(t *testing.T) {
 	session := query.SessionUsage{
 		Agent: "codex", ID: "A", LastUsage: testTime(12, 0),
 		ModelEffort: []query.ModelEffortUsage{{Model: query.UnknownModel, Totals: query.UsageTotals{Calls: 2, Input: 5}}},
 	}
-	service := newService(&fakeQuery{
-		sessions: query.SessionResult{Sessions: []query.SessionUsage{session}},
-		usageRows: query.UsageRowsResult{Rows: []query.UsageRow{
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{session},
+		Rows: []query.UsageRow{
 			testUsageRow("codex", "A", "", "", testTime(10, 0), "", "", 3, 0, 0, 0, "", "gateway"),
 			testUsageRow("codex", "A", "", "", testTime(11, 0), "", "", 2, 0, 0, 0, "compact", "gateway"),
-		}},
-	})
+		},
+	}})
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil || len(list.Items) != 1 {
 		t.Fatalf("Sessions() = %+v, %v", list, err)

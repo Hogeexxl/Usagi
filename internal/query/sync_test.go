@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -354,18 +355,17 @@ func TestPriceBootstrapFailureDoesNotBlockInitialSync(t *testing.T) {
 	}
 
 	day := now.Format(time.DateOnly)
-	service.store.mu.Lock()
-	service.store.days[day] = &dayBucket{rows: []magpie.UsageRequest{{
-		Time: now, Provider: "provider-a", Model: "unlisted-model", Input: 7, Cost: 12, Priced: true,
-	}}}
-	service.store.lastUsed[day] = now
-	service.store.mu.Unlock()
-	usage, err := service.Usage(context.Background(), UsageQuery{Range: DateRange{From: day, To: day}})
+	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,session,input,magpie_cost,magpie_priced)
+		VALUES (? ,?,'codex','provider-a','unlisted-model','session',7,12,1)`, now.UnixNano(), day); err != nil {
+		t.Fatalf("insert unavailable-price request: %v", err)
+	}
+	dataset, err := service.SessionDataset(context.Background(), SessionQuery{Range: DateRange{From: day, To: day}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Totals.Cost != 0 || usage.Totals.Unpriced != 1 {
-		t.Fatalf("unpriced totals = %+v, want cost 0 and unpriced 1", usage.Totals)
+	if len(dataset.Sessions) != 1 || dataset.Sessions[0].Totals.Cost != 0 || dataset.Sessions[0].Totals.Unpriced != 1 ||
+		len(dataset.Rows) != 1 || dataset.Rows[0].Priced || dataset.Rows[0].Cost != 0 {
+		t.Fatalf("unpriced SessionDataset = %+v, want zero cost and one unpriced token row", dataset)
 	}
 }
 
@@ -465,30 +465,35 @@ func TestPriceBootstrapCostGateAndRequestedModelIgnored(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 	day := now.Format(time.DateOnly)
-	service.store.mu.Lock()
-	service.store.days[day] = &dayBucket{rows: []magpie.UsageRequest{
-		{Time: now, Provider: "provider-a", Model: "fixture-model", Input: 100, Output: 50, CacheRead: 20, CacheWrite: 30, CacheWrite1h: 10},
-		{Time: now.Add(time.Second), Provider: "provider-a", Model: "unlisted-model", Requested: "fixture-model", Input: 10},
-		{Time: now.Add(2 * time.Second), Provider: "provider-a", Model: "unlisted-model", CacheRead: 10},
-		{Time: now.Add(3 * time.Second), Provider: "provider-a", Model: "free-fixture", Input: 10},
-	}}
-	service.store.lastUsed[day] = now
-	service.store.mu.Unlock()
-
-	usage, err := service.Usage(context.Background(), UsageQuery{Range: DateRange{From: day, To: day}})
+	requests := []magpie.UsageRequest{
+		{Time: now, Agent: "codex", Session: "priced", Provider: "provider-a", Model: "fixture-model", Input: 100, Output: 50, CacheRead: 20, CacheWrite: 30, CacheWrite1h: 10},
+		{Time: now.Add(time.Second), Agent: "codex", Session: "requested-only", Provider: "provider-a", Model: "unlisted-model", Requested: "fixture-model", Input: 10},
+		{Time: now.Add(2 * time.Second), Agent: "codex", Session: "cache-only", Provider: "provider-a", Model: "unlisted-model", CacheRead: 10},
+		{Time: now.Add(3 * time.Second), Agent: "codex", Session: "free", Provider: "provider-a", Model: "free-fixture", Input: 10},
+	}
+	for _, row := range requests {
+		if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,requested,session,input,output,cache_read,cache_write,cache_write_1h)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, row.Time.UnixNano(), day, row.Agent, row.Provider, row.Model, row.Requested,
+			row.Session, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CacheWrite1h); err != nil {
+			t.Fatalf("insert cost gate request: %v", err)
+		}
+	}
+	dataset, err := service.SessionDataset(context.Background(), SessionQuery{Range: DateRange{From: day, To: day}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Totals.Cost != 0.00039 || usage.Totals.Unpriced != 1 {
-		t.Fatalf("cost-gate totals = %+v, want cost 0.00039 and one unpriced row", usage.Totals)
-	}
-	rows, err := service.UsageRows(context.Background(), UsageRowsQuery{Range: DateRange{From: day, To: day}})
-	if err != nil {
-		t.Fatal(err)
+	if len(dataset.Sessions) != 4 || len(dataset.Rows) != 4 {
+		t.Fatalf("cost-gate dataset size = %d sessions / %d rows, want 4 / 4", len(dataset.Sessions), len(dataset.Rows))
 	}
 	var formula, requested, cacheOnly, free *UsageRow
-	for i := range rows.Rows {
-		row := &rows.Rows[i]
+	var cost float64
+	var unpriced int64
+	for i := range dataset.Rows {
+		row := &dataset.Rows[i]
+		cost += row.Cost
+		if row.Input+row.Output > 0 && !row.Priced {
+			unpriced++
+		}
 		switch {
 		case row.Model == "fixture-model":
 			formula = row
@@ -500,7 +505,7 @@ func TestPriceBootstrapCostGateAndRequestedModelIgnored(t *testing.T) {
 			cacheOnly = row
 		}
 	}
-	if formula == nil || !formula.Priced || formula.Cost != 0.00039 {
+	if formula == nil || !formula.Priced || math.Abs(formula.Cost-0.00039) > 1e-9 || math.Abs(cost-0.00039) > 1e-9 || unpriced != 1 {
 		t.Fatalf("five-price row = %+v, want priced cost 0.00039", formula)
 	}
 	if requested == nil || requested.Priced || requested.Cost != 0 {

@@ -203,7 +203,7 @@ func TestInternalUsageEndpointsValidateMapAndClassifyErrors(t *testing.T) {
 					Type: projection.ThreadMain,
 				},
 				SelfUsage: projection.UsageView{Calls: 3}, SubagentUsage: projection.UsageView{Calls: 5},
-				InclusiveUsage: projection.UsageView{Calls: 8}, SubagentCount: 2,
+				InclusiveUsage: projection.UsageView{Calls: 8}, SubagentCount: apiInt64(2),
 			}}}
 			projectionService.SessionDetailResult = projection.SessionDetailView{
 				Thread: thread, SelfUsage: projection.UsageView{Calls: 2}, InclusiveUsage: projection.UsageView{Calls: 2},
@@ -238,8 +238,8 @@ func TestInternalUsageEndpointsValidateMapAndClassifyErrors(t *testing.T) {
 				if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 					t.Fatalf("decode session response: %v", err)
 				}
-				if len(decoded.Items) != 2 || decoded.Items[0].SubagentCount != 0 || decoded.Items[0].InclusiveUsage.Calls != decoded.Items[0].SelfUsage.Calls ||
-					decoded.Items[1].SubagentCount != 2 || decoded.Items[1].InclusiveUsage.Calls != 8 {
+				if len(decoded.Items) != 2 || decoded.Items[0].SubagentCount == nil || *decoded.Items[0].SubagentCount != 0 || decoded.Items[0].InclusiveUsage.Calls != decoded.Items[0].SelfUsage.Calls ||
+					decoded.Items[1].SubagentCount == nil || *decoded.Items[1].SubagentCount != 2 || decoded.Items[1].InclusiveUsage.Calls != 8 {
 					t.Fatalf("session list rollups = %+v", decoded.Items)
 				}
 			}
@@ -261,6 +261,86 @@ func TestInternalUsageEndpointsValidateMapAndClassifyErrors(t *testing.T) {
 				t.Fatalf("GET %s unavailable response = %d %s", test.path, unavailable.Code, unavailable.Body.String())
 			}
 		})
+	}
+}
+
+func apiInt64(value int64) *int64 { return &value }
+
+func TestSessionConsistencyEmbedsListSummary(t *testing.T) {
+	server, service, _, _ := newServerFixture(t)
+	summary := projection.SummaryView{
+		Usage:            projection.UsageView{Calls: 2, Input: 7, Output: 5, Cost: .25},
+		RootSessionCount: 1, SessionMedian: apiInt64(12), SessionP90: apiInt64(12),
+	}
+	service.SessionsResult = projection.SessionListView{
+		Summary: summary,
+		Items: []projection.SessionListItemView{{
+			Thread:    projection.SessionThreadView{Key: projection.ThreadKey{Agent: "claude", SessionID: "s", ThreadID: "s"}},
+			SelfUsage: projection.UsageView{Calls: 1, Input: 3}, SubagentUsage: projection.UsageView{Calls: 1, Input: 4},
+			InclusiveUsage: projection.UsageView{Calls: 2, Input: 7, Output: 5, Cost: .25},
+		}},
+	}
+	response := request(server, http.MethodGet, "/api/usage/sessions?range=today")
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET sessions = %d %s", response.Code, response.Body.String())
+	}
+	var got sessionsResponseDTO
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode sessions response: %v", err)
+	}
+	if got.Summary.SessionCount != 1 || got.Summary.Usage.Calls != 2 || got.Summary.Usage.Input != 7 || got.Summary.Usage.Output != 5 ||
+		got.Summary.Usage.Cost != .25 || got.Summary.SessionMedian == nil || *got.Summary.SessionMedian != 12 ||
+		got.Summary.SessionP90 == nil || *got.Summary.SessionP90 != 12 || len(got.Items) != 1 || got.Items[0].InclusiveUsage.Input != 7 {
+		t.Fatalf("sessions embedded summary and items = %+v", got)
+	}
+	if len(service.SessionQueries) != 1 || len(service.SummaryQueries) != 0 {
+		t.Fatalf("sessions endpoint called Sessions=%d Summary=%d; summary must be embedded from the same list", len(service.SessionQueries), len(service.SummaryQueries))
+	}
+}
+
+func TestToolsRequireExactDaysAndReadyRuntime(t *testing.T) {
+	server, projectionService, runtime, _ := newServerFixture(t)
+	for _, target := range []string{
+		"/api/usage/tools", "/api/usage/tools?days=", "/api/usage/tools?days=2", "/api/usage/tools?days=01",
+		"/api/usage/tools?days=%2B1", "/api/usage/tools?days=1&days=7", "/api/usage/tools?days=7&extra=1",
+		"/api/usage/tools?other=7",
+	} {
+		response := request(server, http.MethodGet, target)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), ErrorInvalidFilter) {
+			t.Fatalf("GET %s = %d %s, want invalid filter", target, response.Code, response.Body.String())
+		}
+	}
+	if len(projectionService.ToolUsageQueries) != 0 {
+		t.Fatalf("invalid tools parameters reached Projection: %+v", projectionService.ToolUsageQueries)
+	}
+	response := request(server, http.MethodGet, "/api/usage/tools?days=7")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), ErrorMagpieUnavailable) {
+		t.Fatalf("GET tools before runtime ready = %d %s", response.Code, response.Body.String())
+	}
+	if len(projectionService.ToolUsageQueries) != 0 {
+		t.Fatalf("tools before runtime ready reached Projection: %+v", projectionService.ToolUsageQueries)
+	}
+
+	runtime.SetStatus(magpie.RuntimeStatusReady)
+	for _, days := range []int{1, 7, 30} {
+		projectionService.ToolUsageResult = projection.ToolUsageView{
+			Days: days, Calls: 12, Top: []projection.ToolUsageItem{{Name: "Read", Calls: 8}, {Name: "Search", Calls: 4}},
+		}
+		response := request(server, http.MethodGet, fmt.Sprintf("/api/usage/tools?days=%d", days))
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET tools days=%d = %d %s", days, response.Code, response.Body.String())
+		}
+		var got toolUsageResponseDTO
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode tools days=%d response: %v", days, err)
+		}
+		want := toolUsageResponseDTO{Days: days, Calls: 12, Top: []toolUsageItemDTO{{Name: "Read", Calls: 8}, {Name: "Search", Calls: 4}}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("GET tools days=%d = %+v, want %+v", days, got, want)
+		}
+	}
+	if !reflect.DeepEqual(projectionService.ToolUsageQueries, []int{1, 7, 30}) {
+		t.Fatalf("ToolUsage queries = %+v, want only accepted ranges", projectionService.ToolUsageQueries)
 	}
 }
 

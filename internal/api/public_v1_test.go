@@ -322,8 +322,8 @@ func TestPublicV1SummaryLegacyMappingsAndSingleCodexProjection(t *testing.T) {
 	}
 }
 
-func TestPublicV1SummaryRejectsFiltersAndRequiresReadyRuntime(t *testing.T) {
-	server, service, runtime, _ := newServerFixture(t)
+func TestPublicV1SummaryRejectsFiltersAndUsesDatabaseGate(t *testing.T) {
+	server, service, runtime, queryService := newServerFixture(t)
 	runtime.SetStatus(magpie.RuntimeStatusReady)
 	for _, test := range []struct {
 		path string
@@ -347,11 +347,21 @@ func TestPublicV1SummaryRejectsFiltersAndRequiresReadyRuntime(t *testing.T) {
 
 	runtime.SetStatus(magpie.RuntimeStatusStarting)
 	response := request(server, http.MethodGet, publicV1SummaryPath+"?range=today")
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("summary before ready = %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("summary with completed database and starting runtime = %d %s", response.Code, response.Body.String())
 	}
-	if len(service.SummaryQueries) != 0 {
-		t.Fatalf("unavailable Public summary reached Projection: %+v", service.SummaryQueries)
+	if len(service.SummaryQueries) != 1 {
+		t.Fatalf("completed database summary reached Projection %d times, want once", len(service.SummaryQueries))
+	}
+
+	queryService.InitialSyncPending = true
+	runtime.SetStatus(magpie.RuntimeStatusReady)
+	response = request(server, http.MethodGet, publicV1SummaryPath+"?range=today")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), ErrorDataLoading) {
+		t.Fatalf("summary before initial database sync = %d %s", response.Code, response.Body.String())
+	}
+	if len(service.SummaryQueries) != 1 {
+		t.Fatalf("loading Public summary reached Projection: %+v", service.SummaryQueries)
 	}
 }
 

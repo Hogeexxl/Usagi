@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"context"
 	"slices"
-
-	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
 
 // FilterOptions lists the agents, provider models and projects that appear in
@@ -14,13 +12,22 @@ func (s *Service) FilterOptions(ctx context.Context, r DateRange) (FilterOptions
 	if _, err := normalizeUsageInput(r, UsageFilter{}); err != nil {
 		return FilterOptionsResult{}, err
 	}
-	if err := s.ensureSessions(ctx); err != nil {
+	dataset, err := s.SessionDataset(ctx, SessionQuery{Range: r})
+	if err != nil {
 		return FilterOptionsResult{}, err
 	}
 	agents := make(map[string]AgentOption)
 	models := make(map[ModelSelection]ModelOption)
 	projects := make(map[ProjectRef]struct{})
-	err := s.runRequests(ctx, r, UsageFilter{}, s.newWorkspace(), func(row magpie.UsageRequest, _ SessionRef, _ magpie.Session, project ProjectRef) {
+	for _, session := range dataset.Sessions {
+		if session.Agent != "" {
+			if _, ok := agents[session.Agent]; !ok {
+				agents[session.Agent] = AgentOption{Agent: session.Agent, DisplayName: session.Agent}
+			}
+		}
+		projects[session.Project] = struct{}{}
+	}
+	for _, row := range dataset.Rows {
 		if row.Agent != "" {
 			if option, ok := agents[row.Agent]; !ok || option.DisplayName == row.Agent {
 				agents[row.Agent] = AgentOption{Agent: row.Agent, DisplayName: cmp.Or(row.AgentName, row.Agent)}
@@ -34,10 +41,6 @@ func (s *Service) FilterOptions(ctx context.Context, r DateRange) (FilterOptions
 				}
 			}
 		}
-		projects[project] = struct{}{}
-	})
-	if err != nil {
-		return FilterOptionsResult{}, err
 	}
 	var result FilterOptionsResult
 	for _, agent := range agents {

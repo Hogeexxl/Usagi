@@ -68,6 +68,11 @@ type SessionQuery struct {
 	Filter UsageFilter
 }
 
+type SessionDatasetResult struct {
+	Sessions []SessionUsage
+	Rows     []UsageRow
+}
+
 type OverviewQuery struct {
 	Days  int
 	Agent string
@@ -126,6 +131,8 @@ type SessionUsage struct {
 	Last       time.Time
 	FirstUsage time.Time
 	LastUsage  time.Time
+	HasRows    bool
+	Matched    bool
 
 	ModelEffort []ModelEffortUsage
 	Totals      UsageTotals
@@ -142,12 +149,13 @@ type SessionRef struct {
 }
 
 type UsageRow struct {
-	Time      time.Time
-	Agent     string
-	AgentName string
-	Provider  string
-	Model     string
-	Effort    string
+	Time         time.Time
+	Agent        string
+	AgentName    string
+	Provider     string
+	ProviderName string
+	Model        string
+	Effort       string
 
 	Session       string
 	NativeSession string

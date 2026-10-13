@@ -3,22 +3,27 @@ package projection
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"slices"
 
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
 func (s *Service) ModelDistribution(ctx context.Context, q ScopeQuery) (ModelDistributionView, error) {
-	result, err := s.query.Usage(ctx, query.UsageQuery{
-		Range: q.Range, Filter: q.Filter, GroupBy: query.GroupModel,
-	})
+	dataset, err := s.query.SessionDataset(ctx, query.SessionQuery{Range: q.Range, Filter: q.Filter})
 	if err != nil {
-		return ModelDistributionView{}, fmt.Errorf("projection: model distribution: %w", err)
+		return ModelDistributionView{}, err
 	}
-	view := ModelDistributionView{Items: make([]ModelDistributionItem, 0, len(result.Groups))}
-	for _, group := range result.Groups {
-		view.Items = append(view.Items, ModelDistributionItem{Model: group.Model, Usage: usageFromTotals(group.Totals)})
+	groups := make(map[string]*usageAccumulator)
+	for _, row := range dataset.Rows {
+		model := query.ModelName(row.Model)
+		if groups[model] == nil {
+			groups[model] = &usageAccumulator{}
+		}
+		groups[model].AddRow(row)
+	}
+	view := ModelDistributionView{Items: make([]ModelDistributionItem, 0, len(groups))}
+	for model, usage := range groups {
+		view.Items = append(view.Items, ModelDistributionItem{Model: model, Usage: usage.View()})
 	}
 	slices.SortFunc(view.Items, func(a, b ModelDistributionItem) int {
 		if c := cmp.Compare(b.Usage.Total, a.Usage.Total); c != 0 {
@@ -30,15 +35,27 @@ func (s *Service) ModelDistribution(ctx context.Context, q ScopeQuery) (ModelDis
 }
 
 func (s *Service) ProjectDistribution(ctx context.Context, q ScopeQuery) (ProjectDistributionView, error) {
-	result, err := s.query.Usage(ctx, query.UsageQuery{
-		Range: q.Range, Filter: q.Filter, GroupBy: query.GroupProject,
-	})
+	dataset, err := s.query.SessionDataset(ctx, query.SessionQuery{Range: q.Range, Filter: q.Filter})
 	if err != nil {
-		return ProjectDistributionView{}, fmt.Errorf("projection: project distribution: %w", err)
+		return ProjectDistributionView{}, err
 	}
-	view := ProjectDistributionView{Items: make([]ProjectDistributionItem, 0, len(result.Groups))}
-	for _, group := range result.Groups {
-		view.Items = append(view.Items, ProjectDistributionItem{Project: group.Project, Usage: usageFromTotals(group.Totals)})
+	type projectKey struct {
+		kind query.ProjectKind
+		path string
+	}
+	groups := make(map[projectKey]*usageAccumulator)
+	projects := make(map[projectKey]query.ProjectRef)
+	for _, row := range dataset.Rows {
+		key := projectKey{kind: row.Project.Kind, path: row.Project.Path}
+		if groups[key] == nil {
+			groups[key] = &usageAccumulator{}
+			projects[key] = row.Project
+		}
+		groups[key].AddRow(row)
+	}
+	view := ProjectDistributionView{Items: make([]ProjectDistributionItem, 0, len(groups))}
+	for key, usage := range groups {
+		view.Items = append(view.Items, ProjectDistributionItem{Project: projects[key], Usage: usage.View()})
 	}
 	slices.SortFunc(view.Items, func(a, b ProjectDistributionItem) int {
 		if c := cmp.Compare(b.Usage.Total, a.Usage.Total); c != 0 {
