@@ -88,19 +88,19 @@ func TestResolveRangeMatchesRustMidnightOverlapAndHalfHourDST(t *testing.T) {
 	}
 }
 
-func TestSystemTimezoneUsesIANANameFromEnvironment(t *testing.T) {
+func TestLocalTimezoneUsesIANANameFromEnvironment(t *testing.T) {
 	t.Setenv("TZ", "America/New_York")
-	name, location, err := systemTimezone()
+	name, location, err := LocalTimezone()
 	if err != nil || name != "America/New_York" || location.String() != name {
-		t.Fatalf("systemTimezone() = %q, %v, %v", name, location, err)
+		t.Fatalf("LocalTimezone() = %q, %v, %v", name, location, err)
 	}
 	t.Setenv("TZ", "../escape")
-	if _, _, err := systemTimezone(); err != ErrLocalTimeUnavailable {
+	if _, _, err := LocalTimezone(); err != ErrLocalTimeUnavailable {
 		t.Fatalf("invalid TZ error = %v, want %v", err, ErrLocalTimeUnavailable)
 	}
 }
 
-func TestSystemTimezoneUsesOSDefaultWhenTZIsUnset(t *testing.T) {
+func TestLocalTimezoneUsesOSDefaultWhenTZIsUnset(t *testing.T) {
 	previous, existed := os.LookupEnv("TZ")
 	if err := os.Unsetenv("TZ"); err != nil {
 		t.Fatal(err)
@@ -117,12 +117,12 @@ func TestSystemTimezoneUsesOSDefaultWhenTZIsUnset(t *testing.T) {
 		}
 	})
 
-	name, location, err := systemTimezone()
+	name, location, err := LocalTimezone()
 	if err != nil {
-		t.Fatalf("systemTimezone() without TZ error = %v", err)
+		t.Fatalf("LocalTimezone() without TZ error = %v", err)
 	}
 	if !validTimezoneName(name) || location.String() != name {
-		t.Fatalf("systemTimezone() without TZ = %q, %v", name, location)
+		t.Fatalf("LocalTimezone() without TZ = %q, %v", name, location)
 	}
 }
 

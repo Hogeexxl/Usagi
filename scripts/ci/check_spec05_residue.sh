@@ -92,19 +92,9 @@ for path in \
 done
 printf 'PASS: Rust backend and legacy Go paths are absent\n'
 
-if rg -n -i 'modernc[.]org/(sqlite|libc|mathutil|memory)' go.mod go.sum; then
-	fail 'SQLite driver or its transitive modules remain in Go dependencies'
-else
-	status=$?
-	if [[ "$status" -ne 1 ]]; then
-		fail "could not scan Go dependency files (rg exit $status)"
-	fi
-fi
-printf 'PASS: SQLite dependencies are absent\n'
-
 expect_no_source_hits 'updater endpoint residue' '/api/update/'
 expect_no_source_hits 'fixed 3210 port residue' '127[.]0[.]0[.]1:3210|(^|[^0-9]):3210([^0-9]|$)'
-expect_no_source_hits 'legacy scanner/storage fallback residue' 'cmd/storage-check|internal/(storage|source|ingestion|codex|domain|usage)/|modernc[.]org/|sqlite|legacy_profiles|file_identity(_unix|_windows)?[.]go|\b(legacy|old)[[:space:]_-]+(scanner|storage|parser|sqlite)\b|\b(scanner|storage|parser|sqlite)[[:space:]_-]+(fallback|legacy|old)\b|\b(fallback|legacy|old)[[:space:]_-]+(scanner|storage|parser|sqlite)\b|\b(LegacyScanner|ScannerFallback|FallbackScanner|LegacyStorage|StorageFallback|LegacyParser|ParserFallback|FallbackParser)\b|canonical ledger'
+expect_no_source_hits 'legacy scanner/storage fallback residue' 'cmd/storage-check|internal/(storage|source|ingestion|codex|domain|usage)/|legacy_profiles|file_identity(_unix|_windows)?[.]go|\b(legacy|old)[[:space:]_-]+(scanner|storage|parser|sqlite)\b|\b(scanner|storage|parser|sqlite)[[:space:]_-]+(fallback|legacy|old)\b|\b(fallback|legacy|old)[[:space:]_-]+(scanner|storage|parser|sqlite)\b|\b(LegacyScanner|ScannerFallback|FallbackScanner|LegacyStorage|StorageFallback|LegacyParser|ParserFallback|FallbackParser)\b|canonical ledger'
 printf 'PASS: updater, fixed-port, and legacy scanner/storage references are absent from active source and CI\n'
 
 expect_no_ci_hits 'Windows, Rust, or packaging gate' 'windows-latest|cargo[[:space:]]+(check|test|build|fmt|clippy|packager)|cargo-packager|rustfmt|codesign|notarization|(^|[^[:alnum:]_])dmg([^[:alnum:]_]|$)|nsis|windows[[:space:]]+installer|rust[[:space:]]+oracle|windows[[:space:]]+release[[:space:]]+smoke'

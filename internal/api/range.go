@@ -25,7 +25,7 @@ func ResolveRange(values url.Values) (ResolvedRange, error) {
 	if err != nil {
 		return ResolvedRange{}, err
 	}
-	name, location, err := systemTimezone()
+	name, location, err := LocalTimezone()
 	if err != nil {
 		return ResolvedRange{}, err
 	}
@@ -230,7 +230,7 @@ func minTime(values []time.Time) time.Time {
 	return result
 }
 
-func systemTimezone() (string, *time.Location, error) {
+func LocalTimezone() (string, *time.Location, error) {
 	if name, ok := os.LookupEnv("TZ"); ok {
 		location, err := loadSystemTimezone(name)
 		return name, location, err

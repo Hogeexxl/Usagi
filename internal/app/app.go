@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/api"
+	"github.com/Hogeexxl/Usagi/internal/database"
 	"github.com/Hogeexxl/Usagi/internal/projection"
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
@@ -54,6 +56,29 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 	if err != nil {
 		return err
 	}
+	if _, _, err := api.LocalTimezone(); err != nil {
+		return fmt.Errorf("app: resolve local time zone: %w", err)
+	}
+	descriptorPath, err := RuntimeDescriptorPath()
+	if err != nil {
+		return fmt.Errorf("app: resolve database directory: %w", err)
+	}
+	databaseDirectory := filepath.Dir(descriptorPath)
+	if err := os.MkdirAll(databaseDirectory, 0700); err != nil {
+		return fmt.Errorf("app: create database directory: %w", err)
+	}
+	if err := os.Chmod(databaseDirectory, 0700); err != nil {
+		return fmt.Errorf("app: set database directory permissions: %w", err)
+	}
+	db, err := database.Open(filepath.Join(databaseDirectory, "usagi.sqlite"))
+	if err != nil {
+		return fmt.Errorf("app: open database: %w", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil && runErr == nil {
+			runErr = fmt.Errorf("app: close database: %w", err)
+		}
+	}()
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	supervisorCtx, cancelSupervisor := context.WithCancel(context.Background())
