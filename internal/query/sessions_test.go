@@ -22,6 +22,10 @@ type sessionUpstream struct {
 	overview func(context.Context, magpie.SessionOverviewQuery) (magpie.SessionOverview, error)
 }
 
+func (*sessionUpstream) Providers(context.Context) (magpie.ProviderCatalogsResponse, error) {
+	return magpie.ProviderCatalogsResponse{}, nil
+}
+
 func (u *sessionUpstream) SessionStats(ctx context.Context, days int) (magpie.SessionStats, error) {
 	return u.stats(ctx, days)
 }

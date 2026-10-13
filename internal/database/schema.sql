@@ -100,6 +100,7 @@ CREATE TABLE prices (
   version_id INTEGER NOT NULL,
   catalog_id TEXT NOT NULL,
   model_key TEXT NOT NULL,
+  canonical_model_id TEXT NOT NULL DEFAULT '',
   input REAL,
   output REAL,
   cache_read REAL,

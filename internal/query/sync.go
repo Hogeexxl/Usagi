@@ -12,10 +12,12 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
+	"github.com/Hogeexxl/Usagi/internal/pricing"
 )
 
 const (
@@ -54,11 +56,60 @@ func (s *Service) Sync(ctx context.Context) (int64, error) {
 	if err := s.syncUsage(ctx); err != nil {
 		syncErr = errors.Join(syncErr, err)
 	}
+	if err := s.syncPricing(ctx); err != nil {
+		slog.Warn("query: bootstrap price catalog", "error", err)
+	}
 	revision, err := s.dataRevision(context.Background())
 	if err != nil {
 		return revision, errors.Join(syncErr, err)
 	}
 	return revision, syncErr
+}
+
+func (s *Service) syncPricing(ctx context.Context) error {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM price_versions)").Scan(&exists); err != nil {
+		return fmt.Errorf("query: check price versions: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	response, err := s.upstream.Providers(ctx)
+	if err != nil {
+		return fmt.Errorf("query: read provider catalogs: %w", err)
+	}
+	if response.FileError != "" {
+		return fmt.Errorf("query: providers file error: %s", response.FileError)
+	}
+	if _, err := pricing.Bootstrap(ctx, s.db, s.pricingHTTPClient, providerCatalogsOf(response.Providers), s.now()); err != nil {
+		return fmt.Errorf("query: bootstrap price catalog: %w", err)
+	}
+	return nil
+}
+
+func providerCatalogsOf(providers []magpie.ProviderCatalog) map[string][]string {
+	result := make(map[string][]string, len(providers))
+	for _, provider := range providers {
+		catalogs, exists := result[provider.ID]
+		if !exists {
+			catalogs = []string{}
+			result[provider.ID] = catalogs
+		}
+		seen := make(map[string]bool, len(catalogs))
+		for _, catalog := range catalogs {
+			seen[catalog] = true
+		}
+		for _, catalog := range strings.FieldsFunc(strings.ToLower(provider.Catalog), func(r rune) bool {
+			return r == ',' || r == ' '
+		}) {
+			catalog = strings.TrimSpace(catalog)
+			if catalog != "" && !seen[catalog] {
+				result[provider.ID] = append(result[provider.ID], catalog)
+				seen[catalog] = true
+			}
+		}
+	}
+	return result
 }
 
 // InitialSyncComplete reports whether the first full local-day pass committed.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
+	"github.com/Hogeexxl/Usagi/internal/pricing"
 )
 
 func normalizeUsageInput(r DateRange, filter UsageFilter) (UsageFilter, error) {
@@ -74,6 +75,18 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 	if err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	priceCatalog, err := pricing.Load(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	modelSelections := make(map[ModelSelection]struct{}, len(filter.Models))
 	for _, selection := range filter.Models {
 		modelSelections[selection] = struct{}{}
@@ -82,6 +95,14 @@ func (s *Service) runRequests(ctx context.Context, r DateRange, filter UsageFilt
 		for _, row := range bucket.rows {
 			if isRejected(row) {
 				continue
+			}
+			row.Cost = 0
+			row.Priced = false
+			if row.Input+row.Output > 0 {
+				if price, ok := priceCatalog.PriceAt(row.Time, row.Provider, row.Model, row.Served); ok {
+					row.Cost = price.Cost(int64(row.Input), int64(row.Output), int64(row.CacheRead), int64(row.CacheWrite), int64(row.CacheWrite1h))
+					row.Priced = true
+				}
 			}
 			if len(filter.Agents) > 0 && !slices.Contains(filter.Agents, row.Agent) {
 				continue

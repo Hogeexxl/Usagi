@@ -27,7 +27,7 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 	provider := &testClientProvider{results: make([]struct {
 		client *magpie.Client
 		ready  bool
-	}, 7)}
+	}, 8)}
 	for i := range provider.results {
 		provider.results[i].ready = i%2 == 1
 	}
@@ -39,6 +39,7 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 	}{
 		{name: "usage", run: func() error { _, err := upstream.Usage(ctx, "all"); return err }},
 		{name: "usage requests", run: func() error { _, err := upstream.UsageRequests(ctx, magpie.UsageRequestsQuery{}); return err }},
+		{name: "providers", run: func() error { _, err := upstream.Providers(ctx); return err }},
 		{name: "sessions", run: func() error { _, err := upstream.Sessions(ctx, 0); return err }},
 		{name: "session", run: func() error { _, err := upstream.Session(ctx, "key"); return err }},
 		{name: "session stats", run: func() error { _, err := upstream.SessionStats(ctx, 0); return err }},

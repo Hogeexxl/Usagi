@@ -286,6 +286,7 @@ CREATE TABLE prices (
   version_id INTEGER NOT NULL,
   catalog_id TEXT NOT NULL,
   model_key TEXT NOT NULL,
+  canonical_model_id TEXT NOT NULL DEFAULT '',
   input REAL,
   output REAL,
   cache_read REAL,
@@ -308,7 +309,7 @@ CREATE TABLE prices (
 - `session_links` 本期只建空表，不读写关系
 - `provider_catalogs_json` 格式为 `{ "provider-id": ["catalog-a", "catalog-b"] }`，数组保留先后顺序；空目录仍保留供应商键
 - `maker_catalogs_json` 是去除订阅零价目录后的有序厂商目录数组
-- prices 只保存查价使用的 catalog_id、model_key 和 5 项单价；单价全部为 null 表示无价，明确的 0 价表示已知免费
+- prices 只保存查价使用的 catalog_id、model_key、canonical_model_id 和 5 项单价；canonical_model_id 用于完整执行 Magpie 的 canonical_model_id 名称匹配，未提供时为空串；单价全部为 null 表示无价，明确的 0 价表示已知免费
 - `app_meta` 只保存 schema_version、data_revision、initial_sync_complete；首次同步完成后将完成标记设为 1
 
 写入方只有同步层。本期不设置外键、CHECK 或额外辅助索引。主键用于会话 upsert 和价格键查找。
@@ -541,7 +542,7 @@ Magpie 不可用时，同步失败只写后端日志。库读端点不依赖 Run
 5. 如果任一请求失败、fileError 非空或价格目录无有效结构，不生成版本
 6. 按 `Provider.Catalogs` 的小写、逗号 / 空格拆分、去空、保序去重规则整理目录
 7. 移植 `makerCatalogs` 使用的预设厂商目录顺序，排除 Hosts 和 membershipCatalogs
-8. 保存查价使用的目录键、模型键和基础 5 项单价；忽略 tiers
+8. 保存 models.dev 全部模型的目录键、模型键、canonical_model_id 和基础 5 项单价；cost 缺失时将 5 项单价保存为 null；忽略 tiers 及其他模型资料
 9. 按 Magpie `OneHourFor` 的条件补齐 Claude 1h 价，其余以 5 分钟缓存写价为 1h 有效价
 10. 在一个事务中插入 price_versions 和 prices，写入来源、获取时间、生效时间和 2 份目录 JSON
 11. 增加 data_revision 后提交
@@ -586,7 +587,7 @@ ORDER BY provider, model, served;
 
 不按本机 Magpie cost 反推出单价。测试使用本机实际出现的名称；只有设计要求的 served 回退、计费门禁和版本边界使用最小 Token / 时间夹具。账本未出现的 Grok、Bedrock、Kimi 别名等随完整移植一并实现，但不单独写测试。本机组合覆盖清单作为验收依据。
 
-价格表保存版本内各目录全部有价模型的 5 项基础价（不限于本机账本已出现的模型），不保留原模型资料的其他字段。查不到的模型保持未计价，不建立 model_price_map，不猜测别名。供应商映射取价格版本中的 HTTP 快照，不读取当前 Magpie 自定义价格或磁盘缓存。
+价格表保存版本内各目录的全部模型键；有价模型保存 5 项基础价（不限于本机账本已出现的模型），cost 缺失模型的 5 项价格均为 null。另保存完整 `PricedBy` canonical_model_id 匹配所必需的 `canonical_model_id`，不保留原模型资料的其他字段。查不到的模型保持未计价，不建立 model_price_map，不猜测别名。供应商映射取价格版本中的 HTTP 快照，不读取当前 Magpie 自定义价格或磁盘缓存。
 
 ### 6.3.3 按请求时间计价
 

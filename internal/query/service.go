@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ type upstream interface {
 	Usage(context.Context, string) (magpie.UsageSummary, error)
 	UsageRequests(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error)
 	UsageDayDigests(context.Context, string, string) ([]magpie.UsageDayDigest, error)
+	Providers(context.Context) (magpie.ProviderCatalogsResponse, error)
 	Sessions(context.Context, int) (magpie.SessionsResponse, error)
 	Session(context.Context, string) (magpie.Session, error)
 	SessionStats(context.Context, int) (magpie.SessionStats, error)
@@ -46,6 +48,7 @@ type Service struct {
 	location            *time.Location
 	now                 func() time.Time
 	store               *usageStore
+	pricingHTTPClient   *http.Client
 	snapshotMu          sync.RWMutex
 	refreshMu           sync.Mutex
 	syncMu              sync.Mutex
@@ -73,14 +76,15 @@ func NewService(db *sql.DB, client *magpie.Client, location *time.Location) *Ser
 
 func newService(db *sql.DB, client upstream, location *time.Location) *Service {
 	service := &Service{
-		upstream:      client,
-		db:            db,
-		location:      location,
-		now:           time.Now,
-		pendingRecent: make(map[string]struct{}),
-		store:         newUsageStore(client),
-		snapshot:      &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)},
-		lookups:       newSessionLookups(),
+		upstream:          client,
+		db:                db,
+		location:          location,
+		now:               time.Now,
+		pendingRecent:     make(map[string]struct{}),
+		store:             newUsageStore(client),
+		pricingHTTPClient: &http.Client{Timeout: 30 * time.Second},
+		snapshot:          &sessionSnapshot{sessions: make(map[sessionKey]magpie.Session)},
+		lookups:           newSessionLookups(),
 	}
 	service.store.location = location
 	return service

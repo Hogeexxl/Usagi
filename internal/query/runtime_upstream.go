@@ -78,6 +78,14 @@ func (u *runtimeUpstream) UsageDayDigests(ctx context.Context, from, to string) 
 	return client.UsageDayDigests(ctx, from, to)
 }
 
+func (u *runtimeUpstream) Providers(ctx context.Context) (magpie.ProviderCatalogsResponse, error) {
+	client, err := u.current()
+	if err != nil {
+		return magpie.ProviderCatalogsResponse{}, err
+	}
+	return client.Providers(ctx)
+}
+
 func (u *runtimeUpstream) Sessions(ctx context.Context, limit int) (magpie.SessionsResponse, error) {
 	client, err := u.current()
 	if err != nil {

@@ -7,10 +7,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +48,10 @@ type syncHTTPFixture struct {
 	sessions           []magpie.Session
 	sessionLimits      []string
 	sessionError       bool
+	providersError     bool
+	providers          magpie.ProviderCatalogsResponse
+	providerCalls      int
+	providerQueries    []url.Values
 	requestCalls       []syncRequestCall
 }
 
@@ -79,6 +85,18 @@ func (f *syncHTTPFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		value := append([]magpie.Session(nil), f.sessions...)
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(magpie.SessionsResponse{Sessions: value})
+	case "/api/providers":
+		f.mu.Lock()
+		f.providerCalls++
+		f.providerQueries = append(f.providerQueries, r.URL.Query().Clone())
+		if f.providersError {
+			f.mu.Unlock()
+			http.Error(w, "temporary provider read error", http.StatusServiceUnavailable)
+			return
+		}
+		value := f.providers
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(value)
 	default:
 		http.NotFound(w, r)
 	}
@@ -232,7 +250,268 @@ func newSyncTestService(t *testing.T, db *sql.DB, fixture *syncHTTPFixture, loca
 	t.Cleanup(server.Close)
 	service := newService(db, magpie.NewClient(server.URL, server.Client()), location)
 	service.now = func() time.Time { return now }
+	service.store.now = func() time.Time { return now }
+	service.pricingHTTPClient = &http.Client{Transport: priceBootstrapFailureTransport{}}
 	return service
+}
+
+type priceBootstrapFailureTransport struct{}
+
+func (priceBootstrapFailureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    request,
+	}, nil
+}
+
+type priceBootstrapFixtureTransport struct {
+	body   []byte
+	status int
+	calls  int
+}
+
+func (t *priceBootstrapFixtureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	t.calls++
+	status := t.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	body := t.body
+	if status != http.StatusOK {
+		body = nil
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Request:    request,
+	}, nil
+}
+
+func TestPriceBootstrapUsesHTTPProviderCatalogSnapshot(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	fixture.providers = magpie.ProviderCatalogsResponse{Providers: []magpie.ProviderCatalog{
+		{ID: "provider-a", Catalog: " OPENAI, DEEPSEEK openai "},
+		{ID: "provider-a", Catalog: "google, deepseek"},
+		{ID: "provider-empty", Catalog: "   "},
+	}}
+	service := newSyncTestService(t, db, fixture, location, now)
+	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"canonical_model_id":"openai/gpt-6-luna","cost":{"input":0.1,"output":0.5,"cache_read":0.01,"cache_write":0.125,"cache_write_1h":0.125}}}}}`)}
+	service.pricingHTTPClient = &http.Client{Transport: transport}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	var providerJSON string
+	if err := db.QueryRow("SELECT provider_catalogs_json FROM price_versions").Scan(&providerJSON); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string][]string
+	if err := json.Unmarshal([]byte(providerJSON), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"provider-a":     {"openai", "deepseek", "google"},
+		"provider-empty": {},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider snapshot = %v, want %v", got, want)
+	}
+	if transport.calls != 1 || fixture.providerCalls != 1 || len(fixture.providerQueries) != 1 || len(fixture.providerQueries[0]) != 0 {
+		t.Fatalf("bootstrap calls models.dev=%d providers=%d query=%v, want one each and no query", transport.calls, fixture.providerCalls, fixture.providerQueries)
+	}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if transport.calls != 1 || fixture.providerCalls != 1 {
+		t.Fatalf("existing version retried bootstrap: models.dev=%d providers=%d", transport.calls, fixture.providerCalls)
+	}
+}
+
+func TestPriceBootstrapFailureDoesNotBlockInitialSync(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync after price bootstrap failure: %v", err)
+	}
+	complete, err := service.InitialSyncComplete(context.Background())
+	if err != nil || !complete {
+		t.Fatalf("initial sync complete = (%t, %v), want true", complete, err)
+	}
+	var versions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 0 {
+		t.Fatalf("price versions = %d after failed download, want 0", versions)
+	}
+
+	day := now.Format(time.DateOnly)
+	service.store.mu.Lock()
+	service.store.days[day] = &dayBucket{rows: []magpie.UsageRequest{{
+		Time: now, Provider: "provider-a", Model: "unlisted-model", Input: 7, Cost: 12, Priced: true,
+	}}}
+	service.store.lastUsed[day] = now
+	service.store.mu.Unlock()
+	usage, err := service.Usage(context.Background(), UsageQuery{Range: DateRange{From: day, To: day}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Totals.Cost != 0 || usage.Totals.Unpriced != 1 {
+		t.Fatalf("unpriced totals = %+v, want cost 0 and unpriced 1", usage.Totals)
+	}
+}
+
+func TestPriceBootstrapProviderFileErrorLeavesNoVersion(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	fixture.providers.FileError = "providers file unreadable"
+	service := newSyncTestService(t, db, fixture, location, now)
+	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`)}
+	service.pricingHTTPClient = &http.Client{Transport: transport}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync after providers file error: %v", err)
+	}
+	var versions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 0 || transport.calls != 0 {
+		t.Fatalf("provider file error created %d versions and called models.dev %d times", versions, transport.calls)
+	}
+}
+
+func TestPriceBootstrapProviderRequestFailureLeavesNoVersion(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	fixture.providersError = true
+	service := newSyncTestService(t, db, fixture, location, now)
+	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`)}
+	service.pricingHTTPClient = &http.Client{Transport: transport}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync after providers request failure: %v", err)
+	}
+	complete, err := service.InitialSyncComplete(context.Background())
+	if err != nil || !complete {
+		t.Fatalf("initial sync complete = (%t, %v), want true", complete, err)
+	}
+	var versions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 0 || transport.calls != 0 {
+		t.Fatalf("providers request failure created %d versions and called models.dev %d times", versions, transport.calls)
+	}
+}
+
+func TestPriceBootstrapRetriesAfterModelsDevFailure(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	service := newSyncTestService(t, db, fixture, location, now)
+	transport := &priceBootstrapFixtureTransport{
+		status: http.StatusServiceUnavailable,
+		body:   []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`),
+	}
+	service.pricingHTTPClient = &http.Client{Transport: transport}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("first Sync after models.dev failure: %v", err)
+	}
+	complete, err := service.InitialSyncComplete(context.Background())
+	if err != nil || !complete {
+		t.Fatalf("initial sync complete after price failure = (%t, %v), want true", complete, err)
+	}
+	var versions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 0 || transport.calls != 1 {
+		t.Fatalf("after first Sync versions=%d downloads=%d, want 0/1", versions, transport.calls)
+	}
+	transport.status = http.StatusOK
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("second Sync after models.dev recovers: %v", err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 1 || transport.calls != 2 || fixture.providerCalls != 2 {
+		t.Fatalf("after retry versions=%d downloads=%d provider calls=%d, want 1/2/2", versions, transport.calls, fixture.providerCalls)
+	}
+}
+
+func TestPriceBootstrapCostGateAndRequestedModelIgnored(t *testing.T) {
+	db := queryTestDB(t)
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
+	fixture.providers = magpie.ProviderCatalogsResponse{Providers: []magpie.ProviderCatalog{{ID: "provider-a", Catalog: "openai"}}}
+	service := newSyncTestService(t, db, fixture, location, now)
+	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"fixture-model":{"cost":{"input":1,"output":2,"cache_read":3,"cache_write":4,"cache_write_1h":5,"tiers":[{"above":1,"input":100,"output":200}]}},"free-fixture":{"cost":{"input":0,"output":0,"cache_read":0,"cache_write":0,"cache_write_1h":0}}}}}`)}
+	service.pricingHTTPClient = &http.Client{Transport: transport}
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	day := now.Format(time.DateOnly)
+	service.store.mu.Lock()
+	service.store.days[day] = &dayBucket{rows: []magpie.UsageRequest{
+		{Time: now, Provider: "provider-a", Model: "fixture-model", Input: 100, Output: 50, CacheRead: 20, CacheWrite: 30, CacheWrite1h: 10},
+		{Time: now.Add(time.Second), Provider: "provider-a", Model: "unlisted-model", Requested: "fixture-model", Input: 10},
+		{Time: now.Add(2 * time.Second), Provider: "provider-a", Model: "unlisted-model", CacheRead: 10},
+		{Time: now.Add(3 * time.Second), Provider: "provider-a", Model: "free-fixture", Input: 10},
+	}}
+	service.store.lastUsed[day] = now
+	service.store.mu.Unlock()
+
+	usage, err := service.Usage(context.Background(), UsageQuery{Range: DateRange{From: day, To: day}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Totals.Cost != 0.00039 || usage.Totals.Unpriced != 1 {
+		t.Fatalf("cost-gate totals = %+v, want cost 0.00039 and one unpriced row", usage.Totals)
+	}
+	rows, err := service.UsageRows(context.Background(), UsageRowsQuery{Range: DateRange{From: day, To: day}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var formula, requested, cacheOnly, free *UsageRow
+	for i := range rows.Rows {
+		row := &rows.Rows[i]
+		switch {
+		case row.Model == "fixture-model":
+			formula = row
+		case row.Model == "free-fixture":
+			free = row
+		case row.Model == "unlisted-model" && row.Input > 0:
+			requested = row
+		case row.Model == "unlisted-model" && row.CacheRead > 0:
+			cacheOnly = row
+		}
+	}
+	if formula == nil || !formula.Priced || formula.Cost != 0.00039 {
+		t.Fatalf("five-price row = %+v, want priced cost 0.00039", formula)
+	}
+	if requested == nil || requested.Priced || requested.Cost != 0 {
+		t.Fatalf("requested-only row = %+v, want unpriced at zero", requested)
+	}
+	if cacheOnly == nil || cacheOnly.Priced || cacheOnly.Cost != 0 {
+		t.Fatalf("cache-only row = %+v, want zero cost and no price lookup", cacheOnly)
+	}
+	if free == nil || !free.Priced || free.Cost != 0 {
+		t.Fatalf("explicit zero-price row = %+v, want priced at zero", free)
+	}
 }
 
 func digestPoint(day string, location *time.Location, calls, input int) syncDigestPoint {
