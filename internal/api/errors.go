@@ -35,7 +35,7 @@ func writeProjectionError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, query.ErrInvalidRange):
 		writeAPIError(w, http.StatusBadRequest, ErrorInvalidRange)
-	case errors.Is(err, query.ErrInvalidFilter), errors.Is(err, query.ErrInvalidGroupBy):
+	case errors.Is(err, query.ErrInvalidFilter):
 		writeAPIError(w, http.StatusBadRequest, ErrorInvalidFilter)
 	case errors.Is(err, projection.ErrThreadNotFound):
 		writeAPIError(w, http.StatusNotFound, ErrorThreadNotFound)

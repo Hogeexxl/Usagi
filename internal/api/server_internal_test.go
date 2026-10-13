@@ -196,7 +196,7 @@ func TestInternalUsageEndpointsValidateMapAndClassifyErrors(t *testing.T) {
 				Projects: []query.ProjectRef{{Kind: query.ProjectKindProject, Path: "/repo", Name: "repo"}},
 			}
 			projectionService.SessionsResult = projection.SessionListView{Items: []projection.SessionListItemView{{
-				Thread: thread, SelfUsage: projection.UsageView{Calls: 2}, InclusiveUsage: projection.UsageView{Calls: 2},
+				Thread: thread, SelfUsage: projection.UsageView{Calls: 2}, InclusiveUsage: projection.UsageView{Calls: 2}, SubagentCount: apiInt64(0),
 			}, {
 				Thread: projection.SessionThreadView{
 					Key:  projection.ThreadKey{Agent: "claude", SessionID: "session-2", ThreadID: "main-2"},

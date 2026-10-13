@@ -23,7 +23,7 @@ export function formatSessionModel(models: Array<{ model: string; effort: string
 }
 
 export function formatModelWithReasoningEffort(model: string, effort: string | null, mixed: boolean): string {
-  return `${model} (${mixed ? "mixed" : effort ?? "—"})`;
+  return `${model} (${mixed ? "mixed" : effort?.trim() || "—"})`;
 }
 
 type DateParts = {

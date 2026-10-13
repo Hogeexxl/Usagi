@@ -24,9 +24,12 @@ assert_absent() {
 expect_no_source_hits() {
 	local label="$1"
 	local pattern="$2"
+	shift 2
+	local paths=("$@")
+	if [[ "${#paths[@]}" -eq 0 ]]; then paths=(cmd internal frontend scripts .github/workflows/ci.yml); fi
 	local matches
 	local status
-	if matches="$(rg -n -i --color never --glob '*.{go,ts,tsx,js,mjs,jsx,py,sh,yml,yaml,json,html,css}' --glob '!**/dist/**' --glob '!**/node_modules/**' --glob '!**/check_spec05_residue.sh' -e "$pattern" cmd internal frontend scripts .github/workflows/ci.yml 2>&1)"; then
+	if matches="$(rg -n -i --color never --glob '*.{go,ts,tsx,js,mjs,jsx,py,sh,yml,yaml,json,html,css}' --glob '!**/dist/**' --glob '!**/node_modules/**' --glob '!**/check_spec05_residue.sh' -e "$pattern" "${paths[@]}" 2>&1)"; then
 		fail_with_matches "$label found in active source or CI:" "$matches"
 	else
 		status=$?
@@ -91,6 +94,14 @@ for path in \
 	assert_absent "$path"
 done
 printf 'PASS: Rust backend and legacy Go paths are absent\n'
+
+expect_no_source_hits 'S06 old query cache symbols' '\b(usageStore|dayBucket|dayFetch|warmDays|idleTTL|lastUsed|inflight|snapshotMu|refreshMu|sessionSnapshot|newSessionLookups|generation)\b' internal/query
+expect_no_source_hits 'S06 old query entry points and result types' '\b(UsageQuery|UsageRowsQuery|UsageRowsResult|UsageResult|UsageGroupBy|SessionResult|SessionRefreshFact|RefreshUsageRows|UsageSnapshot|RefreshSessions)\b|func[[:space:]]+\(s[[:space:]]+\*Service\)[[:space:]]+(Usage|UsageRows|Sessions)[[:space:]]*\(' internal/query
+assert_absent internal/query/store.go
+assert_absent internal/query/store_test.go
+expect_no_source_hits 'S06 conflicting parent error' 'ErrConflictingThreadParent'
+expect_no_source_hits 'S06 old model sorting branch' '^[[:space:]]*\|[[:space:]]*"model"([[:space:]]*[,;])?$|DEFAULT_SORT_BY[[:space:]]*:[^;]*"model"|sortBy[[:space:]]*===?[[:space:]]*"model"|sort_by[[:space:]]*:[[:space:]]*"model"|case[[:space:]]*"model"' frontend/src/dashboard/session frontend/src/data/types.ts
+printf 'PASS: S06 query cache, compatibility entry points, conflicting parent error, and model sorting are absent\n'
 
 expect_no_source_hits 'updater endpoint residue' '/api/update/'
 expect_no_source_hits 'fixed 3210 port residue' '127[.]0[.]0[.]1:3210|(^|[^0-9]):3210([^0-9]|$)'

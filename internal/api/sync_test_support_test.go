@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,16 +10,21 @@ import (
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
 
-func newReadyRuntimeQueryForTest(t *testing.T, provider query.ClientProvider) *query.Service {
+func newRuntimeQueryForTest(t *testing.T, provider query.ClientProvider) (*query.Service, *sql.DB) {
 	t.Helper()
 	db, err := database.Open(filepath.Join(t.TempDir(), "usagi.sqlite"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
-	if _, err := db.Exec("UPDATE app_meta SET value = '1' WHERE key = 'initial_sync_complete'"); err != nil {
-		_ = db.Close()
-		t.Fatalf("mark test database initially synced: %v", err)
-	}
 	t.Cleanup(func() { _ = db.Close() })
-	return query.NewRuntimeService(db, provider, time.Local)
+	return query.NewRuntimeService(db, provider, time.Local), db
+}
+
+func databaseRevisionForTest(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var revision int64
+	if err := db.QueryRow("SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'data_revision'").Scan(&revision); err != nil {
+		t.Fatalf("read test database revision: %v", err)
+	}
+	return revision
 }

@@ -35,6 +35,11 @@ type syncDayState struct {
 	frozen      bool
 }
 
+type dayDigest struct {
+	digest [32]byte
+	empty  bool
+}
+
 type syncDayResult struct {
 	day    string
 	digest [32]byte
@@ -378,6 +383,22 @@ func (s *Service) syncDigests(ctx context.Context, days []string) (map[string]da
 		start = end + 1
 	}
 	return result, true, nil
+}
+
+func daysBetween(from, to string) ([]string, error) {
+	start, err := time.Parse(time.DateOnly, from)
+	if err != nil {
+		return nil, ErrInvalidRange
+	}
+	end, err := time.Parse(time.DateOnly, to)
+	if err != nil || start.After(end) {
+		return nil, ErrInvalidRange
+	}
+	var days []string
+	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
+		days = append(days, day.Format(time.DateOnly))
+	}
+	return days, nil
 }
 
 func (s *Service) syncDayStates(ctx context.Context, days []string) (map[string]syncDayState, error) {

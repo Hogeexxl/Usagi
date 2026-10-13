@@ -193,18 +193,33 @@ func TestServerQuotaWatcherStartsOnReadyAndFollowsReading(t *testing.T) {
 	if calls, _, asked := service.snapshot(); calls != 1 || !reflect.DeepEqual(asked, []bool{false}) {
 		t.Fatalf("background quota calls after cached GET = %d asked %v, want one asked=false read", calls, asked)
 	}
+	// The server uses a 60 second reading poll interval. Verify that a Reading
+	// result is cached while the runtime remains ready, then use readiness
+	// transitions to exercise the immediate retry path without waiting a minute.
+	time.Sleep(3 * 200 * time.Millisecond)
+	if calls, _, _ := service.snapshot(); calls != 1 {
+		t.Fatalf("quota watcher made %d reads while the runtime stayed ready with Reading=true, want 1", calls)
+	}
+
+	runtime.set(magpie.RuntimeStatusUnavailable)
+	waitForQuota(t, func() bool { return revisions.Current() == (RevisionTuple{StatusRevision: 2}) })
+	time.Sleep(3 * 200 * time.Millisecond)
+	if calls, _, _ := service.snapshot(); calls != 1 {
+		t.Fatalf("quota watcher made %d reads while Runtime was unavailable, want 1", calls)
+	}
+	runtime.set(magpie.RuntimeStatusReady)
 	waitQuotaCall(t, service, 2)
 	waitQuotaSnapshot(t, snapshot, func(view projection.QuotaView, loaded bool, err error) bool {
 		return loaded && err == nil && reflect.DeepEqual(view, second)
 	})
-	readyTuple := RevisionTuple{DataRevision: 1, StatusRevision: 1}
+	readyTuple := RevisionTuple{StatusRevision: 3}
 	waitForQuota(t, func() bool { return revisions.Current() == readyTuple })
 	if got := revisions.Current(); got != readyTuple {
-		t.Fatalf("quota loading completion tuple = %+v, want ready transition only %+v", got, readyTuple)
+		t.Fatalf("quota loading completion tuple = %+v, want database revision unchanged and ready transition %+v", got, readyTuple)
 	}
 
 	runtime.set(magpie.RuntimeStatusUnavailable)
-	waitForQuota(t, func() bool { return revisions.Current() == (RevisionTuple{DataRevision: 1, StatusRevision: 2}) })
+	waitForQuota(t, func() bool { return revisions.Current() == (RevisionTuple{StatusRevision: 4}) })
 	time.Sleep(3 * 200 * time.Millisecond)
 	if calls, _, _ := service.snapshot(); calls != 2 {
 		t.Fatalf("quota watcher made %d reads while Runtime was unavailable, want 2", calls)
@@ -214,10 +229,10 @@ func TestServerQuotaWatcherStartsOnReadyAndFollowsReading(t *testing.T) {
 	waitQuotaSnapshot(t, snapshot, func(view projection.QuotaView, loaded bool, err error) bool {
 		return loaded && err == nil && reflect.DeepEqual(view, third)
 	})
-	readyAgainTuple := RevisionTuple{DataRevision: 2, StatusRevision: 3}
+	readyAgainTuple := RevisionTuple{StatusRevision: 5}
 	waitForQuota(t, func() bool { return revisions.Current() == readyAgainTuple })
 	if got := revisions.Current(); got != readyAgainTuple {
-		t.Fatalf("quota reload tuple = %+v, want ready transition only %+v", got, readyAgainTuple)
+		t.Fatalf("quota reload tuple = %+v, want database revision unchanged and ready transition %+v", got, readyAgainTuple)
 	}
 	if calls, maxActive, asked := service.snapshot(); calls != 3 || maxActive != 1 || !reflect.DeepEqual(asked, []bool{false, false, false}) {
 		t.Fatalf("quota watcher calls = %d, max concurrency %d, asked %v", calls, maxActive, asked)

@@ -78,6 +78,7 @@ describe("Session presentation contract", () => {
   it("formats exact reasoning effort labels without allowlists or defaults", () => {
     expect(formatModelWithReasoningEffort("gpt-5.6-sol", "high", false)).toBe("gpt-5.6-sol (high)");
     expect(formatModelWithReasoningEffort("gpt-5.6-sol", null, false)).toBe("gpt-5.6-sol (—)");
+    expect(formatModelWithReasoningEffort("o4-mini", "", false)).toBe("o4-mini (—)");
     expect(formatModelWithReasoningEffort("gpt-5.6-sol", null, true)).toBe("gpt-5.6-sol (mixed)");
     expect(formatModelWithReasoningEffort("model-x", "custom", false)).toBe("model-x (custom)");
   });

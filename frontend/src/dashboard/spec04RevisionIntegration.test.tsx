@@ -404,7 +404,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
       read_at_ms: 81,
     }];
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     await flushMicrotasks();

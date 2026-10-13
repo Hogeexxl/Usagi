@@ -40,29 +40,6 @@ type UsageFilter struct {
 	Projects []ProjectSelection
 }
 
-type UsageGroupBy string
-
-const (
-	GroupNone          UsageGroupBy = ""
-	GroupAgent         UsageGroupBy = "agent"
-	GroupModel         UsageGroupBy = "model"
-	GroupProject       UsageGroupBy = "project"
-	GroupModelEffort   UsageGroupBy = "model_effort"
-	GroupProjectModel  UsageGroupBy = "project_model"
-	GroupProjectEffort UsageGroupBy = "project_effort"
-)
-
-type UsageQuery struct {
-	Range   DateRange
-	Filter  UsageFilter
-	GroupBy UsageGroupBy
-}
-
-type UsageRowsQuery struct {
-	Range  DateRange
-	Filter UsageFilter
-}
-
 type SessionQuery struct {
 	Range  DateRange
 	Filter UsageFilter
@@ -101,20 +78,6 @@ type UsageTotals struct {
 	DecodeN   int64
 }
 
-type UsageGroup struct {
-	Agent     string
-	AgentName string
-	Model     string
-	Effort    string
-	Project   ProjectRef
-	Totals    UsageTotals
-}
-
-type UsageResult struct {
-	Totals UsageTotals
-	Groups []UsageGroup
-}
-
 type ModelEffortUsage struct {
 	Model  string
 	Effort string
@@ -136,10 +99,6 @@ type SessionUsage struct {
 
 	ModelEffort []ModelEffortUsage
 	Totals      UsageTotals
-}
-
-type SessionResult struct {
-	Sessions []SessionUsage
 }
 
 type SessionRef struct {
@@ -186,10 +145,6 @@ type UsageRow struct {
 	Priced       bool
 }
 
-type UsageRowsResult struct {
-	Rows []UsageRow
-}
-
 type AgentOption struct {
 	Agent       string
 	DisplayName string
@@ -220,7 +175,6 @@ func ModelName(model string) string {
 }
 
 var (
-	ErrInvalidRange   = errors.New("query: invalid range")
-	ErrInvalidFilter  = errors.New("query: invalid filter")
-	ErrInvalidGroupBy = errors.New("query: invalid group by")
+	ErrInvalidRange  = errors.New("query: invalid range")
+	ErrInvalidFilter = errors.New("query: invalid filter")
 )

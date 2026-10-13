@@ -45,17 +45,25 @@ func TestRunUnavailableRuntimeRecoversQueryAndStops(t *testing.T) {
 		}
 	}
 
+	now := time.Now().Truncate(time.Second)
+	point := magpie.UsagePoint{Label: now.Format(time.DateOnly), Time: now, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 42, Output: 7}}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/api/usage":
+			_ = json.NewEncoder(w).Encode(magpie.UsageSummary{Period: "all", Bucket: "day", Series: []magpie.UsagePoint{point}})
+			return
 		case "/api/sessions":
-			_ = json.NewEncoder(w).Encode(magpie.SessionsResponse{Sessions: []magpie.Session{}})
+			_ = json.NewEncoder(w).Encode(magpie.SessionsResponse{Sessions: []magpie.Session{{
+				Agent: "codex", ID: "session-1", Cwd: "/repo", Title: "Session", Start: now, Last: now,
+			}}})
 			return
 		case "/api/usage/requests":
 			_ = json.NewEncoder(w).Encode(magpie.UsageRequestsPage{
+				Bucket: "day", Series: []magpie.UsagePoint{point},
 				Rows: []magpie.UsageRequest{{
 					Time: time.Now(), Agent: "codex", AgentName: "Codex", Provider: "openai",
-					Model: "gpt-6", Input: 42, Output: 7, Status: http.StatusOK, Cost: 0.25, Priced: true,
+					Model: "gpt-6", Input: 42, Output: 7, Status: http.StatusOK, Session: "session-1", NativeSession: "session-1", Cost: 0.25, Priced: true,
 				}},
 				Total: 1,
 			})
@@ -153,14 +161,21 @@ func TestRunUnavailableRuntimeRecoversQueryAndStops(t *testing.T) {
 		t.Fatalf("static response = %d %q, want embedded test dashboard", response.StatusCode, body)
 	}
 	response, body = appRequest(t, clientWithoutProxy, http.MethodGet, baseURL+"/api/usage/summary?range=today", nil)
-	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "MAGPIE_UNAVAILABLE") {
-		t.Fatalf("unavailable summary response = %d %s", response.StatusCode, body)
+	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "DATA_LOADING") {
+		t.Fatalf("initial summary response = %d %s, want DATA_LOADING while the first sync is incomplete", response.StatusCode, body)
 	}
 
 	waitForAppStatus(t, clientWithoutProxy, baseURL, magpie.RuntimeStatusReady)
-	response, body = appRequest(t, clientWithoutProxy, http.MethodGet, baseURL+"/api/usage/summary?range=today", nil)
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"input":42`) {
-		t.Fatalf("recovered summary response = %d %s, want query result from recovered runtime", response.StatusCode, body)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, body = appRequest(t, clientWithoutProxy, http.MethodGet, baseURL+"/api/usage/summary?range=today", nil)
+		if response.StatusCode == http.StatusOK && strings.Contains(string(body), `"input":42`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered summary response = %d %s, want local query result after Sync", response.StatusCode, body)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 	if got := factoryCalls.Load(); got != 2 {
 		t.Fatalf("runtime factory calls = %d, want 2", got)

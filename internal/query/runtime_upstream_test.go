@@ -3,6 +3,8 @@ package query
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -27,7 +29,7 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 	provider := &testClientProvider{results: make([]struct {
 		client *magpie.Client
 		ready  bool
-	}, 8)}
+	}, 7)}
 	for i := range provider.results {
 		provider.results[i].ready = i%2 == 1
 	}
@@ -39,10 +41,9 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 	}{
 		{name: "usage", run: func() error { _, err := upstream.Usage(ctx, "all"); return err }},
 		{name: "usage requests", run: func() error { _, err := upstream.UsageRequests(ctx, magpie.UsageRequestsQuery{}); return err }},
+		{name: "usage day digests", run: func() error { _, err := upstream.UsageDayDigests(ctx, "2026-10-14", "2026-10-14"); return err }},
 		{name: "providers", run: func() error { _, err := upstream.Providers(ctx); return err }},
 		{name: "sessions", run: func() error { _, err := upstream.Sessions(ctx, 0); return err }},
-		{name: "session", run: func() error { _, err := upstream.Session(ctx, "key"); return err }},
-		{name: "session stats", run: func() error { _, err := upstream.SessionStats(ctx, 0); return err }},
 		{name: "quotas", run: func() error { _, err := upstream.Quotas(ctx, false); return err }},
 		{name: "session overview", run: func() error { _, err := upstream.SessionOverview(ctx, magpie.SessionOverviewQuery{}); return err }},
 	}
@@ -57,16 +58,25 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 }
 
 func TestRuntimeServiceRechecksProviderAfterAvailabilityChanges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
 	provider := &testClientProvider{results: make([]struct {
 		client *magpie.Client
 		ready  bool
 	}, 2)}
-	provider.results[1].ready = true
+	provider.results[1] = struct {
+		client *magpie.Client
+		ready  bool
+	}{client: magpie.NewClient(server.URL, server.Client()), ready: true}
 	service := NewRuntimeService(queryTestDB(t), provider, time.Local)
-	for i := 0; i < 2; i++ {
-		if _, err := service.UsageSnapshot(context.Background()); !errors.Is(err, ErrUpstreamUnavailable) {
-			t.Fatalf("UsageSnapshot call %d error = %v, want ErrUpstreamUnavailable", i, err)
-		}
+	if _, err := service.Quota(context.Background(), false); !errors.Is(err, ErrUpstreamUnavailable) {
+		t.Fatalf("Quota before availability = %v, want ErrUpstreamUnavailable", err)
+	}
+	if got, err := service.Quota(context.Background(), false); err != nil || len(got.Quotas) != 0 {
+		t.Fatalf("Quota after availability = %+v, %v; want empty response", got, err)
 	}
 	if provider.calls != 2 {
 		t.Fatalf("Client() calls = %d, want 2", provider.calls)

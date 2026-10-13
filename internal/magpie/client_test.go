@@ -139,20 +139,6 @@ func TestClientEndpoints(t *testing.T) {
 			},
 		},
 		{
-			name:  "session key",
-			path:  "/api/sessions/one",
-			query: url.Values{"key": {"codex:session /one"}},
-			call: func(t *testing.T, client *Client) {
-				got, err := client.Session(context.Background(), "codex:session /one")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got.Cwd != "/project" || len(got.Models) != 1 || len(got.Via) != 1 {
-					t.Fatalf("Session() = %+v", got)
-				}
-			},
-		},
-		{
 			name:  "session stats days",
 			path:  "/api/sessions/stats",
 			query: url.Values{"days": {"7"}},
@@ -303,23 +289,6 @@ func TestClientDecodeAndTransportErrorsAreWebErrors(t *testing.T) {
 	}
 }
 
-func TestClientHTTPError404(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.NotFound(w, nil)
-	}))
-	defer server.Close()
-
-	client := &Client{baseURL: server.URL, httpClient: server.Client()}
-	_, err := client.Session(context.Background(), "codex:missing")
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
-		t.Fatalf("Session() error = %v, want HTTPError status %d", err, http.StatusNotFound)
-	}
-	if want := "magpie web request returned HTTP status 404"; err.Error() != want {
-		t.Fatalf("Session() error = %q, want %q", err, want)
-	}
-}
-
 func TestWebAuthentication(t *testing.T) {
 	const key = "secret key+&/雪"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -405,11 +374,8 @@ func clientResponseJSON(path string) string {
 		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}]}`
 	case "/api/usage/quotas":
 		return `[{"provider":"openai","name":"OpenAI","windows":[{"name":"5h","used":0.4,"resetsAt":"2026-10-11T15:00:00Z"}],"resets":{"count":1,"until":"2026-10-11T15:00:00Z"}}]`
-	case "/api/sessions", "/api/sessions/one":
-		if path == "/api/sessions" {
-			return `{"sessions":[{"agent":"codex","id":"session-1","cwd":"/project","models":[{"model":"gpt","cost":0.25,"priced":true,"input":10}],"via":[{"provider":"openai","model":"gpt","effort":"high","calls":1,"tokens":10,"last":"2026-10-11T10:00:00Z"}],"input":10}]}`
-		}
-		return `{"agent":"codex","id":"session-1","cwd":"/project","models":[{"model":"gpt","cost":0.25,"priced":true,"input":10}],"via":[{"provider":"openai","model":"gpt","effort":"high","calls":1,"tokens":10,"last":"2026-10-11T10:00:00Z"}],"input":10}`
+	case "/api/sessions":
+		return `{"sessions":[{"agent":"codex","id":"session-1","cwd":"/project","models":[{"model":"gpt","cost":0.25,"priced":true,"input":10}],"via":[{"provider":"openai","model":"gpt","effort":"high","calls":1,"tokens":10,"last":"2026-10-11T10:00:00Z"}],"input":10}]}`
 	case "/api/sessions/stats":
 		return `{"from":"2026-10-11","to":"2026-10-11","days":[{"date":"2026-10-11","usage":[{"agent":"codex","cwd":"/project","model":"gpt","cost":0.25,"priced":true,"input":10}]}],"agents":{"codex":"Codex"}}`
 	case "/api/sessions/overview":

@@ -343,11 +343,7 @@ func TestLiveRuntime(t *testing.T) {
 		t.Fatalf("Client.Sessions() failed: %v", err)
 	}
 	if len(sessions.Sessions) == 0 {
-		t.Fatal("Live Magpie has no Session for the single-session read")
-	}
-	key := sessions.Sessions[0].Agent + ":" + sessions.Sessions[0].ID
-	if _, err := client.Session(ctx, key); err != nil {
-		t.Fatalf("Client.Session() failed: %v", err)
+		t.Fatal("Live Magpie has no sessions")
 	}
 	if _, err := client.Usage(ctx, ""); err != nil {
 		t.Fatalf("Client.Usage() failed: %v", err)

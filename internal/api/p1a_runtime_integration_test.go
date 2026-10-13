@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -67,7 +68,9 @@ func (p *p1aRuntimeProvider) set(status magpie.RuntimeStatus, client *magpie.Cli
 func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing.T) {
 	t.Setenv("TZ", "UTC")
 	now := time.Now().UTC().Truncate(time.Second)
+	point := magpie.UsagePoint{Label: now.Format(time.DateOnly), Time: now, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 12, Output: 3, Cost: 0.25}}
 	rows := magpie.UsageRequestsPage{
+		Bucket: "day", Series: []magpie.UsagePoint{point},
 		Rows: []magpie.UsageRequest{{
 			Time: now, Agent: "codex", AgentName: "Codex", Provider: "openai", ProviderName: "OpenAI",
 			Model: "gpt-5", Input: 12, Output: 3, Status: http.StatusOK, Session: "session-1",
@@ -80,7 +83,7 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 		Models: []magpie.SessionModel{}, Name: "Codex", Icon: "codex",
 	}}}
 	usage := magpie.UsageSummary{
-		Period: "all", Bucket: "day", Series: []magpie.UsagePoint{}, Agents: []magpie.UsageGroup{},
+		Period: "all", Bucket: "day", Series: []magpie.UsagePoint{point}, Agents: []magpie.UsageGroup{},
 		Models: []magpie.UsageGroup{}, Accounts: []magpie.UsageGroup{}, CallerKeys: []magpie.UsageGroup{},
 		UsageTotals: magpie.UsageTotals{Calls: 1, Input: 12, Output: 3, Cost: 0.25},
 	}
@@ -121,7 +124,7 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	defer magpieServer.Close()
 
 	runtime := &p1aRuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting)}
-	queryService := newReadyRuntimeQueryForTest(t, runtime)
+	queryService, db := newRuntimeQueryForTest(t, runtime)
 	projectionService := projection.NewService(queryService)
 	revisions := NewRevisionService(0)
 	quotaSnapshot := &QuotaSnapshot{}
@@ -143,17 +146,17 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	}
 	t.Cleanup(server.stopBackground)
 	server.Start(ctx)
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {
 		select {
 		case <-initialWatcherReads:
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for initial usage and session watcher reads")
+			t.Fatal("timed out waiting for the initial synchronization coordinator")
 		}
 	}
 
 	starting := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if starting.Code != http.StatusServiceUnavailable || !strings.Contains(starting.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("starting summary response = %d %s, want 503 %s", starting.Code, starting.Body.String(), ErrorMagpieUnavailable)
+	if starting.Code != http.StatusServiceUnavailable || !strings.Contains(starting.Body.String(), ErrorDataLoading) {
+		t.Fatalf("starting summary response = %d %s, want 503 %s", starting.Code, starting.Body.String(), ErrorDataLoading)
 	}
 	if got := revisions.Current(); got != (RevisionTuple{}) {
 		t.Fatalf("starting failed refreshes tuple = %+v, want zero", got)
@@ -180,10 +183,13 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 
 	runtime.set(magpie.RuntimeStatusReady, magpie.NewClient(magpieServer.URL, magpieServer.Client()))
 	waitFor(t, func() bool {
-		return revisions.Current() == (RevisionTuple{DataRevision: 1, StatusRevision: 1})
+		complete, err := queryService.InitialSyncComplete(ctx)
+		return err == nil && complete && revisions.Current().StatusRevision == 1
 	})
+	initialDataRevision := databaseRevisionForTest(t, db)
 	waitFor(t, func() bool {
-		return strings.Contains(streamWriter.bodyString(), `data: {"data_revision":1,"status_revision":1}`)
+		return revisions.Current() == (RevisionTuple{DataRevision: initialDataRevision, StatusRevision: 1}) &&
+			strings.Contains(streamWriter.bodyString(), fmt.Sprintf(`data: {"data_revision":%d,"status_revision":1}`, initialDataRevision))
 	})
 	waitFor(t, func() bool {
 		requestMu.Lock()
@@ -191,18 +197,21 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 		return len(quotaAsked) == 1
 	})
 
+	requestMu.Lock()
+	sessionsBeforeManualSync := sessionCalls
+	requestMu.Unlock()
 	watcher.refreshUsage(ctx)
-	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
-		t.Fatalf("first successful watcher baselines tuple = %+v, want ready transition only", got)
+	if got := revisions.Current(); got != (RevisionTuple{DataRevision: databaseRevisionForTest(t, db), StatusRevision: 1}) || got.DataRevision != initialDataRevision {
+		t.Fatalf("unchanged first Sync = %+v, want database revision %d", got, initialDataRevision)
 	}
 	watcher.refreshUsage(ctx)
-	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
-		t.Fatalf("unchanged watcher snapshots tuple = %+v, want ready transition only", got)
+	if got := revisions.Current(); got != (RevisionTuple{DataRevision: databaseRevisionForTest(t, db), StatusRevision: 1}) || got.DataRevision != initialDataRevision {
+		t.Fatalf("unchanged repeated Sync = %+v, want database revision %d", got, initialDataRevision)
 	}
 	requestMu.Lock()
-	if sessionCalls != 2 {
+	if sessionCalls-sessionsBeforeManualSync != 2 {
 		requestMu.Unlock()
-		t.Fatalf("session endpoint calls from two manual watcher ticks = %d, want exactly 2", sessionCalls)
+		t.Fatalf("session endpoint calls from two manual Sync calls = %d, want exactly 2", sessionCalls-sessionsBeforeManualSync)
 	}
 	if !reflect.DeepEqual(quotaAsked, []string{""}) {
 		requestMu.Unlock()
@@ -211,21 +220,20 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 	requestMu.Unlock()
 
 	ready := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if ready.Code != http.StatusOK || !strings.Contains(ready.Body.String(), `"data_revision":1`) || !strings.Contains(ready.Body.String(), `"input":12`) {
-		t.Fatalf("ready summary response = %d %s, want successful revision 1 summary", ready.Code, ready.Body.String())
+	if ready.Code != http.StatusOK || !strings.Contains(ready.Body.String(), fmt.Sprintf(`"data_revision":%d`, initialDataRevision)) || !strings.Contains(ready.Body.String(), `"input":12`) {
+		t.Fatalf("ready summary response = %d %s, want local input 12 at database revision %d", ready.Code, ready.Body.String(), initialDataRevision)
 	}
 	requestMu.Lock()
 	failUsageRequests = true
 	requestMu.Unlock()
-	// Cached days keep serving through a Magpie Web failure; an uncached day
-	// still surfaces it.
+	// Complete database reads continue through a Magpie Web failure.
 	cached := request(server, http.MethodGet, "/api/usage/summary?range=today")
 	if cached.Code != http.StatusOK || !strings.Contains(cached.Body.String(), `"input":12`) {
 		t.Fatalf("cached summary during Magpie Web failure = %d %s, want cached rows", cached.Code, cached.Body.String())
 	}
 	upstreamFailed := request(server, http.MethodGet, "/api/usage/summary?range=custom&from=2020-01-01&to=2020-01-01")
-	if upstreamFailed.Code != http.StatusBadGateway || !strings.Contains(upstreamFailed.Body.String(), ErrorUpstreamFailed) {
-		t.Fatalf("Magpie Web failure response = %d %s, want 502 %s", upstreamFailed.Code, upstreamFailed.Body.String(), ErrorUpstreamFailed)
+	if upstreamFailed.Code != http.StatusOK || !strings.Contains(upstreamFailed.Body.String(), `"input":0`) {
+		t.Fatalf("complete database read for an uncached date = %d %s, want an empty local result", upstreamFailed.Code, upstreamFailed.Body.String())
 	}
 	requestMu.Lock()
 	failUsageRequests = false
@@ -234,14 +242,14 @@ func TestRuntimeHTTPTransitionRevisionsAvailabilityAndWatcherBaseline(t *testing
 
 	runtime.set(magpie.RuntimeStatusUnavailable, nil)
 	waitFor(t, func() bool {
-		return revisions.Current() == (RevisionTuple{DataRevision: 1, StatusRevision: 2})
+		return revisions.Current() == (RevisionTuple{DataRevision: initialDataRevision, StatusRevision: 2})
 	})
 	waitFor(t, func() bool {
-		return strings.Contains(streamWriter.bodyString(), `data: {"data_revision":1,"status_revision":2}`)
+		return strings.Contains(streamWriter.bodyString(), fmt.Sprintf(`data: {"data_revision":%d,"status_revision":2}`, initialDataRevision))
 	})
 	unavailable := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if unavailable.Code != http.StatusServiceUnavailable || !strings.Contains(unavailable.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("unavailable summary response = %d %s, want 503 %s", unavailable.Code, unavailable.Body.String(), ErrorMagpieUnavailable)
+	if unavailable.Code != http.StatusOK || !strings.Contains(unavailable.Body.String(), `"input":12`) {
+		t.Fatalf("complete database summary while Magpie is unavailable = %d %s, want local input 12", unavailable.Code, unavailable.Body.String())
 	}
 	requestMu.Lock()
 	defer requestMu.Unlock()

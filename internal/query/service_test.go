@@ -3,7 +3,6 @@ package query
 import (
 	"context"
 	"errors"
-	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -11,13 +10,27 @@ import (
 	"github.com/Hogeexxl/Usagi/internal/magpie"
 )
 
+type serviceUpstream struct {
+	upstream
+	quotas   func(context.Context, bool) (magpie.QuotasResponse, error)
+	overview func(context.Context, magpie.SessionOverviewQuery) (magpie.SessionOverview, error)
+}
+
+func (u *serviceUpstream) Quotas(ctx context.Context, asked bool) (magpie.QuotasResponse, error) {
+	return u.quotas(ctx, asked)
+}
+
+func (u *serviceUpstream) SessionOverview(ctx context.Context, q magpie.SessionOverviewQuery) (magpie.SessionOverview, error) {
+	return u.overview(ctx, q)
+}
+
 func TestQuota(t *testing.T) {
 	responses := []magpie.QuotasResponse{
 		{Reading: true, Quotas: []magpie.Quota{{Provider: "p", Name: "Provider", Plan: "first", Windows: []magpie.QuotaWindow{{Name: "5h", Used: 0.25}}, Resets: &magpie.ResetCredits{Count: 1}}}},
 		{Quotas: []magpie.Quota{{Provider: "p", Plan: "second", Windows: []magpie.QuotaWindow{{Name: "5h", Used: 0.75}}, Resets: &magpie.ResetCredits{Count: 2}}}},
 	}
 	calls := 0
-	u := &sessionUpstream{quotas: func(_ context.Context, asked bool) (magpie.QuotasResponse, error) {
+	u := &serviceUpstream{quotas: func(_ context.Context, asked bool) (magpie.QuotasResponse, error) {
 		if asked != (calls == 0) {
 			t.Fatalf("asked = %v on call %d", asked, calls)
 		}
@@ -43,7 +56,7 @@ func TestOverview(t *testing.T) {
 		{Count: 2, Median: 9, Skills: magpie.SkillUse{Calls: 8, Top: []magpie.Skill{{Name: "build", Calls: 8}}}},
 	}
 	var queries []magpie.SessionOverviewQuery
-	u := &sessionUpstream{overview: func(_ context.Context, q magpie.SessionOverviewQuery) (magpie.SessionOverview, error) {
+	u := &serviceUpstream{overview: func(_ context.Context, q magpie.SessionOverviewQuery) (magpie.SessionOverview, error) {
 		response := responses[len(queries)]
 		queries = append(queries, q)
 		return response, nil
@@ -67,32 +80,30 @@ func TestOverview(t *testing.T) {
 
 func TestFilterOptionsListOnlyChoicesInRange(t *testing.T) {
 	day := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
-	rows := []magpie.UsageRequest{
-		{Time: day, Agent: "codex", AgentName: "Codex", Provider: "openai", ProviderName: "OpenAI", Model: "gpt-x", NativeSession: "s1", Priced: true},
-		{Time: day, Agent: "codex", Provider: "openai", Model: "gpt-x", NativeSession: "s2", Priced: true},
-		{Time: day, Agent: "claude", Provider: "session-unknown", ProviderName: "Local session", Model: "", Session: "gone", Priced: true},
-		{Time: day, Agent: "rejected", Provider: "p", Model: "m", Rejected: true},
-		{Time: day.AddDate(0, 0, -1), Agent: "old", Provider: "old", Model: "old", Session: "old"},
+	db := queryTestDB(t)
+	insertDatasetSession(t, db, "codex", "s1", "/work/usagi", "", day, day, false)
+	insertDatasetSession(t, db, "codex", "s2", "", "", day, day, false)
+	rows := []struct {
+		time                 time.Time
+		agent, agentName     string
+		provider, providerName, model string
+		session              string
+		rejected             int
+	}{
+		{day, "codex", "Codex", "openai", "OpenAI", "gpt-x", "s1", 0},
+		{day, "codex", "", "openai", "", "gpt-x", "s2", 0},
+		{day, "claude", "", "session-unknown", "Local session", "", "gone", 0},
+		{day, "rejected", "", "p", "", "m", "bad", 1},
+		{day.AddDate(0, 0, -1), "old", "", "old", "", "old", "old", 0},
 	}
-	u := &sessionUpstream{
-		requests: func(_ context.Context, q magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
-			var matched []magpie.UsageRequest
-			for _, row := range rows {
-				if q.Period == row.Time.Format(time.DateOnly)+".."+row.Time.Format(time.DateOnly) {
-					matched = append(matched, row)
-				}
-			}
-			return magpie.UsageRequestsPage{Rows: matched, Total: len(matched)}, nil
-		},
-		sessions: func(context.Context, int) (magpie.SessionsResponse, error) {
-			return magpie.SessionsResponse{Sessions: []magpie.Session{{Agent: "codex", ID: "s1", Cwd: "/work/usagi"}, {Agent: "codex", ID: "s2"}}}, nil
-		},
-		session: func(context.Context, string) (magpie.Session, error) {
-			return magpie.Session{}, &magpie.HTTPError{StatusCode: http.StatusNotFound}
-		},
+	for _, row := range rows {
+		if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,agent_name,provider,provider_name,model,session,rejected)
+			VALUES (?,?,?,?,?,?,?,?,?)`, row.time.UnixNano(), row.time.Format(time.DateOnly), row.agent, row.agentName,
+			row.provider, row.providerName, row.model, row.session, row.rejected); err != nil {
+			t.Fatalf("insert filter option request: %v", err)
+		}
 	}
-	s := newService(queryTestDB(t), u, time.Local)
-	s.store.warmDays = 0
+	s := newService(db, nil, time.Local)
 	got, err := s.FilterOptions(context.Background(), DateRange{From: "2026-10-11", To: "2026-10-11"})
 	want := FilterOptionsResult{
 		Agents: []AgentOption{{Agent: "claude", DisplayName: "claude"}, {Agent: "codex", DisplayName: "Codex"}},

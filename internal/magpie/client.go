@@ -303,15 +303,6 @@ func (c *Client) Sessions(ctx context.Context, limit int) (SessionsResponse, err
 	return sessions, nil
 }
 
-func (c *Client) Session(ctx context.Context, key string) (Session, error) {
-	query := url.Values{"key": {key}}
-	var session Session
-	if err := c.getJSON(ctx, "/api/sessions/one", query, &session); err != nil {
-		return Session{}, err
-	}
-	return session, nil
-}
-
 func (c *Client) SessionStats(ctx context.Context, days int) (SessionStats, error) {
 	query := url.Values{}
 	if days > 0 {

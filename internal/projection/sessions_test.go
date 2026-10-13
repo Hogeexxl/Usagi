@@ -237,7 +237,14 @@ func TestSessionProjectionRangeOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadThreadProjection() error = %v", err)
 	}
-	if len(projected.Threads) != 3 || projected.Threads[2].Key.ThreadID != "C" || projected.Threads[2].ParentThreadID != "B" {
+	var orphan SessionThreadView
+	for _, thread := range projected.Threads {
+		if thread.Key.ThreadID == "C" {
+			orphan = thread
+			break
+		}
+	}
+	if len(projected.Threads) != 3 || orphan.Key.ThreadID != "C" || orphan.ParentThreadID != "B" {
 		t.Fatalf("orphan C must retain its known parent B: %+v", projected.Threads)
 	}
 	parent, err := service.SessionDetail(context.Background(), ScopeQuery{}, ThreadKey{Agent: "claude", SessionID: "A", ThreadID: "P"})

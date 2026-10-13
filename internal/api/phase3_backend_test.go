@@ -77,6 +77,7 @@ type phase3MagpieFixture struct {
 
 func newPhase3MagpieFixture(now time.Time, input int, title, cwd string) *phase3MagpieFixture {
 	last := now.Add(-time.Minute)
+	point := magpie.UsagePoint{Label: now.Format(time.DateOnly), Time: now, UsageTotals: magpie.UsageTotals{Calls: 1, Input: input, Output: 3, Cost: 0.25}}
 	fixture := &phase3MagpieFixture{
 		now: now, input: input,
 		sessions: magpie.SessionsResponse{Sessions: []magpie.Session{{
@@ -84,11 +85,11 @@ func newPhase3MagpieFixture(now time.Time, input int, title, cwd string) *phase3
 			Models: []magpie.SessionModel{}, Name: "Codex", Icon: "codex",
 		}}},
 		usage: magpie.UsageSummary{
-			Period: "all", Bucket: "day", Series: []magpie.UsagePoint{}, Agents: []magpie.UsageGroup{},
+			Period: "all", Bucket: "day", Series: []magpie.UsagePoint{point}, Agents: []magpie.UsageGroup{},
 			Models: []magpie.UsageGroup{}, Accounts: []magpie.UsageGroup{}, CallerKeys: []magpie.UsageGroup{},
 			UsageTotals: magpie.UsageTotals{Calls: 1, Input: input, Output: 3, Cost: 0.25},
 		},
-		rows: magpie.UsageRequestsPage{Rows: []magpie.UsageRequest{{
+		rows: magpie.UsageRequestsPage{Bucket: "day", Series: []magpie.UsagePoint{point}, Rows: []magpie.UsageRequest{{
 			Time: now, Agent: "codex", AgentName: "Codex", Provider: "openai", ProviderName: "OpenAI",
 			Model: "gpt-5", Input: input, Output: 3, Status: http.StatusOK, Session: "session-1",
 			NativeSession: "session-1", Cost: 0.25, Priced: true,
@@ -118,10 +119,6 @@ func (f *phase3MagpieFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	case "/api/sessions":
 		value := f.sessions
 		value.Sessions = append([]magpie.Session(nil), value.Sessions...)
-		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(value)
-	case "/api/sessions/one":
-		value := f.sessions.Sessions[0]
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(value)
 	case "/api/usage/quotas":
@@ -328,7 +325,7 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 	defer secondMagpie.Close()
 
 	runtime := &phase3RuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting)}
-	queryService := newReadyRuntimeQueryForTest(t, runtime)
+	queryService, db := newRuntimeQueryForTest(t, runtime)
 	projectionGraph := projection.NewService(queryService)
 	projectionService := &phase3ProjectionProbe{ProjectionService: projectionGraph}
 	revisions := NewRevisionService(0)
@@ -341,24 +338,33 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 	phase3AssertRevisionFrames(t, stream.bodyString(), RevisionTuple{})
 
 	startingSummary := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if startingSummary.Code != http.StatusServiceUnavailable || !strings.Contains(startingSummary.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("starting Summary = %d %s, want 503 %s", startingSummary.Code, startingSummary.Body.String(), ErrorMagpieUnavailable)
+	if startingSummary.Code != http.StatusServiceUnavailable || !strings.Contains(startingSummary.Body.String(), ErrorDataLoading) {
+		t.Fatalf("starting Summary = %d %s, want 503 %s", startingSummary.Code, startingSummary.Body.String(), ErrorDataLoading)
 	}
 	phase3AssertPublicStatus(t, server, "running", "unbound", nil, nil)
 	runtime.set(magpie.RuntimeStatusReady, magpie.NewClient(firstMagpie.URL, firstMagpie.Client()))
-	waitFor(t, func() bool { return revisions.Current() == (RevisionTuple{DataRevision: 1, StatusRevision: 1}) })
-	phase3WaitBody(t, stream, `"data_revision":1,"status_revision":1`, time.Second)
+	waitFor(t, func() bool { return revisions.Current().StatusRevision == 1 })
+	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 3*time.Hour)
+	watcher.refreshUsage(ctx)
+	initialDataRevision := databaseRevisionForTest(t, db)
+	complete, err := queryService.InitialSyncComplete(ctx)
+	if err != nil || !complete {
+		t.Fatalf("initial sync complete = %t, %v; want successful Sync to finish", complete, err)
+	}
+	if got := revisions.Current(); got != (RevisionTuple{DataRevision: initialDataRevision, StatusRevision: 1}) {
+		t.Fatalf("completed initial Sync tuple = %+v, want database revision %d and ready status", got, initialDataRevision)
+	}
+	phase3WaitBody(t, stream, fmt.Sprintf(`"data_revision":%d,"status_revision":1`, initialDataRevision), time.Second)
 
 	firstSummary := request(server, http.MethodGet, "/api/usage/summary?range=today")
 	var before summaryResponseDTO
-	if firstSummary.Code != http.StatusOK || json.Unmarshal(firstSummary.Body.Bytes(), &before) != nil || before.DataRevision != 1 || before.Usage.Input != 12 {
-		t.Fatalf("ready Summary = %d %s, want revision 1 and input 12", firstSummary.Code, firstSummary.Body.String())
+	if firstSummary.Code != http.StatusOK || json.Unmarshal(firstSummary.Body.Bytes(), &before) != nil || before.DataRevision != initialDataRevision || before.Usage.Input != 12 {
+		t.Fatalf("ready Summary = %d %s, want database revision %d and input 12", firstSummary.Code, firstSummary.Body.String(), initialDataRevision)
 	}
 
-	watcher := newWatchers(queryService, projectionService, revisions, quotas, time.Hour, 3*time.Hour)
 	watcher.refreshUsage(ctx)
-	if got := revisions.Current(); got != (RevisionTuple{DataRevision: 1, StatusRevision: 1}) {
-		t.Fatalf("first successful Usage/Sessions baselines tuple = %+v, want only ready transition", got)
+	if got := revisions.Current(); got != (RevisionTuple{DataRevision: databaseRevisionForTest(t, db), StatusRevision: 1}) || got.DataRevision != initialDataRevision {
+		t.Fatalf("unchanged Sync tuple = %+v, want completed database revision %d", got, initialDataRevision)
 	}
 
 	sessionCallsBeforeTick := firstFixture.count("/api/sessions")
@@ -367,14 +373,15 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 	if got := firstFixture.count("/api/sessions") - sessionCallsBeforeTick; got != 1 {
 		t.Fatalf("one Sessions watcher tick made %d /api/sessions calls, want exactly 1", got)
 	}
+	metadataDataRevision := databaseRevisionForTest(t, db)
 	metadataTuple := revisions.Current()
-	if metadataTuple != (RevisionTuple{DataRevision: 2, StatusRevision: 1}) {
-		t.Fatalf("metadata-only Sessions change tuple = %+v, want {2 1}", metadataTuple)
+	if metadataTuple != (RevisionTuple{DataRevision: metadataDataRevision, StatusRevision: 1}) || metadataDataRevision <= initialDataRevision {
+		t.Fatalf("metadata-only Sessions change tuple = %+v, database revision %d; want an increased database revision", metadataTuple, metadataDataRevision)
 	}
-	phase3WaitBody(t, stream, `"data_revision":2,"status_revision":1`, time.Second)
+	phase3WaitBody(t, stream, fmt.Sprintf(`"data_revision":%d,"status_revision":1`, metadataDataRevision), time.Second)
 	watcher.refreshUsage(ctx)
-	if got := revisions.Current(); got != metadataTuple {
-		t.Fatalf("unchanged Usage tick changed tuple to %+v, want %+v", got, metadataTuple)
+	if databaseRevisionForTest(t, db) != metadataDataRevision || revisions.Current() != metadataTuple {
+		t.Fatalf("unchanged Usage tick changed tuple to %+v, want %+v", revisions.Current(), metadataTuple)
 	}
 
 	sessionsResponse := request(server, http.MethodGet, "/api/usage/sessions?range=today")
@@ -383,9 +390,6 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 		sessions.DataRevision != metadataTuple.DataRevision || len(sessions.Items) != 1 ||
 		sessions.Items[0].Thread.Title != "After" || sessions.Items[0].Thread.Project.Path != "/new/project" {
 		t.Fatalf("Dashboard Sessions GET = %d %s, want new metadata at revision %d", sessionsResponse.Code, sessionsResponse.Body.String(), metadataTuple.DataRevision)
-	}
-	if got := firstFixture.count("/api/sessions/one"); got != 0 {
-		t.Fatalf("Sessions GET made %d detail endpoint calls, want none", got)
 	}
 	if got := projectionService.sessionDetailCalls(); got != 0 {
 		t.Fatalf("Sessions GET invoked Projection.SessionDetail %d times, want none", got)
@@ -403,23 +407,30 @@ func TestPhase3WatcherRevisionSSEHTTPChainAndRuntimeClients(t *testing.T) {
 
 	oldClientCalls := firstFixture.totalCalls()
 	runtime.set(magpie.RuntimeStatusUnavailable, nil)
-	waitFor(t, func() bool { return revisions.Current() == (RevisionTuple{DataRevision: 2, StatusRevision: 2}) })
+	waitFor(t, func() bool { return revisions.Current() == (RevisionTuple{DataRevision: metadataDataRevision, StatusRevision: 2}) })
 	phase3AssertPublicStatus(t, server, "failed", "unbound", publicV1String("failed"), publicV1String(ErrorMagpieUnavailable))
 	unavailableSummary := request(server, http.MethodGet, "/api/usage/summary?range=today")
-	if unavailableSummary.Code != http.StatusServiceUnavailable || !strings.Contains(unavailableSummary.Body.String(), ErrorMagpieUnavailable) {
-		t.Fatalf("unavailable Summary = %d %s, want 503 %s", unavailableSummary.Code, unavailableSummary.Body.String(), ErrorMagpieUnavailable)
+	var offline summaryResponseDTO
+	if unavailableSummary.Code != http.StatusOK || json.Unmarshal(unavailableSummary.Body.Bytes(), &offline) != nil ||
+		offline.DataRevision != metadataDataRevision || offline.Usage.Input != before.Usage.Input {
+		t.Fatalf("complete database Summary while Magpie is unavailable = %d %s, want local input %d at revision %d", unavailableSummary.Code, unavailableSummary.Body.String(), before.Usage.Input, metadataDataRevision)
 	}
 	if firstFixture.totalCalls() != oldClientCalls {
 		t.Fatalf("old Magpie client received a request while Runtime was unavailable")
 	}
 
 	runtime.set(magpie.RuntimeStatusReady, magpie.NewClient(secondMagpie.URL, secondMagpie.Client()))
-	waitFor(t, func() bool { return revisions.Current() == (RevisionTuple{DataRevision: 3, StatusRevision: 3}) })
+	waitFor(t, func() bool { return revisions.Current().StatusRevision == 3 })
+	watcher.refreshUsage(ctx)
+	secondDataRevision := databaseRevisionForTest(t, db)
+	if secondDataRevision <= metadataDataRevision || revisions.Current() != (RevisionTuple{DataRevision: secondDataRevision, StatusRevision: 3}) {
+		t.Fatalf("replacement-client Sync tuple = %+v, database revision %d; want a newer committed revision", revisions.Current(), secondDataRevision)
+	}
 	phase3AssertPublicStatus(t, server, "idle", "ready", publicV1String("completed"), nil)
 	secondSummary := request(server, http.MethodGet, "/api/usage/summary?range=today")
 	var second summaryResponseDTO
-	if secondSummary.Code != http.StatusOK || json.Unmarshal(secondSummary.Body.Bytes(), &second) != nil || second.DataRevision != 3 || second.Usage.Input != 42 {
-		t.Fatalf("Summary through replacement Runtime client = %d %s, want revision 3 and input 42", secondSummary.Code, secondSummary.Body.String())
+	if secondSummary.Code != http.StatusOK || json.Unmarshal(secondSummary.Body.Bytes(), &second) != nil || second.DataRevision != secondDataRevision || second.Usage.Input != 42 {
+		t.Fatalf("Summary through replacement Runtime client = %d %s, want database revision %d and input 42", secondSummary.Code, secondSummary.Body.String(), secondDataRevision)
 	}
 	if firstFixture.totalCalls() != oldClientCalls || secondFixture.count("/api/usage/requests") == 0 {
 		t.Fatalf("runtime client selection was stale: old calls %d->%d, replacement usage requests %d", oldClientCalls, firstFixture.totalCalls(), secondFixture.count("/api/usage/requests"))
@@ -456,7 +467,7 @@ func TestPhase3QuotaRefreshAndCachedInternalPublicReads(t *testing.T) {
 	defer magpieServer.Close()
 	runtime := &phase3RuntimeProvider{FakeRuntime: testsupport.NewFakeRuntime(magpie.RuntimeStatusReady)}
 	runtime.set(magpie.RuntimeStatusReady, magpie.NewClient(magpieServer.URL, magpieServer.Client()))
-	queryService := newReadyRuntimeQueryForTest(t, runtime)
+	queryService, _ := newRuntimeQueryForTest(t, runtime)
 	projectionService := projection.NewService(queryService)
 	revisions := NewRevisionService(0)
 	quotas := &QuotaSnapshot{}

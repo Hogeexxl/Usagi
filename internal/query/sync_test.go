@@ -251,7 +251,6 @@ func newSyncTestService(t *testing.T, db *sql.DB, fixture *syncHTTPFixture, loca
 	t.Cleanup(server.Close)
 	service := newService(db, magpie.NewClient(server.URL, server.Client()), location)
 	service.now = func() time.Time { return now }
-	service.store.now = func() time.Time { return now }
 	service.pricingHTTPClient = &http.Client{Transport: priceBootstrapFailureTransport{}}
 	return service
 }
