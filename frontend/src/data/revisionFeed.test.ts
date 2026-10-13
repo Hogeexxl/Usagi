@@ -13,6 +13,7 @@ function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
     modelDistribution: vi.fn(),
     projectDistribution: vi.fn(),
     getSessions: vi.fn(),
+    toolUsage: vi.fn(),
     getSessionDetail: vi.fn(),
     getStatus: vi.fn(),
     getRevision: vi.fn(async () => ({ data_revision: 0, status_revision: 0 })),

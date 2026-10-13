@@ -94,6 +94,7 @@ export function Table<T>({
   onInsertColumn,
   onDeleteColumn,
   rowHeight = 48,
+  headerHeight = rowHeight,
   height = 440,
   overscan = 10,
   onEndReached,
@@ -292,7 +293,7 @@ export function Table<T>({
 
           <TableHeader
             columns={orderedColumns}
-            rowHeight={rowHeight}
+            headerHeight={headerHeight}
             reduce={!!reduce}
             thRefs={thRefs}
             selectable={selectable}

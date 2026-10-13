@@ -8,6 +8,7 @@ import { Button } from "../ui/beui/button";
 import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { ChartSection } from "./charts/ChartSection";
 import { useDashboardChartsController } from "./charts/useDashboardChartsController";
+import { useToolUsageController } from "./charts/useToolUsageController";
 import { FilterControls } from "./FilterControls";
 import { MetricGrid } from "./MetricGrid";
 import { RangeSelector } from "./RangeSelector";
@@ -43,11 +44,14 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
   const quota = useDashboardQuotaController({ client: options?.client });
   const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const sessionScope = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.sessions, view.range, view.filters);
-  const sessions = useSessionTableController(sessionScope.range, sessionScope.filters, {
-    client: options?.client,
-    revisionFeed: feedRef.current,
-    reloadKey: view.reload_key,
-  });
+  const sessions = useSessionTableController(
+    sessionScope.range,
+    sessionScope.filters,
+    view.sessions,
+    view.load_state,
+    view.error_code,
+    view.retry_load,
+  );
   const detail = useSessionDetailController(sessionScope.range, sessionScope.filters, {
     client: options?.client,
     revisionFeed: feedRef.current,
@@ -63,6 +67,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
     epochResetKey: view.epoch_reset_key,
     client: options?.client,
   });
+  const tools = useToolUsageController({ client: options?.client });
   const agentDisplay = useMemo(
     () => createAgentDisplayLookup(view.filter_options?.agents),
     [view.filter_options?.agents],
@@ -75,7 +80,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
   }, [detail.open, detail.retry_detail, view.reload_key]);
   useEffect(() => () => feedRef.current?.dispose(), []);
 
-  const loading = view.load_state === "loading";
+  const loading = view.load_state === "initial" || view.load_state === "loading";
   const loadError = loadErrorMessage(view.load_state);
   const refreshAnimating = view.refreshing;
 
@@ -141,6 +146,9 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
             <MetricGrid
               usage={view.metrics}
+              sessionCount={view.session_count}
+              sessionMedian={view.session_median}
+              sessionP90={view.session_p90}
               quota={quota.quota}
               onRefreshQuota={quota.refresh}
               quotaRefreshing={quota.refreshing}
@@ -149,7 +157,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
             />
           </section>
           <SessionSection view={sessions} detail={detail} agentDisplay={agentDisplay} />
-          <ChartSection view={charts} />
+          <ChartSection view={charts} tools={tools} />
         </div>
         <div className="sr-only" aria-live="polite">{loading ? "数据加载中…" : loadError}</div>
       </main>

@@ -20,10 +20,12 @@ import {
   type SessionListResponse,
   type SessionThreadDto,
   type SummaryResponse,
+  type ToolUsageResponse,
   type ThreadKey,
 } from "./types";
 
 const API_ERROR_CODES = new Set<ApiErrorCode>([
+  "DATA_LOADING",
   "INVALID_RANGE",
   "INVALID_FILTER",
   "THREAD_NOT_FOUND",
@@ -146,6 +148,8 @@ function parseSummary(value: unknown): SummaryResponse {
     data_revision: requiredSafeInteger(record, "data_revision"),
     usage,
     session_count: requiredSafeInteger(record, "session_count"),
+    session_median: nullableSafeInteger(record, "session_median"),
+    session_p90: nullableSafeInteger(record, "session_p90"),
   };
 }
 
@@ -263,6 +267,7 @@ function parseSessionList(value: unknown): SessionListResponse {
   if (!Array.isArray(record.items)) throw new UsagiClientError("HTTP_ERROR", 200);
   return {
     data_revision: requiredSafeInteger(record, "data_revision"),
+    summary: parseSummary(record.summary),
     items: record.items.map((value) => {
       const item = requiredRecord(value);
       return {
@@ -270,8 +275,25 @@ function parseSessionList(value: unknown): SessionListResponse {
         self_usage: parseUsage(item.self_usage),
         subagent_usage: parseUsage(item.subagent_usage),
         inclusive_usage: parseUsage(item.inclusive_usage),
-        subagent_count: requiredSafeInteger(item, "subagent_count"),
+        has_usage_rows: requiredBoolean(item, "has_usage_rows"),
+        last_activity_ms: nullableSafeInteger(item, "last_activity_ms"),
+        subagent_count: nullableSafeInteger(item, "subagent_count"),
       };
+    }),
+  };
+}
+
+function parseToolUsage(value: unknown): ToolUsageResponse {
+  const record = requiredRecord(value);
+  const days = requiredSafeInteger(record, "days");
+  if (days !== 1 && days !== 7 && days !== 30) throw new UsagiClientError("HTTP_ERROR", 200);
+  if (!Array.isArray(record.top)) throw new UsagiClientError("HTTP_ERROR", 200);
+  return {
+    days,
+    calls: requiredSafeInteger(record, "calls"),
+    top: record.top.map((value) => {
+      const item = requiredRecord(value);
+      return { name: requiredString(item, "name"), calls: requiredSafeInteger(item, "calls") };
     }),
   };
 }
@@ -402,6 +424,7 @@ export type UsagiClient = {
   modelDistribution(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<ModelDistributionResponse>;
   projectDistribution(range: DashboardRange, filters: DashboardFilters, signal?: AbortSignal): Promise<ProjectDistributionResponse>;
   getSessions(request: { range: DashboardRange; filters: DashboardFilters; signal?: AbortSignal }): Promise<SessionListResponse>;
+  toolUsage(days: 1 | 7 | 30, signal?: AbortSignal): Promise<ToolUsageResponse>;
   getSessionDetail(request: { range: DashboardRange; filters: DashboardFilters; key: ThreadKey; signal?: AbortSignal }): Promise<SessionDetailResponse>;
   getStatus(signal?: AbortSignal): Promise<RuntimeStatusResponse>;
   getRevision(signal?: AbortSignal): Promise<RevisionResponse>;
@@ -522,6 +545,10 @@ export const usagiClient: UsagiClient = {
   async getSessions({ range, filters, signal }) {
     const params = filterParams(range, filters);
     return parseSessionList(await requestJson<unknown>(`/api/usage/sessions?${params.toString()}`, "GET", signal));
+  },
+  async toolUsage(days, signal) {
+    const params = new URLSearchParams({ days: String(days) });
+    return parseToolUsage(await requestJson<unknown>(`/api/usage/tools?${params.toString()}`, "GET", signal));
   },
   async getSessionDetail({ range, filters, key, signal }) {
     const params = filterParams(range, filters, false);

@@ -168,14 +168,14 @@ export function FilterControls({ filters, options, optionsLoading, optionsErrorC
     <div className="flex flex-wrap items-center gap-2">
       <MorphPopover>
           <MorphPopoverTrigger>
-            <FilterTrigger label="终端" count={filters.agents.length} icon={<SquareTerminal className="h-4 w-4" />} />
+            <FilterTrigger label="Agent" count={filters.agents.length} icon={<SquareTerminal className="h-4 w-4" />} />
           </MorphPopoverTrigger>
           <MorphPopoverContent side="bottom" align="start" maxHeight={624} className="w-80">
             <div className="p-2">
             <OptionStatus loading={optionsLoading} error={optionsErrorCode} onRetry={onRetryOptions} />
             {agents.unavailable.map((item) => <UnavailableRow known={options !== null} key={item.agent} label={item.display_name} onUncheck={() => toggleAgent(item.agent)} />)}
             {!optionsLoading && !optionsErrorCode && agents.available.length === 0 ? (
-              <div className="px-2 py-3 text-xs text-muted-foreground">当前范围暂无终端</div>
+              <div className="px-2 py-3 text-xs text-muted-foreground">当前范围暂无 Agent</div>
             ) : null}
             {agents.available.map((item) => (
               <div key={item.agent} className={rowClass}>

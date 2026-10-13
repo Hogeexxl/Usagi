@@ -24,7 +24,8 @@ type SessionTableProps = {
   agentDisplay?: (agent: string) => string;
 };
 
-const TABLE_ROW_HEIGHT = 48;
+const TABLE_ROW_HEIGHT = 64;
+const TABLE_HEADER_HEIGHT = 48;
 const TABLE_PAGE_SIZE = 10;
 const TABLE_EMPTY_HEIGHT = 192;
 const TABLE_INITIAL_LOADING_HEIGHT = 480;
@@ -32,11 +33,14 @@ const TABLE_INITIAL_LOADING_HEIGHT = 480;
 export const sortableColumns: Array<{ field: SessionSortField; label: string }> = [
   { field: "last_activity", label: "最后活动" },
   { field: "project", label: "项目" },
-  { field: "model", label: "模型" },
   { field: "total_tokens", label: "合计 Token" },
   { field: "cache_hit_rate", label: "缓存率" },
   { field: "cost", label: "合计费用" },
 ];
+
+function subagentText(item: SessionListItemDto): string {
+  return item.subagent_count === null ? "—" : `${item.subagent_count} subagent`;
+}
 
 export function SessionTable({
   rows,
@@ -50,17 +54,13 @@ export function SessionTable({
   onSort,
   agentDisplay,
 }: SessionTableProps) {
-  // A refresh keeps the current rows in place; only empty loads show skeletons.
   const loading =
     loadState === "initial" ||
     loadState === "loading" ||
     pageState === "loading";
-  const tableHeight =
-    rows.length === 0
-      ? loading
-        ? TABLE_INITIAL_LOADING_HEIGHT
-        : TABLE_EMPTY_HEIGHT
-      : TABLE_ROW_HEIGHT * (Math.min(rows.length, TABLE_PAGE_SIZE) + 1);
+  const tableHeight = rows.length === 0
+    ? loading ? TABLE_INITIAL_LOADING_HEIGHT : TABLE_EMPTY_HEIGHT
+    : TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT * Math.min(rows.length, TABLE_PAGE_SIZE);
   const columns: TableColumn<SessionListItemDto>[] = [
     {
       key: "last_activity",
@@ -68,29 +68,24 @@ export function SessionTable({
       width: "128px",
       sortable: true,
       cell: (item) => {
-        const value = formatSessionTime(item.thread.last_usage_ms, timezone);
+        const value = formatSessionTime(item.last_activity_ms, timezone);
         return <span className="block truncate" title={value.title}>{value.text}</span>;
       },
     },
     {
-      key: "agent",
-      header: "终端",
-      width: "98pt",
-      cell: (item) => {
-        const agent = item.thread.key.agent;
-        const name = agentDisplay ? agentDisplay(agent) : agent;
-        return <span className="block truncate" title={name}>{name}</span>;
-      },
-    },
-    {
-      key: "title",
-      header: "标题",
+      key: "session",
+      header: "会话",
       cell: (item) => {
         const title = formatSessionTitle(item.thread.title);
+        const agent = item.thread.key.agent;
+        const agentName = agentDisplay ? agentDisplay(agent) : agent;
+        const model = formatSessionModel(item.thread.model_effort);
+        const details = [agentName, model.text, subagentText(item)].filter(Boolean).join(" · ");
         return (
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span className="min-w-0 truncate" title={title}>{title}</span>
-          </span>
+          <div className="flex min-w-0 flex-col leading-5">
+            <span className="block min-w-0 truncate whitespace-nowrap" title={title} aria-label={title}>{title}</span>
+            <span className="block min-w-0 truncate whitespace-nowrap text-xs leading-4 text-muted-foreground" title={details} aria-label={details}>{details}</span>
+          </div>
         );
       },
     },
@@ -106,29 +101,14 @@ export function SessionTable({
       },
     },
     {
-      key: "model",
-      header: "模型",
-      width: "215px",
-      sortable: true,
-      cell: (item) => {
-        const model = formatSessionModel(item.thread.model_effort);
-        return <span className="block truncate" title={model.title} aria-label={model.accessibleName}>{model.text}</span>;
-      },
-    },
-    {
       key: "total_tokens",
       header: "合计 Token",
       width: "150px",
       sortable: true,
       align: "right",
-      cell: (item) => <span className="tabular-nums" title={String(item.inclusive_usage.total)}>{formatSessionTokenInteger(item.inclusive_usage.total).text}</span>,
-    },
-    {
-      key: "subagent_count",
-      header: "sub数",
-      width: "80px",
-      align: "right",
-      cell: (item) => <span className="tabular-nums">{item.subagent_count}</span>,
+      cell: (item) => item.has_usage_rows
+        ? <span className="tabular-nums" title={String(item.inclusive_usage.total)}>{formatSessionTokenInteger(item.inclusive_usage.total).text}</span>
+        : <span>—</span>,
     },
     {
       key: "cache_hit_rate",
@@ -136,7 +116,9 @@ export function SessionTable({
       width: "127px",
       sortable: true,
       align: "right",
-      cell: (item) => <span className="tabular-nums" title={formatRatio(item.inclusive_usage.cache_hit_rate).title}>{formatRatio(item.inclusive_usage.cache_hit_rate).text}</span>,
+      cell: (item) => item.has_usage_rows
+        ? <span className="tabular-nums" title={formatRatio(item.inclusive_usage.cache_hit_rate).title}>{formatRatio(item.inclusive_usage.cache_hit_rate).text}</span>
+        : <span>—</span>,
     },
     {
       key: "cost",
@@ -144,7 +126,9 @@ export function SessionTable({
       width: "120px",
       sortable: true,
       align: "right",
-      cell: (item) => <span className="tabular-nums" title={formatCost(item.inclusive_usage.cost).title}>{formatCost(item.inclusive_usage.cost).text}</span>,
+      cell: (item) => item.has_usage_rows
+        ? <span className="tabular-nums" title={formatCost(item.inclusive_usage.cost).title}>{formatCost(item.inclusive_usage.cost).text}</span>
+        : <span>—</span>,
     },
   ];
 
@@ -156,6 +140,7 @@ export function SessionTable({
       columns={columns}
       getRowId={(row) => threadKeyId(row.thread.key)}
       rowHeight={TABLE_ROW_HEIGHT}
+      headerHeight={TABLE_HEADER_HEIGHT}
       height={tableHeight}
       loading={loading}
       skeletonRows={10}

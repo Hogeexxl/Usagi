@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usagiClient, dashboardQueryKey, type UsagiClient } from "../../data/usagiClient";
-import type { DashboardFilters, DashboardRange, ModelDistributionResponse, ProjectDistributionResponse } from "../../data/types";
+import { UsagiClientError, type DashboardFilters, type DashboardRange, type ModelDistributionResponse, type ProjectDistributionResponse } from "../../data/types";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "../scope";
 
 export type DashboardChartsView = {
@@ -43,6 +43,10 @@ export function useDashboardChartsController(args: {
       },
       (error: unknown) => {
         if (!controller.signal.aborted && !(error instanceof DOMException && error.name === "AbortError")) {
+          if (error instanceof UsagiClientError && error.code === "DATA_LOADING") {
+            setView({ models: null, projects: null, loading: true, error: false });
+            return;
+          }
           setView((current) => ({ ...current, loading: false, error: true }));
         }
       },

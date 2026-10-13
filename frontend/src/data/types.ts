@@ -32,6 +32,8 @@ export type SummaryResponse = {
   data_revision: number;
   usage: UsageDto;
   session_count: number;
+  session_median: number | null;
+  session_p90: number | null;
 };
 
 export type ProjectFilterOption =
@@ -141,13 +143,14 @@ export type SessionListItemDto = {
   self_usage: UsageDto;
   subagent_usage: UsageDto;
   inclusive_usage: UsageDto;
-  subagent_count: number;
+  has_usage_rows: boolean;
+  last_activity_ms: number | null;
+  subagent_count: number | null;
 };
 
 export type SessionSortField =
   | "last_activity"
   | "project"
-  | "model"
   | "total_tokens"
   | "cost"
   | "cache_hit_rate";
@@ -156,7 +159,19 @@ export type SessionSortOrder = "asc" | "desc";
 
 export type SessionListResponse = {
   data_revision: number;
+  summary: SummaryResponse;
   items: SessionListItemDto[];
+};
+
+export type ToolUsageItemDto = {
+  name: string;
+  calls: number;
+};
+
+export type ToolUsageResponse = {
+  days: 1 | 7 | 30;
+  calls: number;
+  top: ToolUsageItemDto[];
 };
 
 export type SessionDetailResponse = {
@@ -211,6 +226,7 @@ export type RuntimeStatusResponse = {
 };
 
 export type ApiErrorCode =
+  | "DATA_LOADING"
   | "INVALID_RANGE"
   | "INVALID_FILTER"
   | "THREAD_NOT_FOUND"

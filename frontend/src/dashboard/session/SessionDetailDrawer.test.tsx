@@ -71,6 +71,8 @@ const row: SessionListItemDto = {
   self_usage: detail.self_usage,
   subagent_usage: detail.subagent_usage,
   inclusive_usage: detail.inclusive_usage,
+  has_usage_rows: true,
+  last_activity_ms: detail.thread.last_usage_ms,
   subagent_count: 2,
 };
 

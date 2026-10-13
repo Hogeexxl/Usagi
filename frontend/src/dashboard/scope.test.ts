@@ -56,4 +56,22 @@ describe("Dashboard scope policy", () => {
       filters: { ...canonicalFilters, agents: [] },
     });
   });
+
+  it("keeps Tool usage on its fixed range and ignores dashboard filters", () => {
+    for (const dashboardRange of [{ key: "30d" as const }, { key: "yesterday" as const }]) {
+      expect(resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.toolUsage, dashboardRange, filters)).toEqual({
+        range: { key: "today" },
+        filters: { agents: [], models: [], projects: [] },
+      });
+    }
+
+    const sevenDays = {
+      ...DASHBOARD_SCOPE_POLICIES.toolUsage,
+      range: { kind: "fixed" as const, range: { key: "7d" as const } },
+    };
+    expect(resolveDashboardScope(sevenDays, { key: "30d" }, filters)).toEqual({
+      range: { key: "7d" },
+      filters: { agents: [], models: [], projects: [] },
+    });
+  });
 });

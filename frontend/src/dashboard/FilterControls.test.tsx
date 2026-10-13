@@ -234,9 +234,9 @@ describe("FilterControls", () => {
     expect(within(await openPopover("项目筛选，已选1项")).getByRole("checkbox", { name: "Workspace" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    const agents = await openPopover("终端筛选，已选1项");
+    const agents = await openPopover("Agent筛选，已选1项");
     expect(within(agents).getByRole("checkbox", { name: "Codex" })).toHaveAttribute("aria-checked", "true");
-    expect(within(agents).getByText("当前范围暂无终端")).toBeInTheDocument();
+    expect(within(agents).getByText("当前范围暂无 Agent")).toBeInTheDocument();
   });
 
 
@@ -395,7 +395,7 @@ describe("FilterControls", () => {
   it("always shows the terminal filter, since options follow the selected range", () => {
     for (const options of [null, { data_revision: 1, agents: [], models: [], projects: [] }, { data_revision: 1, agents: [{ agent: "codex", display_name: "Codex" }], models: [], projects: [] }]) {
       const view = renderControls({ options });
-      expect(screen.getByRole("button", { name: "终端筛选，全部" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Agent筛选，全部" })).toBeInTheDocument();
       view.unmount();
     }
   });
@@ -419,11 +419,11 @@ describe("FilterControls", () => {
       onChange,
     });
 
-    const trigger = screen.getByRole("button", { name: "终端筛选，全部" });
+    const trigger = screen.getByRole("button", { name: "Agent筛选，全部" });
     expect(trigger).toBeInTheDocument();
-    expect(trigger).toHaveTextContent("终端 · 全部");
+    expect(trigger).toHaveTextContent("Agent · 全部");
 
-    const dialog = await openPopover("终端筛选，全部");
+    const dialog = await openPopover("Agent筛选，全部");
     expect(dialog).toBeInTheDocument();
     expect(dialog).toHaveClass("w-80");
     const scrollArea = dialog.querySelector<HTMLElement>("[data-multi-select-scroll-area]");
@@ -455,8 +455,8 @@ describe("FilterControls", () => {
       onChange,
     });
 
-    expect(screen.getByRole("button", { name: "终端筛选，已选1项" })).toHaveTextContent("终端 · 1 项");
-    const dialog = await openPopover("终端筛选，已选1项");
+    expect(screen.getByRole("button", { name: "Agent筛选，已选1项" })).toHaveTextContent("Agent · 1 项");
+    const dialog = await openPopover("Agent筛选，已选1项");
     const labels = within(dialog).getAllByRole("checkbox").map((node) => node.closest("label")?.textContent?.replace("Selected", ""));
     expect(labels).toEqual(["legacy-source", "Codex", "Antigravity"]);
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "legacy-source" }));

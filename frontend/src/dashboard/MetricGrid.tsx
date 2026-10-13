@@ -15,14 +15,17 @@ import { useHoverGesture } from "../ui/lib/use-hover-gesture";
 
 type MetricGridProps = {
   usage: UsageDto | null;
+  sessionCount: number;
+  sessionMedian: number | null;
+  sessionP90: number | null;
   quota: QuotaResponse;
   onRefreshQuota: () => void;
   quotaRefreshing: boolean;
   quotaRefreshError: boolean;
   quotaRefreshAvailable: boolean;
 };
-type Focus = "input" | "cache_read" | "output" | null;
-type CacheFocus = "cached" | "input" | null;
+type Focus = "input" | "cache_read" | "cache_write" | "output" | null;
+type CacheFocus = "cached" | "input" | "cache_write" | null;
 
 const CARD = "h-36 min-w-0 border border-border bg-card p-4 text-foreground";
 const TITLE = "text-xs font-medium leading-4 text-foreground";
@@ -54,10 +57,10 @@ function CompactTicker({
   );
 }
 
-function Dot({ className }: { className: string }) {
+function Dot({ className, color }: { className?: string; color?: string }) {
   return (
     <span aria-hidden className="inline-flex h-4 shrink-0 items-center justify-center">
-      <span className={`block h-1.5 w-1.5 rounded-full ${className}`} />
+      <span className={`block h-1.5 w-1.5 rounded-full ${className ?? ""}`} style={color ? { backgroundColor: color } : undefined} />
     </span>
   );
 }
@@ -67,13 +70,15 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
   const [focus, setFocus] = useState<Focus>(null);
   const input = usage.input;
   const cacheRead = usage.cache_read;
+  const cacheWrite = usage.cache_write;
   const output = usage.output;
   const total = usage.total;
-  const visibleTotal = input + cacheRead + output;
-  const inputPct = visibleTotal > 0 ? (input / visibleTotal) * 100 : 0;
-  const cacheReadPct = visibleTotal > 0 ? (cacheRead / visibleTotal) * 100 : 0;
-  const outputStartPct = inputPct + cacheReadPct;
-  const outputPct = visibleTotal > 0 ? (output / visibleTotal) * 100 : 0;
+  const inputPct = total > 0 ? (input / total) * 100 : 0;
+  const cacheReadPct = total > 0 ? (cacheRead / total) * 100 : 0;
+  const cacheWritePct = total > 0 ? (cacheWrite / total) * 100 : 0;
+  const cacheWriteStartPct = inputPct + cacheReadPct;
+  const outputStartPct = cacheWriteStartPct + cacheWritePct;
+  const outputPct = total > 0 ? (output / total) * 100 : 0;
   const dim = (key: Exclude<Focus, null>) => focus !== null && focus !== key;
   const transition = reduce ? { duration: 0 } : { ease: EASE_OUT };
 
@@ -81,7 +86,13 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
     <TiltCard className={`${CARD} flex flex-col min-w-0 max-[1439px]:col-span-2 max-[767px]:col-span-1`}>
       <div className={TITLE}>总 Token</div>
       <CompactTicker value={total} formatter={formatIntegerFull} />
-      <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="Token 分布：输入、缓存读和输出">
+      <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="Token 分布：输入、缓存读、缓存写和输出">
+        <motion.div
+          className="absolute inset-y-0"
+          style={{ left: `${cacheWriteStartPct}%`, width: `${cacheWritePct}%`, backgroundColor: chartSeriesColor(3) }}
+          animate={{ opacity: dim("cache_write") ? 0.3 : 1, scaleY: focus === "cache_write" && !reduce ? 1.25 : 1 }}
+          transition={transition}
+        />
         <motion.div
           className="absolute inset-y-0 left-0 bg-[#68c0e8]"
           style={{ width: `${inputPct}%` }}
@@ -108,6 +119,9 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
         <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_read")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_read")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be506e]" /><span className="inline-flex h-4 items-center">缓存读</span><CompactTicker value={cacheRead} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button>
+        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
+          <Dot color={chartSeriesColor(3)} /><span className="inline-flex h-4 items-center">缓存写</span><CompactTicker value={cacheWrite} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
+        </button>
         <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("output")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("output")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be753e]" /><span className="inline-flex h-4 items-center">输出</span><CompactTicker value={output} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button>
@@ -121,10 +135,12 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
   const [focus, setFocus] = useState<CacheFocus>(null);
   const input = usage.input;
   const cached = usage.cache_read;
+  const cacheWrite = usage.cache_write;
   const rate = usage.cache_hit_rate;
-  const visibleTotal = input + cached;
+  const visibleTotal = input + cached + cacheWrite;
   const cachedPct = visibleTotal > 0 ? Math.min(1, Math.max(0, cached / visibleTotal)) * 100 : 0;
   const inputPct = visibleTotal > 0 ? (input / visibleTotal) * 100 : 0;
+  const cacheWritePct = visibleTotal > 0 ? (cacheWrite / visibleTotal) * 100 : 0;
 
   return (
     <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
@@ -134,9 +150,10 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
       ) : (
         <CompactTicker value={rate} tickerValue={Math.round(rate * 1000)} formatter={formatRatio} tickerFormatter={(next) => formatRatio(next / 1000).text} />
       )}
-      <motion.div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="缓存读与输入 Token 分布" animate={{ scaleY: focus !== null && !reduce ? 1.12 : 1 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }}>
+      <motion.div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="缓存读、输入与缓存写 Token 分布" animate={{ scaleY: focus !== null && !reduce ? 1.12 : 1 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }}>
         <motion.div className="absolute inset-y-0 left-0 bg-[#be506e]" style={{ width: `${cachedPct}%` }} animate={{ opacity: focus === null || focus === "cached" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
         <motion.div className="absolute inset-y-0 bg-[#4057a5]" style={{ left: `${cachedPct}%`, width: `${inputPct}%` }} animate={{ opacity: focus === null || focus === "input" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
+        <motion.div className="absolute inset-y-0" style={{ left: `${cachedPct + inputPct}%`, width: `${cacheWritePct}%`, backgroundColor: chartSeriesColor(3) }} animate={{ opacity: focus === null || focus === "cache_write" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
       </motion.div>
       <div className="mt-auto flex items-center gap-2 whitespace-nowrap">
         <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cached")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cached")} onBlur={() => setFocus(null)}>
@@ -144,6 +161,9 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
         </button>
         <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#4057a5]" /><span className="inline-flex h-4 items-center">输入</span><CompactTicker value={input} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
+        </button>
+        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
+          <Dot color={chartSeriesColor(3)} /><span className="inline-flex h-4 items-center">缓存写</span><CompactTicker value={cacheWrite} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button>
       </div>
     </TiltCard>
@@ -186,33 +206,27 @@ export function RequestMetric({ usage, glare = false }: { usage: UsageDto; glare
 }
 
 export function CostMetric({ usage, glare = true }: { usage: UsageDto; glare?: boolean }) {
-  const hasUnpriced = usage.unpriced > 0;
   const costPerMillionTokens = formatCostPerMillionTokens(usage.total > 0 ? (usage.cost / usage.total) * 1_000_000 : null);
 
   return (
     <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className={TITLE}>费用</div>
-        <Popover trigger="hover" side="bottom" align="end">
-          <PopoverTrigger>
-            <button
-              type="button"
-              aria-label="未计价使用记录提示"
-              className={`inline-flex items-center justify-center ${hasUnpriced ? "text-warning" : "text-foreground"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
-            >
-              <CircleAlert className="h-4 w-4" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
-            <div className="flex flex-col gap-1">
-              {hasUnpriced ? <div>{usage.unpriced} 条使用记录未计价</div> : <div>所有使用记录均已计价</div>}
-            </div>
-          </PopoverContent>
-        </Popover>
-      </div>
+      <div className={TITLE}>等价费用</div>
       <CompactTicker value={usage.cost} tickerValue={Math.round(usage.cost * 100)} formatter={formatCostFull} tickerFormatter={(next) => formatCostFull(next / 100).text} />
       <div className={`${LEGEND} mt-auto`} title={costPerMillionTokens.title} aria-label={costPerMillionTokens.accessibleName}>
         {costPerMillionTokens.text}
+      </div>
+    </TiltCard>
+  );
+}
+
+export function SessionMetric({ count, median, p90 }: { count: number; median: number | null; p90: number | null }) {
+  const percentileText = (value: number | null) => value === null ? "—" : formatIntegerFull(value).text;
+  return (
+    <TiltCard glare={false} className={`${CARD} flex flex-col`}>
+      <div className={TITLE}>会话数</div>
+      <CompactTicker value={count} formatter={formatIntegerFull} />
+      <div className={`${LEGEND} mt-auto`} aria-label={`会话 Token 中位 ${percentileText(median)}，P90 ${percentileText(p90)}`}>
+        中位 {percentileText(median)} · P90 {percentileText(p90)}
       </div>
     </TiltCard>
   );
@@ -390,6 +404,9 @@ export function SkeletonCard({ wide = false, bar = false }: { wide?: boolean; ba
 
 export const MetricGrid = memo(function MetricGrid({
   usage,
+  sessionCount,
+  sessionMedian,
+  sessionP90,
   quota,
   onRefreshQuota,
   quotaRefreshing,
@@ -410,8 +427,8 @@ export const MetricGrid = memo(function MetricGrid({
         <>
           <TotalTokenMetric usage={usage} />
           <CacheHitMetric usage={usage} glare={false} />
-          <RequestMetric usage={usage} />
           <CostMetric usage={usage} glare={false} />
+          <SessionMetric count={sessionCount} median={sessionMedian} p90={sessionP90} />
           <AccountQuotaCard
             quota={quota}
             onRefresh={onRefreshQuota}

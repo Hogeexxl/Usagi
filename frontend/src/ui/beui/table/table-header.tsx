@@ -26,7 +26,7 @@ import { alignFlex, alignText, COLUMN_ACTIVE_SHADOW } from "./utils";
 
 export interface TableHeaderProps<T> {
   columns: TableColumn<T>[];
-  rowHeight: number;
+  headerHeight: number;
   reduce: boolean;
   thRefs: HeaderCellRefs;
   selectable: boolean;
@@ -141,7 +141,7 @@ function ColumnHandle<T>({
 
 export function TableHeader<T>({
   columns,
-  rowHeight,
+  headerHeight,
   reduce,
   thRefs,
   selectable,
@@ -183,7 +183,7 @@ export function TableHeader<T>({
         />
       ) : null}
       <thead>
-      <tr style={{ height: rowHeight }}>
+      <tr style={{ height: headerHeight }}>
         {selectable ? (
           <th className="sticky top-0 z-10 border-border border-b bg-muted">
             <div className="flex items-center justify-center">
@@ -234,7 +234,7 @@ export function TableHeader<T>({
                   "flex h-full items-center",
                   alignFlex(column.align),
                 )}
-                style={{ height: rowHeight }}
+                style={{ height: headerHeight }}
                 animate={
                   reduce
                     ? { opacity: isDragging ? 0.5 : 1 }

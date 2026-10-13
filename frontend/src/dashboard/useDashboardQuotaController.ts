@@ -4,7 +4,6 @@ import { usagiClient, type UsagiClient } from "../data/usagiClient";
 import type { QuotaResponse } from "../data/types";
 
 const QUOTA_POLL_INTERVAL_MS = 60_000;
-const QUOTA_READING_POLL_INTERVAL_MS = 1_000;
 
 const loadingQuota = (): QuotaResponse => ({ reading: true, items: [] });
 
@@ -32,20 +31,16 @@ export function useDashboardQuotaController(
   const requestRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(false);
   const refreshInFlightRef = useRef(false);
-  const quotaRef = useRef<QuotaResponse>(loadingQuota());
   const pollTimerRef = useRef<number | null>(null);
   const loadRef = useRef<(() => void) | null>(null);
 
   const schedulePoll = useCallback(() => {
     if (!mountedRef.current || refreshInFlightRef.current) return;
     if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
-    const interval = quotaRef.current.reading
-      ? QUOTA_READING_POLL_INTERVAL_MS
-      : QUOTA_POLL_INTERVAL_MS;
     pollTimerRef.current = window.setTimeout(() => {
       pollTimerRef.current = null;
       loadRef.current?.();
-    }, interval);
+    }, QUOTA_POLL_INTERVAL_MS);
   }, []);
 
   const loadSnapshot = useCallback(() => {
@@ -55,7 +50,6 @@ export function useDashboardQuotaController(
     void client.quota(controller.signal).then(
       (response) => {
         if (!mountedRef.current || controller.signal.aborted || requestRef.current !== controller) return;
-        quotaRef.current = response;
         setQuota(response);
         setRefreshError(false);
       },
@@ -75,7 +69,6 @@ export function useDashboardQuotaController(
   useEffect(() => {
     mountedRef.current = true;
     const initialQuota = loadingQuota();
-    quotaRef.current = initialQuota;
     setQuota(initialQuota);
     setRefreshing(false);
     loadSnapshot();
@@ -102,7 +95,6 @@ export function useDashboardQuotaController(
     void client.refreshQuota(controller.signal).then(
       (response) => {
         if (mountedRef.current && !controller.signal.aborted && requestRef.current === controller) {
-          quotaRef.current = response;
           setQuota(response);
         }
       },

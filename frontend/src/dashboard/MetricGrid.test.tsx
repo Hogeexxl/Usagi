@@ -40,7 +40,7 @@ const compactUsage: UsageDto = {
   retried: 0, output_speed: null, speed_samples: 0,
 };
 
-const tokenBarLabel = "Token 分布：输入、缓存读和输出";
+const tokenBarLabel = "Token 分布：输入、缓存读、缓存写和输出";
 const resetAt = Date.UTC(2026, 7, 12, 4, 23);
 
 function quotaWindow(name: string, used: number, resetsAt = resetAt, unlimited = false): QuotaWindowDto {
@@ -93,6 +93,9 @@ const manyProviders: QuotaResponse = {
 
 function MetricGridFixture({
   usage: currentUsage = usage,
+  sessionCount = 8,
+  sessionMedian = 1_000,
+  sessionP90 = 3_000,
   quota: currentQuota = { reading: false, items: [] },
   onRefreshQuota = () => undefined,
   quotaRefreshing = false,
@@ -102,6 +105,9 @@ function MetricGridFixture({
   return (
     <MetricGrid
       usage={currentUsage}
+      sessionCount={sessionCount}
+      sessionMedian={sessionMedian}
+      sessionP90={sessionP90}
       quota={currentQuota}
       onRefreshQuota={onRefreshQuota}
       quotaRefreshing={quotaRefreshing}
@@ -146,14 +152,16 @@ function glareOverlayCount(card: HTMLElement): number {
   ).length;
 }
 
-describe("MetricGrid Spec04", () => {
-  it("keeps glare only on the total token card and shows the request card in the old session slot", async () => {
+describe("MetricGrid Spec05", () => {
+  it("renders only the five session page cards and keeps RequestMetric available", async () => {
     enableTiltEffects();
     render(<MetricGridFixture usage={usage} quota={quota} />);
     const grid = screen.getByLabelText("KPI 指标");
     await waitFor(() => expect(Array.from(grid.children).map((card) => glareOverlayCount(card as HTMLElement))).toEqual([1, 0, 0, 0, 0]));
-    expect(within(grid).queryByText("会话数量")).not.toBeInTheDocument();
-    expect(Array.from(grid.children).map((card) => card.querySelector(".text-xs.font-medium")?.textContent)).toEqual(["总 Token", "缓存命中", "请求数", "费用", "账户额度"]);
+    expect(Array.from(grid.children).map((card) => card.querySelector(".text-xs.font-medium")?.textContent)).toEqual(["总 Token", "缓存命中", "等价费用", "会话数", "账户额度"]);
+    expect(within(grid).queryByText("请求数")).not.toBeInTheDocument();
+    expect(within(grid).queryByRole("button", { name: "请求失败与重试提示" })).not.toBeInTheDocument();
+    expect(cardByTitle("会话数")).toHaveTextContent("中位 1K · P90 3K");
   });
 
   it("shows visible token fields as a normalized bar without a separate reasoning part", () => {
@@ -162,20 +170,22 @@ describe("MetricGrid Spec04", () => {
     const bar = screen.getByLabelText(tokenBarLabel) as HTMLElement;
     const input = segmentByClass(bar, "bg-[#68c0e8]");
     const cacheRead = segmentByClass(bar, "bg-[#be506e]");
+    const cacheWrite = Array.from(bar.children).find((child) => (child as HTMLElement).style.backgroundColor === chartSeriesColor(3)) as HTMLElement;
     const output = segmentByClass(bar, "bg-[#be753e]");
-    const visibleTotal = usage.input + usage.cache_read + usage.output;
+    const visibleTotal = usage.total;
 
     expect(within(card).getByTitle("2,000")).toHaveTextContent("2K");
-    expect(within(card).queryByText("缓存写")).not.toBeInTheDocument();
-    expect(within(card).queryByTitle("300")).not.toBeInTheDocument();
-    expect(within(card).queryByLabelText(/缓存写/)).not.toBeInTheDocument();
-    expect(bar.children).toHaveLength(3);
+    expect(within(card).getByText("缓存写")).toBeInTheDocument();
+    expect(within(card).getByTitle("300")).toBeInTheDocument();
+    expect(within(card).getByLabelText(/缓存写/)).toBeInTheDocument();
+    expect(bar.children).toHaveLength(4);
     expect(within(card).queryByText("推理")).not.toBeInTheDocument();
     expect(within(card).queryByLabelText(/推理/)).not.toBeInTheDocument();
     expect(input).toHaveStyle({ left: "", width: `${(usage.input / visibleTotal) * 100}%` });
     expect(cacheRead).toHaveStyle({ left: `${(usage.input / visibleTotal) * 100}%`, width: `${(usage.cache_read / visibleTotal) * 100}%` });
-    expect(output).toHaveStyle({ left: `${((usage.input + usage.cache_read) / visibleTotal) * 100}%`, width: `${(usage.output / visibleTotal) * 100}%` });
-    expect(Number.parseFloat(input.style.width) + Number.parseFloat(cacheRead.style.width) + Number.parseFloat(output.style.width)).toBeCloseTo(100);
+    expect(cacheWrite).toHaveStyle({ left: `${((usage.input + usage.cache_read) / visibleTotal) * 100}%`, width: `${(usage.cache_write / visibleTotal) * 100}%` });
+    expect(output).toHaveStyle({ left: `${((usage.input + usage.cache_read + usage.cache_write) / visibleTotal) * 100}%`, width: `${(usage.output / visibleTotal) * 100}%` });
+    expect(Array.from(bar.children).reduce((sum, segment) => sum + Number.parseFloat((segment as HTMLElement).style.width), 0)).toBeCloseTo(100);
 
     const widths = Array.from(bar.children, (segment) => (segment as HTMLElement).style.width);
     for (const legend of screen.getAllByRole("button").filter((button) => button.closest(".h-36") === cardByTitle("总 Token"))) {
@@ -185,43 +195,47 @@ describe("MetricGrid Spec04", () => {
     }
   });
 
-  it("keeps the cache hit headline and shows a normalized bar for visible cache fields", () => {
+  it("keeps the cache hit headline and normalizes cache read, input, and cache write", () => {
     render(<CacheHitMetric usage={usage} glare={false} />);
     const card = screen.getByText("缓存命中").closest(".h-36") as HTMLElement;
     const display = within(card).getByTitle("30.8%");
     expect(display).toHaveTextContent("30.8%");
-    expect(within(card).queryByText("缓存写")).not.toBeInTheDocument();
-    expect(within(card).queryByTitle("300")).not.toBeInTheDocument();
-    expect(within(card).queryByLabelText(/缓存写/)).not.toBeInTheDocument();
+    expect(within(card).getByText("缓存写")).toBeInTheDocument();
+    expect(within(card).getByTitle("300")).toBeInTheDocument();
+    expect(within(card).getByLabelText(/缓存写/)).toBeInTheDocument();
 
-    const bar = screen.getByLabelText("缓存读与输入 Token 分布");
+    const bar = screen.getByLabelText("缓存读、输入与缓存写 Token 分布");
     const cached = segmentByClass(bar, "bg-[#be506e]");
     const input = segmentByClass(bar, "bg-[#4057a5]");
-    expect(Array.from(bar.children)).toHaveLength(2);
-    expect(cached).toHaveStyle({ width: "40%" });
-    expect(input).toHaveStyle({ left: "40%", width: "60%" });
-    expect(Number.parseFloat(cached.style.width) + Number.parseFloat(input.style.width)).toBeCloseTo(100);
+    const cacheWrite = Array.from(bar.children).find((child) => (child as HTMLElement).style.backgroundColor === chartSeriesColor(3)) as HTMLElement;
+    const denominator = usage.input + usage.cache_read + usage.cache_write;
+    expect(Array.from(bar.children)).toHaveLength(3);
+    expect(cached).toHaveStyle({ width: `${(usage.cache_read / denominator) * 100}%` });
+    expect(input).toHaveStyle({ left: `${(usage.cache_read / denominator) * 100}%`, width: `${(usage.input / denominator) * 100}%` });
+    expect(Number.parseFloat(cacheWrite.style.left)).toBeCloseTo(((usage.cache_read + usage.input) / denominator) * 100);
+    expect(cacheWrite).toHaveStyle({ width: `${(usage.cache_write / denominator) * 100}%` });
+    expect(Array.from(bar.children).reduce((sum, segment) => sum + Number.parseFloat((segment as HTMLElement).style.width), 0)).toBeCloseTo(100);
   });
 
-  it("shows cost per million from cost / total and warns using the unpriced count", async () => {
+  it("shows cost per million from equivalent cost / total without an unpriced prompt", () => {
     render(<CostMetric usage={usage} glare={false} />);
-    const card = cardByTitle("费用");
+    const card = cardByTitle("等价费用");
     expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
     expect(screen.getByTitle("$0.01")).toHaveTextContent("$0.01");
-    const trigger = within(card).getByRole("button", { name: "未计价使用记录提示" });
-    expect(trigger).toHaveClass("text-warning");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    expect(await screen.findByRole("dialog")).toHaveTextContent("1 条使用记录未计价");
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(card).queryByText(/未计价/)).not.toBeInTheDocument();
   });
 
-  it("shows complete-cost messaging and uses total for the ratio", async () => {
+  it("uses total for the equivalent cost ratio regardless of unpriced count", () => {
     render(<CostMetric usage={{ ...usage, unpriced: 0 }} glare={false} />);
-    const card = cardByTitle("费用");
+    const card = cardByTitle("等价费用");
     expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
-    const trigger = within(card).getByRole("button", { name: "未计价使用记录提示" });
-    expect(trigger).toHaveClass("text-foreground");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    expect(await screen.findByRole("dialog")).toHaveTextContent("所有使用记录均已计价");
+    expect(within(card).queryByText(/未计价/)).not.toBeInTheDocument();
+  });
+
+  it("renders null session percentiles as em dashes", () => {
+    render(<MetricGridFixture sessionMedian={null} sessionP90={null} />);
+    expect(within(cardByTitle("会话数")).getByText("中位 — · P90 —")).toBeInTheDocument();
   });
 
   it("uses the provider and window order from the unified quota snapshot", () => {

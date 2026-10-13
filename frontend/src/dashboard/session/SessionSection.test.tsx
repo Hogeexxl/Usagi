@@ -70,6 +70,8 @@ const item: SessionListItemDto = {
   inclusive_usage: { ...usage, total: 5_678 },
   self_usage: { ...usage, total: 1_234 },
   subagent_usage: usage,
+  has_usage_rows: true,
+  last_activity_ms: Date.UTC(2026, 7, 10, 8, 9),
 };
 
 function view(overrides: Partial<SessionTableViewModel> = {}): SessionTableViewModel {
@@ -188,27 +190,22 @@ describe("SessionSection v0.2.0", () => {
     expect(openSession).toHaveBeenCalledWith(rows[0]);
   });
 
-  it("T-S04-002 keeps the fixed column order, sortable rules, and numeric alignment", () => {
+  it("T17 renders the six columns, combined session details, and numeric alignment", () => {
     const rendered = render(<SessionSection view={view()} />);
     const headers = screen.getAllByRole("columnheader");
 
     expect(screen.getByRole("heading", { name: "Session 记录" })).toBeInTheDocument();
     expect(headers.map((header) => header.textContent?.trim())).toEqual([
       "最后活动",
-      "终端",
-      "标题",
+      "会话",
       "项目",
-      "模型",
       "合计 Token",
-      "sub数",
       "缓存率",
       "合计费用",
     ]);
 
     expect(headers[1].querySelector("button")).toBeNull();
-    expect(headers[2].querySelector("button")).toBeNull();
-    expect(headers[6].querySelector("button")).toBeNull();
-    expect(headers.filter((header) => header.querySelector("button")).length).toBe(6);
+    expect(headers.filter((header) => header.querySelector("button")).length).toBe(5);
     for (const header of headers) {
       const label = header.querySelector("button, span");
       expect(label).toHaveClass("px-4");
@@ -221,35 +218,34 @@ describe("SessionSection v0.2.0", () => {
     const cells = rendered.container.querySelectorAll(
       `tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`,
     );
-    for (const index of [5, 6, 7, 8]) {
+    for (const index of [3, 4, 5]) {
       expect(cells[index]).toHaveClass("text-right");
     }
-    expect(cells[1]).toHaveTextContent("codex");
-    expect(cells[4]).toHaveTextContent("gpt-5 (high) +1");
-    expect(cells[4].querySelector("span")).toHaveAttribute("title", "gpt-5 (high), o4-mini (low)");
-    expect(cells[4].querySelector("span")).toHaveAttribute("aria-label", "gpt-5 (high), o4-mini (low)");
-    expect(cells[5]).toHaveTextContent("5,678");
-    expect(cells[6]).toHaveTextContent("2");
-    expect(cells[5].querySelector(".tabular-nums")).toBeTruthy();
-    expect(cells[6].querySelector(".tabular-nums")).toBeTruthy();
+    expect(cells[1]).toHaveTextContent("未命名会话");
+    expect(cells[1]).toHaveTextContent("codex · gpt-5 (high), o4-mini (low) · 2 subagent");
+    expect(cells[1].querySelectorAll("span")[0]).toHaveAttribute("title", "未命名会话");
+    expect(cells[1].querySelectorAll("span")[1]).toHaveAttribute("title", "codex · gpt-5 (high), o4-mini (low) · 2 subagent");
+    expect(cells[3]).toHaveTextContent("5,678");
+    expect(cells[4]).toHaveTextContent("7.4%");
+    expect(cells[5]).toHaveTextContent("$1.25");
+    expect(cells[3].querySelector(".tabular-nums")).toBeTruthy();
 
     const table = rendered.container.querySelector("table");
     if (!table) throw new Error("Session table not found");
+    expect(table.querySelector("thead tr")).toHaveStyle({ height: "48px" });
+    expect(table.querySelector("tbody tr")).toHaveStyle({ height: "64px" });
     expect(Array.from(table.querySelectorAll("col"), (column) => column.style.width)).toEqual([
       "128px",
-      "98pt",
       "",
       "150px",
-      "215px",
       "150px",
-      "80px",
       "127px",
       "120px",
       "0px",
     ]);
   });
 
-  it("TD-P5-TABLE-01 renders mixed-source rows with 9 columns in exact order and authored widths", () => {
+  it("T17 includes mapped Agent names in the combined session details", () => {
     const mixedRows: SessionListItemDto[] = [
       row(1, { thread: { ...row(1).thread, key: { ...row(1).thread.key, agent: "codex" } } }),
       row(2, { thread: { ...row(2).thread, key: { ...row(2).thread.key, agent: "antigravity" } } }),
@@ -261,12 +257,9 @@ describe("SessionSection v0.2.0", () => {
     const headers = screen.getAllByRole("columnheader");
     expect(headers.map((h) => h.textContent?.trim())).toEqual([
       "最后活动",
-      "终端",
-      "标题",
+      "会话",
       "项目",
-      "模型",
       "合计 Token",
-      "sub数",
       "缓存率",
       "合计费用",
     ]);
@@ -275,12 +268,9 @@ describe("SessionSection v0.2.0", () => {
     if (!table) throw new Error("Session table not found");
     expect(Array.from(table.querySelectorAll("col"), (col) => col.style.width)).toEqual([
       "128px",
-      "98pt",
       "",
       "150px",
-      "215px",
       "150px",
-      "80px",
       "127px",
       "120px",
       "0px",
@@ -308,12 +298,12 @@ describe("SessionSection v0.2.0", () => {
     expect(table).not.toHaveClass("w-full");
     expect(before.fillerWidth).toBe("0px");
 
-    fireEvent.click(screen.getByRole("button", { name: "模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "项目" }));
     rendered.rerender(
       <SessionSection
         view={view({
           rows: [...rows].reverse(),
-          sort_by: "model",
+          sort_by: "project",
           sort_order: "asc",
         })}
       />,
@@ -331,8 +321,8 @@ describe("SessionSection v0.2.0", () => {
 
   it("T-S04-004 computes the table height from ready rows", () => {
     for (const [count, height] of [
-      [10, 528],
-      [3, 192],
+      [10, 688],
+      [3, 240],
     ] as const) {
       const rendered = render(
         <SessionSection
@@ -370,13 +360,34 @@ describe("SessionSection v0.2.0", () => {
     rendered.unmount();
   });
 
-  it("keeps inclusive rollups and subagent counts in the Session row", () => {
+  it("keeps inclusive rollups and subagent counts in the Session cell", () => {
     const rendered = render(<SessionSection view={view({ rows: [row(1)] })} />);
     const cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
-    expect(cells[5]).toHaveTextContent("5,678");
-    expect(cells[6]).toHaveTextContent("2");
-    expect(cells[7]).toHaveTextContent("7.4%");
-    expect(cells[8]).toHaveTextContent("$1.25");
+    expect(cells[1]).toHaveTextContent("2 subagent");
+    expect(cells[3]).toHaveTextContent("5,678");
+    expect(cells[4]).toHaveTextContent("7.4%");
+    expect(cells[5]).toHaveTextContent("$1.25");
+  });
+
+  it("shows em dashes when a session has no usage rows and preserves subagent count semantics", () => {
+    const codexNoRows = row(1, {
+      has_usage_rows: false,
+      last_activity_ms: null,
+      subagent_count: null,
+      thread: { ...row(1).thread, model_effort: [] },
+    });
+    const claudeZero = row(2, {
+      thread: { ...row(2).thread, key: { ...row(2).thread.key, agent: "claude" } },
+      subagent_count: 0,
+    });
+    const rendered = render(<SessionSection view={view({ rows: [codexNoRows, claudeZero] })} />);
+    const codexCells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
+    expect(codexCells[0]).toHaveTextContent("—");
+    expect(codexCells[1]).toHaveTextContent("codex · —");
+    expect(codexCells[1]).not.toHaveTextContent(" ·  · ");
+    for (const index of [3, 4, 5]) expect(codexCells[index]).toHaveTextContent("—");
+    const claudeSession = rendered.container.querySelector(`tbody tr[data-session-thread-key-id='${JSON.stringify(["claude", "session-2", "root-2"])}'] td:nth-child(2)`);
+    expect(claudeSession).toHaveTextContent("claude · gpt-5 (high), o4-mini (low) · 0 subagent");
   });
 
   it("T-S04-006 keeps pagination in the Session header and commits the real page-input flow", () => {
@@ -429,7 +440,7 @@ describe("SessionSection v0.2.0", () => {
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.queryByText("当前时间范围暂无 Session 记录")).not.toBeInTheDocument();
     expect(tableViewport(loading.container)).toHaveStyle({ height: "480px" });
-    expect(loading.container.querySelectorAll("tbody tr")).toHaveLength(10);
+    expect(loading.container.querySelectorAll("tbody tr")).toHaveLength(8);
     loading.unmount();
 
     render(<SessionSection view={view({ rows: [], total_items: 0, total_pages: 0 })} />);

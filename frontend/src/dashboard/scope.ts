@@ -22,6 +22,12 @@ export const DASHBOARD_SCOPE_POLICIES = {
   modelDistribution: FOLLOW_DASHBOARD,
   projectDistribution: FOLLOW_DASHBOARD,
   sessions: FOLLOW_DASHBOARD,
+  toolUsage: {
+    range: { kind: "fixed", range: { key: "today" } },
+    agents: "ignore",
+    models: "ignore",
+    projects: "ignore",
+  },
 } as const;
 
 export function resolveDashboardScope(

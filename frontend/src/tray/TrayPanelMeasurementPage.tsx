@@ -127,6 +127,8 @@ function viewFor(
     range: { key: "today" },
     metrics,
     session_count: 0,
+    session_median: null,
+    session_p90: null,
     load_state: loadState,
     refreshing,
     error_code: errorCode,

@@ -1,10 +1,12 @@
 import { memo } from "react";
 
 import { projectDisplay } from "../shared/projectDisplay";
+import { ToolUsageCard } from "./ToolUsageCard";
 import { DistributionDonutCard } from "./DistributionDonutCard";
 import type { DashboardChartsView } from "./useDashboardChartsController";
+import type { ToolUsageControllerView } from "./useToolUsageController";
 
-export const ChartSection = memo(function ChartSection({ view }: { view: DashboardChartsView }) {
+export const ChartSection = memo(function ChartSection({ view, tools }: { view: DashboardChartsView; tools: ToolUsageControllerView }) {
   const modelItems = (view.models?.items ?? []).map((item) => ({
     id: item.model,
     label: item.model,
@@ -35,8 +37,8 @@ export const ChartSection = memo(function ChartSection({ view }: { view: Dashboa
     >
       {view.error ? <div className="mb-3 text-xs text-destructive" role="status">图表数据加载失败</div> : null}
       <div className="grid grid-cols-2 gap-4 max-[1279px]:grid-cols-1">
-        <DistributionDonutCard title="模型分布" items={modelItems} />
-        <DistributionDonutCard title="项目分布" items={projectItems} />
+        <DistributionDonutCard modelItems={modelItems} projectItems={projectItems} />
+        <ToolUsageCard view={tools} />
       </div>
     </section>
   );

@@ -23,6 +23,7 @@ function client(overrides: Partial<UsagiClient> = {}): UsagiClient {
     modelDistribution: vi.fn(),
     projectDistribution: vi.fn(),
     getSessions: vi.fn(),
+    toolUsage: vi.fn(),
     getSessionDetail: vi.fn(),
     getStatus: vi.fn(),
     getRevision: vi.fn(),
@@ -47,7 +48,7 @@ async function settle() {
 afterEach(() => vi.useRealTimers());
 
 describe("useDashboardQuotaController cached quota contract", () => {
-  it("polls quickly while reading, then resumes the 60 second interval after the request completes", async () => {
+  it("polls quota at a 60 second interval while reading", async () => {
     vi.useFakeTimers();
     const first = deferred<QuotaResponse>();
     const second = deferred<QuotaResponse>();
@@ -66,7 +67,7 @@ describe("useDashboardQuotaController cached quota contract", () => {
     await act(async () => { first.resolve(readingSnapshot); await first.promise; });
     expect(result.current.quota).toEqual(readingSnapshot);
     expect(api.refreshQuota).not.toHaveBeenCalled();
-    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
     expect(api.quota).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(api.quota).toHaveBeenCalledTimes(2);
@@ -83,7 +84,7 @@ describe("useDashboardQuotaController cached quota contract", () => {
     unmount();
   });
 
-  it("retries a failed first read on the short loading interval", async () => {
+  it("retries a failed first read on the 60 second interval", async () => {
     vi.useFakeTimers();
     const api = client({
       quota: vi.fn().mockRejectedValueOnce(new Error("temporary failure")).mockResolvedValue(snapshot),
@@ -93,7 +94,7 @@ describe("useDashboardQuotaController cached quota contract", () => {
     await settle();
     expect(result.current.quota).toEqual(readingSnapshot);
     expect(result.current.refresh_error).toBe(true);
-    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
     expect(api.quota).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(api.quota).toHaveBeenCalledTimes(2);
@@ -127,7 +128,7 @@ describe("useDashboardQuotaController cached quota contract", () => {
 
     await act(async () => { pendingGet.resolve(snapshot); await pendingGet.promise; });
     expect(result.current.quota).toEqual(readingSnapshot);
-    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
     expect(api.quota).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(api.quota).toHaveBeenCalledTimes(2);

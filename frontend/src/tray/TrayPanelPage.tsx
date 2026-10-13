@@ -28,6 +28,8 @@ export type TrayPanelViewModel = Pick<
   | "range"
   | "metrics"
   | "session_count"
+  | "session_median"
+  | "session_p90"
   | "load_state"
   | "refreshing"
   | "error_code"

@@ -71,11 +71,13 @@ describe("Usagi Spec04 HTTP client", () => {
   });
 
   it("parses SummaryResponse with top-level session_count and the new Usage DTO", async () => {
-    const fetchMock = mockJson({ data_revision: 8, usage, session_count: 3 });
+    const fetchMock = mockJson({ data_revision: 8, usage, session_count: 3, session_median: null, session_p90: 24 });
     await expect(usagiClient.summary({ key: "today" }, emptyFilters)).resolves.toEqual({
       data_revision: 8,
       usage,
       session_count: 3,
+      session_median: null,
+      session_p90: 24,
     });
     const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
     expect(url.pathname).toBe("/api/usage/summary");
@@ -115,7 +117,7 @@ describe("Usagi Spec04 HTTP client", () => {
       models: [{ provider_id: "provider-b", model: "same-model" }],
     }));
 
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, usage, session_count: 3 }), { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, usage, session_count: 3, session_median: null, session_p90: 24 }), { status: 200 }));
     await usagiClient.summary({ key: "custom", from: "2026-09-01", to: "2026-09-03" }, filters);
     const url = new URL(String(fetchMock.mock.calls[1][0]), "http://localhost");
     expect(url.pathname).toBe("/api/usage/summary");
@@ -141,11 +143,17 @@ describe("Usagi Spec04 HTTP client", () => {
   it("loads SessionListItemView and sends the full ThreadKey for on-demand Detail", async () => {
     const listResponse = {
       data_revision: 8,
-      items: [{ thread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, subagent_count: 2 }],
+      summary: { data_revision: 8, usage, session_count: 1, session_median: null, session_p90: null },
+      items: [{ thread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, has_usage_rows: false, last_activity_ms: null, subagent_count: null }],
     };
     const fetchMock = mockJson(listResponse);
     await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).resolves.toEqual(listResponse);
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/usage/sessions?");
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      ...listResponse,
+      items: [{ ...listResponse.items[0], last_activity_ms: "not-a-number" }],
+    }), { status: 200 }));
+    await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).rejects.toMatchObject({ code: "HTTP_ERROR", status: 200 });
 
     const threadKey: ThreadKey = { agent: "claude", session_id: "session-1", thread_id: "subagent-1" };
     const child = { ...thread, key: threadKey, type: "subagent" as const, parent_thread_id: "thread-1" };
@@ -159,13 +167,20 @@ describe("Usagi Spec04 HTTP client", () => {
     };
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detailResponse), { status: 200 }));
     await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, key: threadKey })).resolves.toEqual(detailResponse);
-    const url = new URL(String(fetchMock.mock.calls[1][0]), "http://localhost");
+    const url = new URL(String(fetchMock.mock.calls[2][0]), "http://localhost");
     expect(url.pathname).toBe("/api/usage/session-detail");
     expect(url.searchParams.get("agent")).toBe("claude");
     expect(url.searchParams.get("session_id")).toBe("session-1");
     expect(url.searchParams.get("thread_id")).toBe("subagent-1");
     expect(threadKeyId(threadKey)).toBe(JSON.stringify(["claude", "session-1", "subagent-1"]));
     expect(detailResponse.children).toEqual([child]);
+  });
+
+  it("loads Tool usage by days and parses the original top order", async () => {
+    const toolUsage = { days: 7, calls: 12, top: [{ name: "Read", calls: 8 }, { name: "Edit", calls: 4 }] };
+    const fetchMock = mockJson(toolUsage);
+    await expect(usagiClient.toolUsage(7)).resolves.toEqual(toolUsage);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/usage/tools?days=7");
   });
 
   it("uses the internal Status and Revision routes and accepts only the new status fields", async () => {
@@ -178,8 +193,11 @@ describe("Usagi Spec04 HTTP client", () => {
   });
 
   it("rejects malformed Usage DTO data and preserves structured API errors", async () => {
-    mockJson({ data_revision: 8, usage: { ...usage, total: -1 }, session_count: 3 });
+    mockJson({ data_revision: 8, usage: { ...usage, total: -1 }, session_count: 3, session_median: null, session_p90: null });
     await expect(usagiClient.summary({ key: "today" }, emptyFilters)).rejects.toMatchObject({ code: "HTTP_ERROR", status: 200 });
+
+    mockJson({ error: { code: "DATA_LOADING" } }, 503);
+    await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).rejects.toMatchObject({ code: "DATA_LOADING", status: 503 });
 
     mockJson({ error: { code: "UPSTREAM_FAILED" } }, 503);
     await expect(usagiClient.getRevision()).rejects.toBeInstanceOf(UsagiClientError);

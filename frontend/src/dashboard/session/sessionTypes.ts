@@ -1,4 +1,3 @@
-import type { UsagiClient } from "../../data/usagiClient";
 import type {
   DashboardFilters,
   DashboardRange,
@@ -6,7 +5,6 @@ import type {
   SessionSortField,
   SessionSortOrder,
 } from "../../data/types";
-import type { RevisionFeed } from "../../data/revisionFeed";
 
 export type SessionLoadState = "initial" | "loading" | "ready" | "refreshing" | "error";
 export type SessionPageState = "idle" | "loading" | "error";
@@ -33,10 +31,4 @@ export type SessionTableViewModel = {
   next_page: () => void;
   select_sort: (sortBy: SessionSortField) => void;
   retry_page: () => void;
-};
-
-export type SessionControllerOptions = {
-  client?: UsagiClient;
-  revisionFeed?: RevisionFeed;
-  reloadKey?: number;
 };

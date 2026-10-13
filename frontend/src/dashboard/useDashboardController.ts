@@ -12,19 +12,23 @@ import {
   type DashboardRange,
   type RevisionTuple,
   type RuntimeStatusResponse,
+  type SessionListResponse,
   type SummaryResponse,
   type DashboardFilters,
   type FilterOptionsResponse,
   UsagiClientError,
 } from "../data/types";
 
-export type LoadState = "initial" | "loading" | "ready" | "error";
+export type LoadState = "initial" | "loading" | "ready" | "refreshing" | "error";
 
 export type DashboardViewModel = {
   range: DashboardRange;
   filters: DashboardFilters;
   metrics: SummaryResponse["usage"] | null;
   session_count: number;
+  session_median: number | null;
+  session_p90: number | null;
+  sessions: SessionListResponse | null;
   data_revision: number;
   reload_key: number;
   epoch_reset_key: number;
@@ -49,9 +53,8 @@ export type DashboardViewModel = {
 type InternalState = {
   range: DashboardRange;
   filters: DashboardFilters;
-  snapshot: SummaryResponse | null;
+  snapshot: SessionListResponse | null;
   load_state: LoadState;
-  summary_loading: boolean;
   refreshing: boolean;
   reload_key: number;
   epoch_reset_key: number;
@@ -97,7 +100,6 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     filters: { agents: [], models: [], projects: [] },
     snapshot: null,
     load_state: "initial",
-    summary_loading: true,
     refreshing: false,
     reload_key: 0,
     epoch_reset_key: 0,
@@ -106,9 +108,9 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     filter_options_loading: true,
   });
   const stateRef = useRef(state);
-  const snapshotsRef = useRef(new Map<string, SummaryResponse>());
-  const summaryAbortRef = useRef<AbortController | null>(null);
-  const summaryGenerationRef = useRef(0);
+  const snapshotsRef = useRef(new Map<string, SessionListResponse>());
+  const sessionsAbortRef = useRef<AbortController | null>(null);
+  const sessionsGenerationRef = useRef(0);
   const statusAbortRef = useRef<AbortController | null>(null);
   const statusGenerationRef = useRef(0);
   const filterOptionsAbortRef = useRef<AbortController | null>(null);
@@ -123,27 +125,26 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     setState(value);
   }, []);
 
-  const loadSummary = useCallback((range: DashboardRange, filters: DashboardFilters): Promise<void> => {
+  const loadSessions = useCallback((range: DashboardRange, filters: DashboardFilters): Promise<void> => {
     const canonicalFilters = canonicalDashboardFilters(filters);
     const key = dashboardQueryKey(range, canonicalFilters);
-    summaryAbortRef.current?.abort();
+    sessionsAbortRef.current?.abort();
     const controller = new AbortController();
-    summaryAbortRef.current = controller;
-    const generation = ++summaryGenerationRef.current;
+    sessionsAbortRef.current = controller;
+    const generation = ++sessionsGenerationRef.current;
     if (key === dashboardQueryKey(stateRef.current.range, stateRef.current.filters)) {
       commit((current) => ({
         ...current,
-        summary_loading: true,
-        load_state: current.snapshot ? "loading" : current.load_state === "initial" ? "initial" : "loading",
+        load_state: current.snapshot ? "refreshing" : current.load_state === "initial" ? "initial" : "loading",
         error_code: undefined,
       }));
     }
-    return client.summary(range, canonicalFilters, controller.signal).then(
+    return client.getSessions({ range, filters: canonicalFilters, signal: controller.signal }).then(
       (response) => {
-        if (controller.signal.aborted || generation !== summaryGenerationRef.current) return;
+        if (controller.signal.aborted || generation !== sessionsGenerationRef.current) return;
         if (key !== dashboardQueryKey(stateRef.current.range, stateRef.current.filters)) return;
         if (response.data_revision < acceptedTupleRef.current.data_revision) {
-          commit((current) => ({ ...current, summary_loading: false }));
+          commit((current) => ({ ...current, load_state: current.snapshot ? "ready" : "loading" }));
           return;
         }
         snapshotsRef.current.set(key, response);
@@ -151,17 +152,19 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         commit((current) => ({
           ...current,
           snapshot: response,
-          summary_loading: false,
           load_state: "ready",
           error_code: undefined,
         }));
       },
       (error: unknown) => {
-        if (controller.signal.aborted || generation !== summaryGenerationRef.current || isAbortError(error)) return;
+        if (controller.signal.aborted || generation !== sessionsGenerationRef.current || isAbortError(error)) return;
         if (key !== dashboardQueryKey(stateRef.current.range, stateRef.current.filters)) return;
+        if (clientErrorCode(error) === "DATA_LOADING") {
+          commit((current) => ({ ...current, load_state: current.snapshot ? "ready" : "loading", error_code: undefined }));
+          return;
+        }
         commit((current) => ({
           ...current,
-          summary_loading: false,
           load_state: "error",
           error_code: clientErrorCode(error),
         }));
@@ -205,6 +208,14 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       },
       (error: unknown) => {
         if (controller.signal.aborted || generation !== filterOptionsGenerationRef.current || isAbortError(error)) return;
+        if (clientErrorCode(error) === "DATA_LOADING") {
+          commit((current) => ({
+            ...current,
+            filter_options_loading: current.filter_options === null,
+            filter_options_error_code: undefined,
+          }));
+          return;
+        }
         commit((current) => ({
           ...current,
           filter_options_loading: false,
@@ -230,9 +241,9 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         const wasReady = stateRef.current.status?.runtime_state === "ready";
         commit((current) => ({ ...current, status }));
         if (!wasReady && status.runtime_state === "ready") {
-          if (!stateRef.current.snapshot) void loadSummary(stateRef.current.range, stateRef.current.filters);
+          if (!stateRef.current.snapshot) void loadSessions(stateRef.current.range, stateRef.current.filters);
           // Only a failed load is retried; one still in flight is left to finish.
-          if (stateRef.current.filter_options_error_code) void loadFilterOptions();
+          if (stateRef.current.filter_options_error_code || stateRef.current.filter_options_loading) void loadFilterOptions();
         }
       },
       (error: unknown) => {
@@ -244,14 +255,14 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         }));
       },
     );
-  }, [client, commit, loadFilterOptions, loadSummary]);
+  }, [client, commit, loadFilterOptions, loadSessions]);
 
   const handleRevision = useCallback((event: RevisionFeedEvent) => {
     const tuple = event.tuple;
     if (event.kind === "epoch_reset") {
       acceptedTupleRef.current = tuple;
       snapshotsRef.current.clear();
-      summaryAbortRef.current?.abort();
+      sessionsAbortRef.current?.abort();
       filterOptionsAbortRef.current?.abort();
       filterOptionsCacheRef.current.clear();
       const { range, filters } = stateRef.current;
@@ -260,14 +271,13 @@ export function useDashboardController(options: DashboardControllerOptions = {})
         snapshot: null,
         status: null,
         epoch_reset_key: current.epoch_reset_key + 1,
-        summary_loading: true,
         load_state: "loading",
         error_code: undefined,
         filter_options: null,
         filter_options_loading: true,
         filter_options_error_code: undefined,
       }));
-      void loadSummary(range, filters);
+      void loadSessions(range, filters);
       void loadFilterOptions();
       void loadStatus();
       return;
@@ -281,11 +291,11 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     acceptedTupleRef.current = tuple;
     if (dataAdvanced) {
       const { range, filters } = stateRef.current;
-      void loadSummary(range, filters);
+      void loadSessions(range, filters);
       void loadFilterOptions();
     }
     if (statusAdvanced) void loadStatus();
-  }, [commit, loadFilterOptions, loadStatus, loadSummary]);
+  }, [commit, loadFilterOptions, loadStatus, loadSessions]);
 
   const selectRange = useCallback((range: DashboardRange) => {
     if (dashboardRangesEqual(range, stateRef.current.range)) return;
@@ -296,13 +306,12 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       ...current,
       range,
       snapshot,
-      summary_loading: true,
-      load_state: snapshot ? "loading" : "loading",
+      load_state: snapshot ? "refreshing" : "loading",
       error_code: undefined,
     }));
-    void loadSummary(range, filters);
+    void loadSessions(range, filters);
     void loadFilterOptions();
-  }, [commit, loadFilterOptions, loadSummary]);
+  }, [commit, loadFilterOptions, loadSessions]);
 
   const selectFilters = useCallback((filters: DashboardFilters) => {
     const canonical = canonicalDashboardFilters(filters);
@@ -318,12 +327,11 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       ...current,
       filters: canonical,
       snapshot,
-      summary_loading: true,
-      load_state: "loading",
+      load_state: snapshot ? "refreshing" : "loading",
       error_code: undefined,
     }));
-    void loadSummary(range, canonical);
-  }, [commit, loadSummary]);
+    void loadSessions(range, canonical);
+  }, [commit, loadSessions]);
 
   const clearFilters = useCallback(() => {
     selectFilters({ agents: [], models: [], projects: [] });
@@ -340,27 +348,27 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       refreshing: true,
       reload_key: current.reload_key + 1,
     }));
-    void Promise.allSettled([loadSummary(range, filters), loadFilterOptions()]).finally(() => {
+    void Promise.allSettled([loadSessions(range, filters), loadFilterOptions()]).finally(() => {
       commit((current) => ({ ...current, refreshing: false }));
     });
-  }, [commit, loadFilterOptions, loadSummary]);
+  }, [commit, loadFilterOptions, loadSessions]);
 
   const retryLoad = useCallback(() => {
     const current = stateRef.current;
-    if (current.load_state === "error" || !current.snapshot) void loadSummary(current.range, current.filters);
+    if (current.load_state === "error" || !current.snapshot) void loadSessions(current.range, current.filters);
     if (!current.status) void loadStatus();
     if (current.filter_options_error_code) void loadFilterOptions();
     revisionFeedRef.current?.retry_now();
-  }, [loadFilterOptions, loadStatus, loadSummary]);
+  }, [loadFilterOptions, loadStatus, loadSessions]);
 
   useEffect(() => {
     const { range, filters } = stateRef.current;
-    void loadSummary(range, filters);
+    void loadSessions(range, filters);
     void loadFilterOptions();
     void loadStatus();
     const unsubscribe = revisionFeedRef.current?.subscribe(handleRevision);
     return () => {
-      summaryAbortRef.current?.abort();
+      sessionsAbortRef.current?.abort();
       statusAbortRef.current?.abort();
       filterOptionsAbortRef.current?.abort();
       unsubscribe?.();
@@ -370,7 +378,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const current = state.snapshot;
+  const current = state.snapshot?.summary;
   const agentFilterActive = state.filters.agents.length > 0;
   const modelFilterActive = state.filters.models.length > 0;
   const projectFilterActive = state.filters.projects.length > 0;
@@ -379,6 +387,9 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     filters: state.filters,
     metrics: current?.usage ?? null,
     session_count: current?.session_count ?? 0,
+    session_median: current?.session_median ?? null,
+    session_p90: current?.session_p90 ?? null,
+    sessions: state.snapshot,
     data_revision: acceptedTupleRef.current.data_revision,
     reload_key: state.reload_key,
     epoch_reset_key: state.epoch_reset_key,

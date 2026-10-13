@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { UsagiClient } from "../../data/usagiClient";
 import { createRevisionFeed, type RevisionEventSource } from "../../data/revisionFeed";
 import type { DashboardFilters, SessionDetailResponse, SessionListItemDto, ThreadKey, UsageDto } from "../../data/types";
+import { UsagiClientError } from "../../data/types";
 import { useSessionDetailController } from "./useSessionDetailController";
 
 const filters: DashboardFilters = { agents: [], models: [], projects: [] };
@@ -39,7 +40,7 @@ function row(threadKey: ThreadKey): SessionListItemDto {
     model_effort: [{ model: "gpt-6", effort: "high", usage, compaction_tokens: 0 }],
     usage,
   };
-  return { thread, self_usage: usage, subagent_usage: usage, inclusive_usage: usage, subagent_count: 1 };
+  return { thread, self_usage: usage, subagent_usage: usage, inclusive_usage: usage, has_usage_rows: true, last_activity_ms: thread.last_usage_ms, subagent_count: 1 };
 }
 
 function detail(threadKey: ThreadKey, revision: number): SessionDetailResponse {
@@ -67,6 +68,7 @@ function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
     modelDistribution: vi.fn(),
     projectDistribution: vi.fn(),
     getSessions: vi.fn(),
+    toolUsage: vi.fn(),
     getSessionDetail: vi.fn(async ({ key: threadKey }) => detail(threadKey, 1)),
     getStatus: vi.fn(),
     getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })),
@@ -89,6 +91,25 @@ describe("useSessionDetailController ThreadKey and epoch behavior", () => {
     expect(client.getSessionDetail).toHaveBeenCalledTimes(2);
     expect(client.getSessionDetail).toHaveBeenNthCalledWith(1, expect.objectContaining({ key: first.thread.key }));
     expect(client.getSessionDetail).toHaveBeenNthCalledWith(2, expect.objectContaining({ key: second.thread.key }));
+  });
+
+  it("keeps detail DATA_LOADING in its loading state and allows retry", async () => {
+    const selected = row(key("claude", "session-1", "thread-1"));
+    const client = clientWith({
+      getSessionDetail: vi.fn()
+        .mockRejectedValueOnce(new UsagiClientError("DATA_LOADING", 503))
+        .mockResolvedValueOnce(detail(selected.thread.key, 1)),
+    });
+    const { result } = renderHook(() => useSessionDetailController({ key: "today" }, filters, { client, sessionsReady: true, dataRevision: 1 }));
+
+    await act(async () => result.current.open_detail(selected));
+    await waitFor(() => expect(result.current.load_state).toBe("loading"));
+    expect(result.current.error_code).toBeUndefined();
+    expect(result.current.detail).toBeNull();
+    await act(async () => result.current.retry_detail());
+    await waitFor(() => expect(result.current.detail?.thread.key).toEqual(selected.thread.key));
+    expect(result.current.load_state).toBe("ready");
+    expect(client.getSessionDetail).toHaveBeenCalledTimes(2);
   });
 
   it("accepts epoch 0 and ignores a parent Session revision 80 while waiting for its new snapshot", async () => {

@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NumberTicker } from "../../ui/beui/number-ticker";
 import { Tabs, TabsList, TabsTrigger } from "../../ui/beui/tabs";
 import { SPRING_LAYOUT } from "../../ui/lib/ease";
@@ -21,11 +21,17 @@ function metricText(metric: DistributionMetric, value: number) {
   return metric === "cost" ? formatCompactCost(value) : formatCompact(Math.round(value));
 }
 
-export function DistributionDonutCard({ title, items }: { title: string; items: DistributionItem[] }) {
+export function DistributionDonutCard({ modelItems, projectItems }: { modelItems: DistributionItem[]; projectItems: DistributionItem[] }) {
+  const [dimension, setDimension] = useState<"model" | "project">("model");
   const [metric, setMetric] = useState<DistributionMetric>("tokens");
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const reduce = useReducedMotion();
+  const title = dimension === "model" ? "模型分布" : "项目分布";
+  const items = dimension === "model" ? modelItems : projectItems;
   const data = useMemo(() => buildDistribution(items, metric), [items, metric]);
+  useEffect(() => {
+    if (focusedId !== null && !data.segments.some((segment) => segment.id === focusedId)) setFocusedId(null);
+  }, [data.segments, focusedId]);
   const focused = data.segments.find((segment) => segment.id === focusedId) ?? null;
   const visibleSegments = data.segments.filter((segment) => segment.percentage > 0);
   const hasData = visibleSegments.length > 0;
@@ -41,7 +47,12 @@ export function DistributionDonutCard({ title, items }: { title: string; items: 
   return (
     <ChartSurface className="h-[264px]">
       <header className="flex items-center justify-between gap-4">
-        <h2 className="m-0 text-sm font-medium text-foreground">{title}</h2>
+        <Tabs value={dimension} onValueChange={(value) => { setDimension(value as "model" | "project"); setFocusedId(null); }} variant="pill">
+          <TabsList>
+            <TabsTrigger value="model">模型</TabsTrigger>
+            <TabsTrigger value="project">项目</TabsTrigger>
+          </TabsList>
+        </Tabs>
         <Tabs value={metric} onValueChange={(value) => { setMetric(value as DistributionMetric); setFocusedId(null); }} variant="pill">
           <TabsList>
             <TabsTrigger value="tokens">Token</TabsTrigger>

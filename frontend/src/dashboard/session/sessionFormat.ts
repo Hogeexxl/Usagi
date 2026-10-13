@@ -3,7 +3,7 @@ import { formatCost, formatInteger, formatRatio, type FormattedValue } from "../
 const sessionIntegerFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, useGrouping: true });
 
 export function formatSessionTitle(title: string | null): string {
-  return title && title.trim() ? title : "未命名 Session";
+  return title && title.trim() ? title : "未命名会话";
 }
 
 export function formatSessionProject(project: string | null): string {
@@ -15,13 +15,11 @@ export function formatSessionIdForDisplay(agent: string, id: string): string {
 }
 
 export function formatSessionModel(models: Array<{ model: string; effort: string | null }>): FormattedValue {
-  if (models.length === 0) return { text: "unknown", title: "unknown", accessibleName: "unknown" };
-  const first = formatModelWithReasoningEffort(models[0].model, models[0].effort, false);
-  const text = models.length === 1 ? first : `${first} +${models.length - 1}`;
+  if (models.length === 0) return { text: "", title: "", accessibleName: "" };
   const full = models
     .map(({ model, effort }) => formatModelWithReasoningEffort(model, effort, false))
     .join(", ");
-  return { text, title: full, accessibleName: full };
+  return { text: full, title: full, accessibleName: full };
 }
 
 export function formatModelWithReasoningEffort(model: string, effort: string | null, mixed: boolean): string {
@@ -59,7 +57,8 @@ function dateParts(value: number, timezone: string): DateParts {
   };
 }
 
-export function formatSessionTime(value: number, timezone: string, now = Date.now()): FormattedValue {
+export function formatSessionTime(value: number | null, timezone: string, now = Date.now()): FormattedValue {
+  if (value === null) return { text: "—", title: "未知", accessibleName: "未知" };
   const current = dateParts(now, timezone);
   const target = dateParts(value, timezone);
   const text =

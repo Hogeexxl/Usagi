@@ -81,10 +81,11 @@ function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
     quota: vi.fn(async () => allQuota),
     refreshQuota: vi.fn(async () => codexQuota),
     filterOptions: vi.fn(async () => ({ data_revision: 1, agents: [], models: [], projects: [] })),
-    summary: vi.fn(async () => ({ data_revision: 1, usage, session_count: 1 })),
+    summary: vi.fn(async () => ({ data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null })),
     modelDistribution: vi.fn(async () => ({ data_revision: 1, items: [] })),
     projectDistribution: vi.fn(async () => ({ data_revision: 1, items: [] })),
-    getSessions: vi.fn(async () => ({ data_revision: 1, items: [] })),
+    getSessions: vi.fn(async () => ({ data_revision: 1, summary: { data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null }, items: [] })),
+    toolUsage: vi.fn(async (days) => ({ days, calls: 0, top: [] })),
     getSessionDetail: vi.fn(),
     getStatus: vi.fn(async () => status),
     getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })),
@@ -97,6 +98,8 @@ function viewFor(overrides: Partial<TrayPanelViewModel> = {}): TrayPanelViewMode
     range: { key: "today" },
     metrics: usage,
     session_count: 1,
+    session_median: null,
+    session_p90: null,
     load_state: "ready",
     refreshing: false,
     error_code: undefined,
@@ -150,7 +153,7 @@ describe("TrayPanelPage Spec04", () => {
     expect(within(grid.children[0] as HTMLElement).getByText("总 Token")).toBeInTheDocument();
     expect(within(grid.children[1] as HTMLElement).getByText("账户额度")).toBeInTheDocument();
     expect(within(grid.children[2] as HTMLElement).getByText("缓存命中")).toBeInTheDocument();
-    expect(within(grid.children[3] as HTMLElement).getByText("费用")).toBeInTheDocument();
+    expect(within(grid.children[3] as HTMLElement).getByText("等价费用")).toBeInTheDocument();
     expect(grid.children[1]).toHaveClass("h-[144px]");
   });
 
@@ -166,12 +169,12 @@ describe("TrayPanelPage Spec04", () => {
     expect(screen.queryByText(/Gemini·/)).not.toBeInTheDocument();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent?.trim())).toEqual(["今天", "昨天", "7d"]);
     expect(screen.getByText("缓存命中")).toBeInTheDocument();
-    expect(screen.getByText("费用")).toBeInTheDocument();
+    expect(screen.getByText("等价费用")).toBeInTheDocument();
 
     const refreshData = screen.getByRole("button", { name: "刷新数据" });
     const refreshQuota = screen.getByRole("button", { name: "刷新账户额度" });
     fireEvent.click(refreshData);
-    await waitFor(() => expect(client.summary).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(2));
     expect(client.refreshQuota).not.toHaveBeenCalled();
     fireEvent.click(refreshQuota);
     await waitFor(() => expect(client.refreshQuota).toHaveBeenCalledTimes(1));
@@ -194,18 +197,18 @@ describe("TrayPanelPage Spec04", () => {
   });
 
   it("recovers a failed data read through the retry control", async () => {
-    const summary = vi.fn()
-      .mockRejectedValueOnce(new Error("Summary unavailable"))
-      .mockResolvedValue({ data_revision: 1, usage, session_count: 1 });
+    const sessions = vi.fn()
+      .mockRejectedValueOnce(new Error("Sessions unavailable"))
+      .mockResolvedValue({ data_revision: 1, summary: { data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null }, items: [] });
     const client = fakeClient({
-      summary,
+      getSessions: sessions,
       getStatus: vi.fn(async () => ({ status_revision: 1, runtime_state: "starting" as const, last_error_code: null })),
     });
     renderWithTheme(<TrayPanelPage options={{ client, revisionFeed }} />);
     await waitFor(() => expect(screen.getByText("数据加载失败")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(screen.getByText("总 Token")).toBeInTheDocument());
-    expect(summary).toHaveBeenCalledTimes(2);
+    expect(sessions).toHaveBeenCalledTimes(2);
   });
 
   it("renders skeleton cards while metrics are unavailable", () => {

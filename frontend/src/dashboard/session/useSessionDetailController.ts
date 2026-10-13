@@ -175,6 +175,15 @@ export function useSessionDetailController(
       (error: unknown) => {
         if (controller.signal.aborted || generation !== requestGenerationRef.current || !mountedRef.current || isAbortError(error)) return;
         const code = errorCode(error);
+        if (code === "DATA_LOADING") {
+          commit((current) => ({
+            ...current,
+            load_state: current.detail ? "ready" : "loading",
+            error_code: undefined,
+            refresh_error_code: undefined,
+          }));
+          return;
+        }
         if (code === "STALE_DATA_REVISION") options.onStaleRevision?.();
         commit((current) => ({
           ...current,

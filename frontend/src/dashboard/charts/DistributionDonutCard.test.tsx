@@ -65,7 +65,7 @@ function segmentGeometry(svg: SVGSVGElement) {
 
 describe("DistributionDonutCard", () => {
   it("[T-S06-002] keeps a 140px Donut geometry and top anchor with one or six segments", () => {
-    const { container, rerender } = render(<DistributionDonutCard title="模型分布" items={[item("Only", 100)]} />);
+    const { container, rerender } = render(<DistributionDonutCard modelItems={[item("Only", 100)]} projectItems={[]} />);
     const oneCard = cardFrom(container);
     const oneSvg = donutFrom(oneCard);
     const oneWrapper = oneSvg.parentElement as HTMLElement;
@@ -92,7 +92,7 @@ describe("DistributionDonutCard", () => {
     expect(oneSvg.querySelectorAll("circle")[0]).toHaveAttribute("stroke-linecap", "round");
     const oneTop = oneWrapper.getBoundingClientRect().top;
 
-    rerender(<DistributionDonutCard title="模型分布" items={sixItems} />);
+    rerender(<DistributionDonutCard modelItems={sixItems} projectItems={[]} />);
     const sixCard = cardFrom(container);
     const sixSvg = donutFrom(sixCard);
     const sixWrapper = sixSvg.parentElement as HTMLElement;
@@ -132,12 +132,13 @@ describe("DistributionDonutCard", () => {
   });
 
   it("[T-S06-002] uses the official Pill tabs and compact muted legend without a hover surface", () => {
-    const { container } = render(<DistributionDonutCard title="模型分布" items={sixItems} />);
+    const { container } = render(<DistributionDonutCard modelItems={sixItems} projectItems={[]} />);
     const card = cardFrom(container);
-    const tablist = within(card).getByRole("tablist");
-    expect(tablist).toHaveClass("inline-flex", "rounded-full", "bg-card", "p-1");
-    const tabs = within(tablist).getAllByRole("tab");
-    expect(tabs).toHaveLength(2);
+    const tablists = within(card).getAllByRole("tablist");
+    expect(tablists).toHaveLength(2);
+    const tabs = tablists.flatMap((tablist) => within(tablist).getAllByRole("tab"));
+    for (const tablist of tablists) expect(tablist).toHaveClass("inline-flex", "rounded-full", "bg-card", "p-1");
+    expect(tabs).toHaveLength(4);
     for (const tab of tabs) {
       expect(tab).toHaveClass("px-3.5", "py-1.5", "text-sm");
       expect(tab).not.toHaveClass("!p-0.5", "!px-2.5", "!py-1", "text-xs");
@@ -170,7 +171,7 @@ describe("DistributionDonutCard", () => {
   });
 
   it("[T-S06-008] keeps center semantics on NumberTicker and switches Token/Cost", () => {
-    const { container } = render(<DistributionDonutCard title="模型分布" items={twoItems} />);
+    const { container } = render(<DistributionDonutCard modelItems={twoItems} projectItems={[]} />);
     const card = cardFrom(container);
     const center = centerFrom(card);
     const ticker = center.querySelector(".text-lg.font-semibold.leading-6.text-foreground");
@@ -193,7 +194,7 @@ describe("DistributionDonutCard", () => {
   });
 
   it("[T-S06-004] dims only focused segment and legend opacity while preserving geometry", async () => {
-    const { container } = render(<DistributionDonutCard title="模型分布" items={twoItems} />);
+    const { container } = render(<DistributionDonutCard modelItems={twoItems} projectItems={[]} />);
     const card = cardFrom(container);
     const svg = donutFrom(card);
     const segments = Array.from(svg.querySelectorAll("circle")) as SVGCircleElement[];
@@ -220,7 +221,7 @@ describe("DistributionDonutCard", () => {
   });
 
   it("[T-S06-002] keeps an empty distribution as an explicit empty state", () => {
-    const { container } = render(<DistributionDonutCard title="项目分布" items={[]} />);
+    const { container } = render(<DistributionDonutCard modelItems={[]} projectItems={[]} />);
     const card = cardFrom(container);
     expect(within(card).getByText("暂无数据")).toBeInTheDocument();
     expect(legendButtons(card)).toHaveLength(0);

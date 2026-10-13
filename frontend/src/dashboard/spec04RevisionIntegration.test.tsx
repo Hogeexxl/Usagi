@@ -14,7 +14,6 @@ const range: DashboardRange = { key: "today" };
 const filters: DashboardFilters = { agents: [], models: [], projects: [] };
 const key: ThreadKey = { agent: "codex", session_id: "session-1", thread_id: "thread-1" };
 const applicationReadPaths = new Set([
-  "/api/usage/summary",
   "/api/usage/filter-options",
   "/api/usage/model-distribution",
   "/api/usage/projects",
@@ -91,6 +90,8 @@ function sessionRow(revision: number): SessionListItemDto {
     self_usage: value,
     subagent_usage: subagentUsage,
     inclusive_usage: inclusiveUsage(value, subagentUsage),
+    has_usage_rows: true,
+    last_activity_ms: Date.UTC(2026, 7, 10, 8, revision),
     subagent_count: 1,
   };
 }
@@ -109,14 +110,14 @@ type HeldResponse = {
 function setupHttpWire(initial: {
   revision?: RevisionTuple;
   runtimeState?: "starting" | "ready" | "unavailable";
-  summaryFailures?: number;
+  sessionsFailures?: number;
   quotaReading?: boolean;
   quotaItems?: unknown[];
 } = {}) {
   const backend = {
     revision: initial.revision ?? { data_revision: 80, status_revision: 12 },
     runtimeState: initial.runtimeState ?? "ready",
-    summaryFailures: initial.summaryFailures ?? 0,
+    sessionsFailures: initial.sessionsFailures ?? 0,
     quotaReading: initial.quotaReading ?? true,
     quotaItems: initial.quotaItems ?? [],
     holdApplicationReads: false,
@@ -132,13 +133,7 @@ function setupHttpWire(initial: {
     if (path === "/api/quota" || path === "/api/quota/refresh") {
       return { body: { reading: backend.quotaReading, items: backend.quotaItems }, status: 200 };
     }
-    if (path === "/api/usage/summary") {
-      if (backend.summaryFailures > 0) {
-        backend.summaryFailures -= 1;
-        return { body: { error: "MAGPIE_UNAVAILABLE" }, status: 503 };
-      }
-      return { body: { data_revision: dataRevision, usage: usage(dataRevision), session_count: 1 }, status: 200 };
-    }
+    if (path === "/api/usage/summary") return { body: { data_revision: dataRevision, usage: usage(dataRevision), session_count: 1, session_median: 1, session_p90: 1 }, status: 200 };
     if (path === "/api/usage/filter-options") {
       return {
         body: {
@@ -159,7 +154,20 @@ function setupHttpWire(initial: {
         status: 200,
       };
     }
-    if (path === "/api/usage/sessions") return { body: { data_revision: dataRevision, items: [sessionRow(dataRevision)] }, status: 200 };
+    if (path === "/api/usage/sessions") {
+      if (backend.sessionsFailures > 0) {
+        backend.sessionsFailures -= 1;
+        return { body: { error: "MAGPIE_UNAVAILABLE" }, status: 503 };
+      }
+      return {
+        body: {
+          data_revision: dataRevision,
+          summary: { data_revision: dataRevision, usage: usage(dataRevision), session_count: 1, session_median: 1, session_p90: 1 },
+          items: [sessionRow(dataRevision)],
+        },
+        status: 200,
+      };
+    }
     if (path === "/api/usage/session-detail") {
       const parent = thread(dataRevision, `detail-${dataRevision}`);
       const subagentUsage = usage(dataRevision);
@@ -208,11 +216,14 @@ function useIntegratedDashboard(feed: RevisionFeed) {
     epochResetKey: dashboard.epoch_reset_key,
     client: usagiClient,
   });
-  const sessions = useSessionTableController(dashboard.range, dashboard.filters, {
-    client: usagiClient,
-    revisionFeed: feed,
-    reloadKey: dashboard.reload_key,
-  });
+  const sessions = useSessionTableController(
+    dashboard.range,
+    dashboard.filters,
+    dashboard.sessions,
+    dashboard.load_state,
+    dashboard.error_code,
+    dashboard.retry_load,
+  );
   const detail = useSessionDetailController(dashboard.range, dashboard.filters, {
     client: usagiClient,
     revisionFeed: feed,
@@ -301,14 +312,14 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     feed.dispose();
   });
 
-  it("recovers a starting Summary 503 when the ready data revision arrives over SSE", async () => {
-    const api = setupHttpWire({ revision: { data_revision: 0, status_revision: 0 }, runtimeState: "starting", summaryFailures: 1 });
+  it("recovers a starting sessions 503 when the ready data revision arrives over SSE", async () => {
+    const api = setupHttpWire({ revision: { data_revision: 0, status_revision: 0 }, runtimeState: "starting", sessionsFailures: 1 });
     const source = eventSource();
     const feed = new RevisionFeed({ client: usagiClient, eventSourceFactory: () => source });
     const { result, unmount } = renderHook(() => useIntegratedDashboard(feed));
 
     await waitFor(() => expect(result.current.dashboard.load_state).toBe("error"));
-    expect(api.requests.filter((request) => request.path === "/api/usage/summary")).toHaveLength(1);
+    expect(api.requests.filter((request) => request.path === "/api/usage/sessions")).toHaveLength(1);
     api.backend.revision = { data_revision: 1, status_revision: 1 };
     api.backend.runtimeState = "ready";
     await act(async () => {
@@ -323,7 +334,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
       expect(result.current.sessions.rows[0]?.thread.title).toBe("session-1");
     });
     expect(api.requests.filter((request) => request.path === "/api/status").length).toBeGreaterThanOrEqual(2);
-    expect(api.requests.filter((request) => request.path === "/api/usage/summary").length).toBeGreaterThanOrEqual(2);
+    expect(api.requests.filter((request) => request.path === "/api/usage/sessions").length).toBeGreaterThanOrEqual(2);
     unmount();
     feed.dispose();
   });
@@ -377,7 +388,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     expect(result.current.detail.load_state).toBe("ready");
     await act(async () => result.current.detail.close_detail());
     const detailGets = api.requests.filter((request) => request.path === "/api/usage/session-detail").length;
-    const summaryGets = api.requests.filter((request) => request.path === "/api/usage/summary").length;
+    const sessionGets = api.requests.filter((request) => request.path === "/api/usage/sessions").length;
 
     expect(result.current.quota.quota.reading).toBe(true);
     api.backend.quotaReading = false;
@@ -412,13 +423,13 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     expect(api.requests.filter((request) => request.path === "/api/quota/refresh" && request.method === "POST")).toHaveLength(1);
     expect(result.current.quota.quota.reading).toBe(false);
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);
-    expect(api.requests.filter((request) => request.path === "/api/usage/summary")).toHaveLength(summaryGets);
+    expect(api.requests.filter((request) => request.path === "/api/usage/sessions")).toHaveLength(sessionGets);
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     await flushMicrotasks();
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(4);
     expect(api.requests.filter((request) => request.path === "/api/quota/refresh" && request.method === "POST")).toHaveLength(1);
     expect(api.requests.filter((request) => request.path === "/api/usage/session-detail")).toHaveLength(detailGets);
-    expect(api.requests.filter((request) => request.path === "/api/usage/summary")).toHaveLength(summaryGets);
+    expect(api.requests.filter((request) => request.path === "/api/usage/sessions")).toHaveLength(sessionGets);
     unmount();
     feed.dispose();
   });

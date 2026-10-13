@@ -68,6 +68,8 @@ export interface TableProps<T> {
   onDeleteColumn?: (columnKey: string, index: number) => void;
   /** Fixed row height in px — required for virtualization. */
   rowHeight?: number;
+  /** Header height in px. Defaults to rowHeight. */
+  headerHeight?: number;
   /** Scroll viewport height in px. */
   height?: number;
   /** Rows rendered above/below the viewport. */

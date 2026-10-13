@@ -43,6 +43,7 @@ describe("useDashboardChartsController epoch reset", () => {
         .mockResolvedValueOnce(oldProjects)
         .mockImplementationOnce(() => new Promise((resolve) => { resolveProjects = resolve; })),
       getSessions: vi.fn(),
+      toolUsage: vi.fn(),
       getSessionDetail: vi.fn(),
       getStatus: vi.fn(),
       getRevision: vi.fn(),

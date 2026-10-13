@@ -20,14 +20,14 @@ describe("Session presentation contract", () => {
   });
 
   it("keeps title/project/model fallbacks and exposes full model and effort pairs", () => {
-    expect(formatSessionTitle("  ")).toBe("未命名 Session");
+    expect(formatSessionTitle("  ")).toBe("未命名会话");
     expect(formatSessionProject(null)).toBe("未识别项目");
-    expect(formatSessionModel([])).toMatchObject({ text: "unknown", accessibleName: "unknown" });
+    expect(formatSessionModel([])).toMatchObject({ text: "", title: "", accessibleName: "" });
     expect(formatSessionModel([
       { model: "gpt-5", effort: "high" },
       { model: "o4-mini", effort: null },
     ])).toMatchObject({
-      text: "gpt-5 (high) +1",
+      text: "gpt-5 (high), o4-mini (—)",
       title: "gpt-5 (high), o4-mini (—)",
       accessibleName: "gpt-5 (high), o4-mini (—)",
     });
@@ -35,7 +35,7 @@ describe("Session presentation contract", () => {
       { model: "gpt-5", effort: "high" },
       { model: "gpt-5", effort: "medium" },
     ])).toMatchObject({
-      text: "gpt-5 (high) +1",
+      text: "gpt-5 (high), gpt-5 (medium)",
       title: "gpt-5 (high), gpt-5 (medium)",
       accessibleName: "gpt-5 (high), gpt-5 (medium)",
     });
@@ -47,6 +47,7 @@ describe("Session presentation contract", () => {
     expect(formatSessionTime(Date.UTC(2026, 7, 10, 7, 8, 0), "Asia/Shanghai", now).text).toBe("15:08");
     expect(formatSessionTime(Date.UTC(2026, 6, 1, 7, 8, 0), "Asia/Shanghai", now).text).toBe("07-01 15:08");
     expect(formatSessionTime(Date.UTC(2025, 11, 1, 7, 8, 0), "Asia/Shanghai", now).text).toBe("2025-12-01 15:08");
+    expect(formatSessionTime(null, "Asia/Shanghai", now)).toEqual({ text: "—", title: "未知", accessibleName: "未知" });
     expect(() => formatSessionTime(now, "Not/A-Timezone", now)).toThrow(RangeError);
   });
 

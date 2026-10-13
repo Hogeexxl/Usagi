@@ -1,7 +1,24 @@
 import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Table, type TableColumn } from "./index";
+
+vi.mock("@tanstack/react-virtual", () => ({
+  useVirtualizer: ({ count, estimateSize }: { count: number; estimateSize: () => number }) => {
+    const size = estimateSize();
+    return {
+      getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
+        index,
+        key: index,
+        start: index * size,
+        size,
+        end: (index + 1) * size,
+        lane: null,
+      })),
+      getTotalSize: () => count * size,
+    };
+  },
+}));
 
 type TestItem = { id: string; name: string };
 
@@ -33,5 +50,21 @@ describe("BeUI Table pt absolute width resolution", () => {
     expect(cols[0]?.style.width).toBe("98pt");
     expect(cols[1]?.style.width).toBe("140pt");
     expect(cols[2]?.style.width).toBe("80pt");
+  });
+
+  it("defaults headerHeight to rowHeight and allows an independent header height", () => {
+    const columns: TableColumn<TestItem>[] = [{ key: "name", header: "Name" }];
+    const data: TestItem[] = [{ id: "1", name: "item1" }];
+    const { container, rerender } = render(
+      <Table columns={columns} data={data} getRowId={(item) => item.id} rowHeight={64} height={128} />,
+    );
+    expect(container.querySelector("thead tr")).toHaveStyle({ height: "64px" });
+    expect(container.querySelector("tbody tr")).toHaveStyle({ height: "64px" });
+
+    rerender(
+      <Table columns={columns} data={data} getRowId={(item) => item.id} rowHeight={64} headerHeight={48} height={112} />,
+    );
+    expect(container.querySelector("thead tr")).toHaveStyle({ height: "48px" });
+    expect(container.querySelector("tbody tr")).toHaveStyle({ height: "64px" });
   });
 });
