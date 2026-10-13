@@ -23,6 +23,9 @@ export type UsageDto = {
   cache_hit_rate: number | null;
   cost: number;
   unpriced: number;
+  retried: number;
+  output_speed: number | null;
+  speed_samples: number;
 };
 
 export type SummaryResponse = {

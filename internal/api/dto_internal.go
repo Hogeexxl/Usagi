@@ -20,6 +20,9 @@ type usageDTO struct {
 	CacheHitRate *float64 `json:"cache_hit_rate"`
 	Cost         float64  `json:"cost"`
 	Unpriced     int64    `json:"unpriced"`
+	Retried      int64    `json:"retried"`
+	OutputSpeed  *float64 `json:"output_speed"`
+	SpeedSamples int64    `json:"speed_samples"`
 }
 
 type summaryResponseDTO struct {
@@ -179,6 +182,7 @@ func mapUsageDTO(view projection.UsageView) usageDTO {
 		CacheRead: view.CacheRead, CacheWrite: view.CacheWrite, CacheWrite1h: view.CacheWrite1h,
 		Reasoning: view.Reasoning, Total: view.Total, CacheHitRate: view.CacheHitRate,
 		Cost: view.Cost, Unpriced: view.Unpriced,
+		Retried: view.Retried, OutputSpeed: view.OutputSpeed, SpeedSamples: view.DecodeN,
 	}
 }
 

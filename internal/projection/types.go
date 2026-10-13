@@ -25,6 +25,13 @@ type UsageView struct {
 	CacheHitRate *float64
 	Cost         float64
 	Unpriced     int64
+	Retried      int64
+	DecodeMs     int64
+	DecodeOut    int64
+	DecodeN      int64
+	// OutputSpeed is tokens per second over the requests whose speed Magpie can
+	// measure; nil when none can be.
+	OutputSpeed *float64
 }
 
 type ModelEffortUsageView struct {

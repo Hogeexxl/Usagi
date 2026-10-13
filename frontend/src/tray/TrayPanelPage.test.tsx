@@ -22,6 +22,7 @@ const usage: UsageDto = {
   cache_hit_rate: 600 / 2_200,
   cost: 1.25,
   unpriced: 0,
+  retried: 0, output_speed: null, speed_samples: 0,
 };
 
 function provider(providerId: string, name: string, display: string): QuotaProviderDto {

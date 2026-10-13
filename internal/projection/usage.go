@@ -18,13 +18,28 @@ func usageFromTotals(t query.UsageTotals) UsageView {
 		Reasoning:    t.Reasoning,
 		Cost:         t.Cost,
 		Unpriced:     t.Unpriced,
+		Retried:      t.Retried,
+		DecodeMs:     t.DecodeMs,
+		DecodeOut:    t.DecodeOut,
+		DecodeN:      t.DecodeN,
 	})
 }
 
 func (a *usageAccumulator) AddRow(row query.UsageRow) {
 	a.Totals.Calls++
-	if row.Status >= 400 || row.Error != "" {
+	failed := query.RequestFailed(row.Status, row.Error)
+	if failed {
 		a.Totals.Errors++
+	} else if row.Tries > 1 {
+		a.Totals.Retried++
+	}
+	if sample, ok := query.DecodeOf(query.DecodeInput{
+		Failed: failed, Output: row.Output, Reasoning: row.Reasoning,
+		Millis: row.Millis, TTFTMs: row.TTFTMs, FirstTextMs: row.FirstTextMs, FlowMs: row.FlowMs,
+	}); ok {
+		a.Totals.DecodeMs += sample.Ms
+		a.Totals.DecodeOut += sample.Tokens
+		a.Totals.DecodeN++
 	}
 	a.Totals.Input += row.Input
 	a.Totals.Output += row.Output
@@ -54,6 +69,10 @@ func mergeUsage(a, b UsageView) UsageView {
 		Reasoning:    a.Reasoning + b.Reasoning,
 		Cost:         a.Cost + b.Cost,
 		Unpriced:     a.Unpriced + b.Unpriced,
+		Retried:      a.Retried + b.Retried,
+		DecodeMs:     a.DecodeMs + b.DecodeMs,
+		DecodeOut:    a.DecodeOut + b.DecodeOut,
+		DecodeN:      a.DecodeN + b.DecodeN,
 	})
 }
 
@@ -64,6 +83,11 @@ func deriveUsage(usage UsageView) UsageView {
 	if prompt > 0 {
 		rate := float64(usage.CacheRead) / float64(prompt)
 		usage.CacheHitRate = &rate
+	}
+	usage.OutputSpeed = nil
+	if usage.DecodeMs > 0 {
+		speed := float64(usage.DecodeOut) * 1000 / float64(usage.DecodeMs)
+		usage.OutputSpeed = &speed
 	}
 	return usage
 }

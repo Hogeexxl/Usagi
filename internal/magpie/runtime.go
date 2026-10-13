@@ -1,6 +1,7 @@
 package magpie
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,11 +14,60 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
 )
+
+// defaultGatewayURL is where the Magpie desktop app's gateway listens unless
+// its Settings move it; the sidecar's startup banner names the real one.
+const defaultGatewayURL = "http://127.0.0.1:3425"
+
+var gatewayBannerPattern = regexp.MustCompile(`gateway (https?://[^\s·]+)`)
+
+// bannerScanner discards the sidecar's stdout but remembers the gateway
+// address its startup banner prints.
+type bannerScanner struct {
+	mu      sync.Mutex
+	pending []byte
+	gateway string
+}
+
+func (b *bannerScanner) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gateway != "" {
+		return len(p), nil
+	}
+	b.pending = append(b.pending, p...)
+	for {
+		index := bytes.IndexByte(b.pending, '\n')
+		if index < 0 {
+			break
+		}
+		if match := gatewayBannerPattern.FindSubmatch(b.pending[:index]); match != nil {
+			b.gateway = string(match[1])
+			b.pending = nil
+			return len(p), nil
+		}
+		b.pending = b.pending[index+1:]
+	}
+	if len(b.pending) > 4096 {
+		b.pending = nil
+	}
+	return len(p), nil
+}
+
+func (b *bannerScanner) GatewayURL() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gateway == "" {
+		return defaultGatewayURL
+	}
+	return b.gateway
+}
 
 type RuntimeStatus string
 
@@ -184,7 +234,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 		os.Environ(),
 		"MAGPIE_WEB_KEY="+key,
 	)
-	cmd.Stdout = io.Discard
+	banner := &bannerScanner{}
+	cmd.Stdout = banner
 	cmd.Stderr = io.Discard
 
 	if err := cmd.Start(); err != nil {
@@ -221,7 +272,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return r.startFailedAfterSidecar(err)
 	}
 	httpClient := &http.Client{Jar: jar}
-	client := NewClient(baseURL, httpClient)
+	client := NewClient(baseURL, httpClient).WithGateway(banner)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 

@@ -1,0 +1,28 @@
+﻿t,agent,model,provider,status,kind,route_id,rid,response_id,in,out,cache_read,cache_write,cost,err
+2026-10-08T16:45:29.8888+08:00,AIME%20Settings,gpt-6-luna,codex,200,,1791449129893,,chatcmpl-resp_0e8c8e209118bb9f016ac7582af698819194a090ebaff709b9,721,5,2816,0,0.00010276,
+2026-10-12T14:07:25.923003+08:00,claude-desktop,gpt-6.1-sol,codex,499,,1791785246793,,,0,0,0,0,0,the agent canceled the request
+2026-10-12T14:07:35.920734+08:00,claude-desktop,gpt-6.1-sol,codex,200,,1791785246794,,msg_resp_061a35a01dc6fc34016acc79291a9c8191b3bdfe3566030f15,127,12,4096,0,0.0007836000000000001,
+2026-10-12T15:20:34.922167+08:00,claude-desktop,claude-sonnet-5-5,claude,200,,1791785246795,req_011CfwwNwsTmv3CjHWf66z88,msg_011CfwwNxZdSnyrgdeCvxbmC,2,57,0,1704,0.00739,
+2026-10-12T15:29:16.812099+08:00,claude-desktop,claude-sonnet-5-5,claude,200,,1791785246796,req_011Cfwx3QLVQVbiyeEXpDrPt,msg_011Cfwx3R5t53cJNLKZvUiTk,2,37,1161,1268,0.0055621,
+2026-10-12T15:34:05.644562+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791785246803,req_011CfwxQiVUKT9b5DKx1xFSK,msg_011CfwxQisYNmiPtnHRTB6vg,2,25,1161,539,0.0050522,
+2026-10-12T15:40:00.676169+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791785246841,req_011CfwxrrVAGbbpMoVbrRLU5,msg_011CfwxrrgZt3NboHhNgpqvT,2,38,1161,1297,0.011376200000000001,
+2026-10-12T15:41:11.431321+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791785246856,req_011Cfwxx7MFjcF9CreESBJDk,msg_011Cfwxx7ZfEkj58xqVSoDpz,2,21,1385,864,0.007617,
+2026-10-12T15:41:28.094896+08:00,Go-http-client,claude-haiku-5-5,claude,200,web_search,1791785246860,req_011CfwxyxRnxh9bpkWuarxcX,msg_011CfwxyT3TFzcAHmmoq24MW,4,1076,4360,3690,0.00132,
+2026-10-12T15:56:46.084659+08:00,Go-http-client,claude-haiku-5-5,claude,200,web_search,1791785246910,req_011Cfwz9gjNR69LYP4AtxbYN,msg_011Cfwz8xX7LUx3BrFibd7BW,4,1384,6262,1978,0.00115062,
+2026-10-12T15:56:46.688811+08:00,Go-http-client,claude-haiku-5-5,claude,200,web_search,1791785246911,req_011Cfwz9SQQkVKoxA72UXm54,msg_011Cfwz8znJ3gR8P6MVbnAz8,4,987,6233,1450,0.00084623,
+2026-10-12T16:00:51.658927+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791785246914,req_011CfwzT7b5GCivTM7B6Cdky,msg_011CfwzT7rhcuHUfPirdRjvg,2,52,1700,0,0.001388,
+2026-10-12T16:13:34.586958+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791785246985,req_011Cfx1RKwXbPk2xhuPm9hhK,msg_011Cfx1RLgBVZ9Zqyav6C84S,2,40,1700,0,0.001148,
+2026-10-12T17:17:10.590445+08:00,claude-desktop,claude-opus-5-5,claude,499,,1791785247002,,,0,0,0,0,0,the agent canceled the request
+2026-10-12T21:13:32.106937+08:00,claude-desktop,claude-opus-5-5,claude,499,,1791785247003,,,0,0,0,0,0,the agent canceled the request
+2026-10-12T21:14:24.433212+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791810864444,req_011CfxQMwfRroSEudNbUYWCx,msg_011CfxQMwsaKVnYMjsiM5YJ7,2,56,1700,0,0.001468,
+2026-10-12T21:15:46.528781+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791810864445,req_011CfxQTv474d49NCce23Tcd,msg_011CfxQTvgpCm3qAz6iVqdDP,2,53,1700,0,0.001408,
+2026-10-12T21:16:57.12516+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791810864446,req_011CfxQZJMgYe15sxYrvLau9,msg_011CfxQZJe3rv717nCTYEThE,2,49,1700,0,0.001328,
+2026-10-12T21:40:36.445974+08:00,claude-desktop,claude-opus-5-5,claude,429,,1791810864548,,,0,0,0,0,0,You've hit your session limit · resets 2:10am (Asia/Shanghai)
+2026-10-12T23:31:30.831851+08:00,claude-desktop,claude-opus-5-5,claude,429,,1791814663730,,,0,0,0,0,0,You've hit your session limit · resets 2:10am (Asia/Shanghai)
+2026-10-13T00:02:50.235194+08:00,claude-desktop,claude-opus-5-5,claude,429,,1791814663755,,,0,0,0,0,0,You've hit your session limit · resets 2:10am (Asia/Shanghai)
+2026-10-13T00:07:59.70625+08:00,claude-desktop,claude-opus-5-5,claude,429,,1791814663763,,,0,0,0,0,0,You've hit your session limit · resets 2:10am (Asia/Shanghai)
+2026-10-13T00:09:48.53463+08:00,claude-desktop,claude-opus-5-5,claude,429,,1791814663764,,,0,0,0,0,0,You've hit your session limit · resets 2:10am (Asia/Shanghai)
+2026-10-13T02:10:41.546045+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791821702643,req_011CfxnxGsLuTGes1G9q5tVR,msg_011CfxnxK4JQueqqoWiCFSfm,2,56,0,1700,0.014728,
+2026-10-13T02:59:44.457294+08:00,claude-desktop,claude-opus-5-5,claude,200,,1791821702697,req_011CfxrhDUjiitHkbU7v5etU,msg_011CfxrhEG8BAK5HqiYwNhEN,2,44,1161,1902,0.016336200000000002,
+2026-10-13T11:18:19.155468+08:00,claude-desktop,claude-sonnet-5-5,claude,429,,1791858985347,,,0,0,0,0,0,You've hit your session limit · resets 3pm (Asia/Shanghai)
+2026-10-13T12:14:00.096061+08:00,claude-desktop,claude-haiku-5-5,claude,429,,1791858985392,,,0,0,0,0,0,You've hit your session limit · resets 3pm (Asia/Shanghai)

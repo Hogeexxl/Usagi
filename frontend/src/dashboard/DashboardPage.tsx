@@ -141,8 +141,6 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
             <MetricGrid
               usage={view.metrics}
-              sessionCount={view.session_count}
-              modelFilterActive={view.modelFilterActive}
               quota={quota.quota}
               onRefreshQuota={quota.refresh}
               quotaRefreshing={quota.refreshing}

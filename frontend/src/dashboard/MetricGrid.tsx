@@ -15,15 +15,13 @@ import { useHoverGesture } from "../ui/lib/use-hover-gesture";
 
 type MetricGridProps = {
   usage: UsageDto | null;
-  sessionCount: number;
-  modelFilterActive: boolean;
   quota: QuotaResponse;
   onRefreshQuota: () => void;
   quotaRefreshing: boolean;
   quotaRefreshError: boolean;
   quotaRefreshAvailable: boolean;
 };
-type Focus = "input" | "cache_read" | "output" | "reasoning" | null;
+type Focus = "input" | "cache_read" | "output" | null;
 type CacheFocus = "cached" | "input" | null;
 
 const CARD = "h-36 min-w-0 border border-border bg-card p-4 text-foreground";
@@ -70,15 +68,12 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
   const input = usage.input;
   const cacheRead = usage.cache_read;
   const output = usage.output;
-  const reasoning = Math.min(usage.reasoning, output);
   const total = usage.total;
   const visibleTotal = input + cacheRead + output;
   const inputPct = visibleTotal > 0 ? (input / visibleTotal) * 100 : 0;
   const cacheReadPct = visibleTotal > 0 ? (cacheRead / visibleTotal) * 100 : 0;
   const outputStartPct = inputPct + cacheReadPct;
   const outputPct = visibleTotal > 0 ? (output / visibleTotal) * 100 : 0;
-  const reasoningPct = visibleTotal > 0 ? (reasoning / visibleTotal) * 100 : 0;
-  const reasoningStartPct = outputStartPct + outputPct - reasoningPct;
   const dim = (key: Exclude<Focus, null>) => focus !== null && focus !== key;
   const transition = reduce ? { duration: 0 } : { ease: EASE_OUT };
 
@@ -86,7 +81,7 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
     <TiltCard className={`${CARD} flex flex-col min-w-0 max-[1439px]:col-span-2 max-[767px]:col-span-1`}>
       <div className={TITLE}>总 Token</div>
       <CompactTicker value={total} formatter={formatIntegerFull} />
-      <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="Token 分布：输入、缓存读和输出；推理 Token 包含在输出 Token 中">
+      <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="Token 分布：输入、缓存读和输出">
         <motion.div
           className="absolute inset-y-0 left-0 bg-[#68c0e8]"
           style={{ width: `${inputPct}%` }}
@@ -101,14 +96,8 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
         />
         <motion.div
           className="absolute inset-y-0 bg-[#be753e]"
-          style={{ left: `${outputStartPct}%`, width: `${outputPct}%`, zIndex: focus === "output" ? 3 : 1 }}
+          style={{ left: `${outputStartPct}%`, width: `${outputPct}%` }}
           animate={{ opacity: dim("output") ? 0.3 : 1, scaleY: focus === "output" && !reduce ? 1.25 : 1 }}
-          transition={transition}
-        />
-        <motion.div
-          className="absolute inset-y-0 bg-[#a6333d]"
-          style={{ left: `${reasoningStartPct}%`, width: `${reasoningPct}%`, zIndex: focus === "output" ? 0 : 2 }}
-          animate={{ opacity: focus === "output" ? 0 : dim("reasoning") ? 0.3 : 1, scaleY: focus === "reasoning" && !reduce ? 1.25 : 1 }}
           transition={transition}
         />
       </div>
@@ -121,9 +110,6 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
         </button>
         <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("output")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("output")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be753e]" /><span className="inline-flex h-4 items-center">输出</span><CompactTicker value={output} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("reasoning")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("reasoning")} onBlur={() => setFocus(null)} aria-label={`推理 ${formatIntegerFull(reasoning).accessibleName}，包含在输出 Token 中`}>
-          <Dot className="bg-[#a6333d]" /><span className="inline-flex h-4 items-center">推理</span><CompactTicker value={reasoning} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button>
       </div>
     </TiltCard>
@@ -164,12 +150,37 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
   );
 }
 
-function SessionCountMetric({ count }: { count: number }) {
+export function RequestMetric({ usage, glare = false }: { usage: UsageDto; glare?: boolean }) {
+  const hasFailures = usage.errors > 0;
+  const successRate = usage.calls > 0 ? formatRatio((usage.calls - usage.errors) / usage.calls).text : "—";
+  const speed = usage.output_speed === null || usage.speed_samples === 0
+    ? "—"
+    : `${formatIntegerFull(Math.round(usage.output_speed)).title} token/s（${formatIntegerFull(usage.speed_samples).title} 次）`;
+
   return (
-    <TiltCard glare={false} className={`${CARD} flex flex-col`}>
-      <div className={TITLE}>会话数量</div>
-      <CompactTicker value={count} formatter={formatIntegerFull} />
-      <div className={`${LEGEND} mt-auto`}>仅统计主线程会话。</div>
+    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className={TITLE}>请求数</div>
+        <Popover trigger="hover" side="bottom" align="end">
+          <PopoverTrigger>
+            <button
+              type="button"
+              aria-label="请求失败与重试提示"
+              className={`inline-flex items-center justify-center ${hasFailures ? "text-warning" : "text-foreground"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
+            >
+              <CircleAlert className="h-4 w-4" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
+            <div className="flex flex-col gap-1">
+              <div>{formatIntegerFull(usage.errors).title} 次失败 · 成功 {successRate}</div>
+              <div>{formatIntegerFull(usage.retried).title} 次重试后成功</div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+      <CompactTicker value={usage.calls} formatter={formatIntegerFull} />
+      <div className={`${LEGEND} mt-auto truncate`} title={`输出速度：${speed}`}>输出速度：{speed}</div>
     </TiltCard>
   );
 }
@@ -213,14 +224,38 @@ export function quotaColor(remainingPercent: number): string {
   return chartSeriesColor(9);
 }
 
+const QUOTA_PROVIDER_ORDER = ["codex", "claude", "copilot"];
+
+function quotaProviderRank(provider: QuotaProviderDto): number {
+  const rank = QUOTA_PROVIDER_ORDER.indexOf(provider.provider);
+  return rank === -1 ? QUOTA_PROVIDER_ORDER.length : rank;
+}
+
+// Copilot reports chat and completions as unlimited windows; only premium requests carry a quota worth showing.
+function visibleQuotaWindows(provider: QuotaProviderDto): QuotaWindowDto[] {
+  if (provider.provider !== "copilot") return provider.windows;
+  return provider.windows.filter((window) => /premium/i.test(window.name));
+}
+
+// Magpie names this provider "Claude Code", which is too long for a card title or badge.
+function quotaProviderName(provider: QuotaProviderDto): string {
+  return provider.provider === "claude" ? "Claude" : provider.name;
+}
+
+function quotaTitle(provider: QuotaProviderDto, window: QuotaWindowDto): string {
+  if (provider.provider === "copilot") return "Copilot·requests";
+  return `${quotaProviderName(provider)}·${window.name}`;
+}
+
 function QuotaWindowCard({ provider, window }: { provider: QuotaProviderDto; window: QuotaWindowDto }) {
   const used = Math.max(0, Math.min(100, window.used));
   const remaining = Math.round(100 - used);
+  const resetText = window.resets_at_ms ? `下次重置：${formatQuotaResetTime(window.resets_at_ms)}` : "";
 
   return (
     <div className="flex h-full min-w-0 flex-col justify-between">
       <div className="flex h-4 min-w-0 items-center justify-between gap-2">
-        <span className="truncate text-xs font-medium leading-4 text-foreground">{provider.name}·{window.name}</span>
+        <span className="truncate text-xs font-medium leading-4 text-foreground">{quotaTitle(provider, window)}</span>
         <span className="shrink-0 text-xs font-semibold leading-4 text-foreground" title={`${remaining}%`} aria-label={`${remaining}%`}>
           {window.unlimited ? "∞" : <NumberTicker value={remaining} blur format={(value) => `${value}%`} />}
         </span>
@@ -230,13 +265,13 @@ function QuotaWindowCard({ provider, window }: { provider: QuotaProviderDto; win
         <div className="absolute inset-y-0 right-0" style={{ width: `${window.unlimited ? 0 : used}%`, backgroundColor: chartMuted }} />
       </div>
       <div className="flex h-4 min-w-0 items-center justify-between gap-2">
-        <div className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground">
-          {window.display || (window.resets_at_ms ? `下次重置：${formatQuotaResetTime(window.resets_at_ms)}` : provider.plan || "暂无重置信息")}
+        <div className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground" title={window.display || undefined}>
+          {resetText || window.display || provider.plan || "暂无重置信息"}
         </div>
         <Popover trigger="hover" side="bottom" align="end">
           <PopoverTrigger>
             <button type="button" aria-label={`${provider.name} 账户信息`} className="inline-flex h-4 shrink-0 items-center justify-center rounded-full border border-foreground/40 px-1 text-center text-[10px] font-medium leading-[10px] whitespace-nowrap text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-              {provider.plan || provider.name}
+              {provider.plan || quotaProviderName(provider)}
             </button>
           </PopoverTrigger>
           <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
@@ -270,8 +305,8 @@ export function AccountQuotaCard({
   const reduce = useReducedMotion();
   const items: NotificationStackItem[] = [];
 
-  for (const provider of quota.items) {
-    for (const window of provider.windows) {
+  for (const provider of [...quota.items].sort((a, b) => quotaProviderRank(a) - quotaProviderRank(b))) {
+    for (const window of visibleQuotaWindows(provider)) {
       items.push({ id: `${provider.provider}:${window.name}`, content: <QuotaWindowCard provider={provider} window={window} /> });
     }
   }
@@ -355,25 +390,19 @@ export function SkeletonCard({ wide = false, bar = false }: { wide?: boolean; ba
 
 export const MetricGrid = memo(function MetricGrid({
   usage,
-  sessionCount,
-  modelFilterActive,
   quota,
   onRefreshQuota,
   quotaRefreshing,
   quotaRefreshError,
   quotaRefreshAvailable,
 }: MetricGridProps) {
-  const columns = modelFilterActive
-    ? "[grid-template-columns:minmax(0,1fr)_repeat(3,236px)]"
-    : "[grid-template-columns:minmax(0,1fr)_repeat(4,236px)]";
-
   return (
-    <div className={`grid gap-4 ${columns} max-[1439px]:[grid-template-columns:minmax(0,1fr)_236px] max-[767px]:grid-cols-1`} aria-label={usage ? "KPI 指标" : "KPI 加载中"}>
+    <div className={`grid gap-4 [grid-template-columns:minmax(0,1fr)_repeat(4,236px)] max-[1439px]:[grid-template-columns:minmax(0,1fr)_236px] max-[767px]:grid-cols-1`} aria-label={usage ? "KPI 指标" : "KPI 加载中"}>
       {!usage ? (
         <>
           <SkeletonCard wide bar />
           <SkeletonCard bar />
-          {!modelFilterActive ? <SkeletonCard /> : null}
+          <SkeletonCard />
           <SkeletonCard />
           <SkeletonCard bar />
         </>
@@ -381,7 +410,7 @@ export const MetricGrid = memo(function MetricGrid({
         <>
           <TotalTokenMetric usage={usage} />
           <CacheHitMetric usage={usage} glare={false} />
-          {!modelFilterActive ? <SessionCountMetric count={sessionCount} /> : null}
+          <RequestMetric usage={usage} />
           <CostMetric usage={usage} glare={false} />
           <AccountQuotaCard
             quota={quota}

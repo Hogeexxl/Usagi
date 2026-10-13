@@ -17,6 +17,7 @@ const usage: UsageDto = {
   cache_hit_rate: 0.25,
   cost: 1.25,
   unpriced: 1,
+  retried: 0, output_speed: null, speed_samples: 0,
 };
 
 const thread = {

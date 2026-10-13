@@ -86,6 +86,14 @@ type UsageTotals struct {
 	Reasoning    int64
 	Cost         float64
 	Unpriced     int64
+	// Retried counts answered requests that succeeded only after a retry.
+	Retried int64
+	// DecodeMs, DecodeOut and DecodeN describe the requests whose output speed
+	// Magpie can measure: the ms and tokens from first token to end, and how
+	// many such requests there are.
+	DecodeMs  int64
+	DecodeOut int64
+	DecodeN   int64
 }
 
 type UsageGroup struct {
@@ -150,6 +158,12 @@ type UsageRow struct {
 
 	Status int
 	Error  string
+
+	Tries       int
+	Millis      int64
+	TTFTMs      int64
+	FirstTextMs int64
+	FlowMs      int64
 
 	ResolvedSession SessionRef
 	Project         ProjectRef

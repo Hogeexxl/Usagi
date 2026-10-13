@@ -96,6 +96,15 @@ function finiteNumber(record: JsonRecord, key: string): number {
   return value;
 }
 
+function nullableFiniteNumber(record: JsonRecord, key: string): number | null {
+  const value = record[key];
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new UsagiClientError("HTTP_ERROR", 200);
+  }
+  return value;
+}
+
 function nullableRatio(record: JsonRecord, key: string): number | null {
   const value = record[key];
   if (value === null) return null;
@@ -124,6 +133,9 @@ function parseUsage(value: unknown) {
     cache_hit_rate: nullableRatio(record, "cache_hit_rate"),
     cost: finiteNumber(record, "cost"),
     unpriced: requiredSafeInteger(record, "unpriced"),
+    retried: requiredSafeInteger(record, "retried"),
+    output_speed: nullableFiniteNumber(record, "output_speed"),
+    speed_samples: requiredSafeInteger(record, "speed_samples"),
   };
 }
 

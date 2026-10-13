@@ -68,3 +68,26 @@ func TestUsageMerge(t *testing.T) {
 		t.Fatalf("mergeUsage() = %+v, want %+v", got, want)
 	}
 }
+
+func TestUsageViewDerivesOutputSpeedAndRetries(t *testing.T) {
+	view := usageFromTotals(query.UsageTotals{Calls: 3, Retried: 1, DecodeMs: 10_000, DecodeOut: 600, DecodeN: 2})
+	if view.Retried != 1 || view.DecodeN != 2 || view.OutputSpeed == nil || *view.OutputSpeed != 60 {
+		t.Fatalf("usageFromTotals() = %+v, want retried 1, 2 samples, 60 tokens/s", view)
+	}
+	if none := usageFromTotals(query.UsageTotals{Calls: 1}); none.OutputSpeed != nil {
+		t.Fatalf("OutputSpeed = %v, want nil without a measurable reply", *none.OutputSpeed)
+	}
+
+	merged := mergeUsage(view, usageFromTotals(query.UsageTotals{Calls: 1, Retried: 2, DecodeMs: 10_000, DecodeOut: 1_400, DecodeN: 1}))
+	if merged.Retried != 3 || merged.DecodeN != 3 || merged.OutputSpeed == nil || *merged.OutputSpeed != 100 {
+		t.Fatalf("mergeUsage() = %+v, want speed recomputed from summed tokens and ms", merged)
+	}
+
+	var acc usageAccumulator
+	acc.AddRow(query.UsageRow{Output: 500, Millis: 10_000, TTFTMs: 2_000})
+	acc.AddRow(query.UsageRow{Output: 100, Millis: 3_000, TTFTMs: 1_000, Tries: 2})
+	acc.AddRow(query.UsageRow{Output: 100, Millis: 3_000, TTFTMs: 1_000, Tries: 2, Status: 502})
+	if got := acc.Totals; got.Retried != 1 || got.Errors != 1 || got.DecodeN != 2 || got.DecodeOut != 600 || got.DecodeMs != 10_000 {
+		t.Fatalf("AddRow totals = %+v", got)
+	}
+}

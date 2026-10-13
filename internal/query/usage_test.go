@@ -407,3 +407,69 @@ func TestUsageRows(t *testing.T) {
 		t.Fatalf("filtered UsageRows = %+v, %v, refreshes %d, events %v", got, err, refreshes, events)
 	}
 }
+
+func TestDecodeOfFollowsMagpieRules(t *testing.T) {
+	base := DecodeInput{Output: 500, Millis: 10_000, TTFTMs: 2_000}
+	tests := []struct {
+		name   string
+		mutate func(*DecodeInput)
+		want   DecodeSample
+		ok     bool
+	}{
+		{"plain reply counts from its first token", func(*DecodeInput) {}, DecodeSample{Tokens: 500, Ms: 8_000}, true},
+		{"failed reply tells no speed", func(in *DecodeInput) { in.Failed = true }, DecodeSample{}, false},
+		{"untimed reply tells no speed", func(in *DecodeInput) { in.TTFTMs = 0 }, DecodeSample{}, false},
+		{"empty output tells no speed", func(in *DecodeInput) { in.Output = 0 }, DecodeSample{}, false},
+		{"window under 100 ms tells no speed", func(in *DecodeInput) { in.Millis = 2_050 }, DecodeSample{}, false},
+		{"over 10000 tokens a second tells no speed", func(in *DecodeInput) { in.Output = 100_000 }, DecodeSample{}, false},
+		{"burst held back to the end tells no speed", func(in *DecodeInput) { in.FlowMs = 1_000 }, DecodeSample{}, false},
+		{"flow close to the window still counts", func(in *DecodeInput) { in.FlowMs = 6_000 }, DecodeSample{Tokens: 500, Ms: 8_000}, true},
+		{"reasoning reply counts its answer from the first text", func(in *DecodeInput) {
+			in.Reasoning, in.FirstTextMs = 200, 4_000
+		}, DecodeSample{Tokens: 300, Ms: 6_000}, true},
+		{"reasoning reply without a first text tells no speed", func(in *DecodeInput) { in.Reasoning = 200 }, DecodeSample{}, false},
+		{"answer far faster than its reasoning tells no speed", func(in *DecodeInput) {
+			in.Reasoning, in.FirstTextMs = 10, 9_000
+			in.Output, in.Millis = 5_010, 9_500
+		}, DecodeSample{}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			in := base
+			test.mutate(&in)
+			got, ok := DecodeOf(in)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("DecodeOf(%+v) = %+v, %v; want %+v, %v", in, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestUsageTotalsCountRetriedAndSpeed(t *testing.T) {
+	rows := []magpie.UsageRequest{
+		{Agent: "codex", Provider: "p", Model: "m", Session: "s", Output: 500, Millis: 10_000, TTFTMs: 2_000, Priced: true},
+		{Agent: "codex", Provider: "p", Model: "m", Session: "s", Output: 100, Millis: 3_000, TTFTMs: 1_000, Tries: 2, Priced: true},
+		{Agent: "codex", Provider: "p", Model: "m", Session: "s", Output: 100, Millis: 3_000, TTFTMs: 1_000, Tries: 3, Status: 502, Priced: true},
+		{Agent: "codex", Provider: "p", Model: "m", Session: "s", Millis: 900, Status: 429, Error: "rate", Priced: true},
+	}
+	u := &sessionUpstream{
+		requests: func(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error) {
+			return magpie.UsageRequestsPage{Rows: rows, Total: len(rows)}, nil
+		},
+		sessions: func(context.Context, int) (magpie.SessionsResponse, error) { return magpie.SessionsResponse{}, nil },
+	}
+	result, err := newService(u).Usage(context.Background(), UsageQuery{Range: DateRange{From: "2026-10-11", To: "2026-10-11"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.Totals
+	if got.Calls != 4 || got.Errors != 2 {
+		t.Fatalf("calls/errors = %d/%d, want 4/2", got.Calls, got.Errors)
+	}
+	if got.Retried != 1 {
+		t.Fatalf("Retried = %d, want 1: a failed retry does not count as answered on a retry", got.Retried)
+	}
+	if got.DecodeN != 2 || got.DecodeOut != 600 || got.DecodeMs != 10_000 {
+		t.Fatalf("decode = n %d, out %d, ms %d; want 2, 600, 10000", got.DecodeN, got.DecodeOut, got.DecodeMs)
+	}
+}

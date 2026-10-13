@@ -16,6 +16,24 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	// gateway reports where the Magpie desktop app's gateway listens. It is
+	// optional: without it Quotas only returns what the web sidecar knows.
+	gateway GatewayLocator
+}
+
+// GatewayLocator tells the client which Magpie gateway to ask for quotas the
+// web sidecar cannot read itself.
+type GatewayLocator interface {
+	GatewayURL() string
+}
+
+// WithGateway returns a client that also reads the Claude subscription quota
+// from the Magpie gateway. The web sidecar never signs in to Claude, so only
+// the desktop app's gateway can answer for it.
+func (c *Client) WithGateway(gateway GatewayLocator) *Client {
+	clone := *c
+	clone.gateway = gateway
+	return &clone
 }
 
 // NewClient constructs a client for a Magpie Web API endpoint.
@@ -195,10 +213,75 @@ func (c *Client) Quotas(ctx context.Context, asked bool) (QuotasResponse, error)
 	if err := json.NewDecoder(response.Body).Decode(&quotas); err != nil {
 		return QuotasResponse{}, wrapWebError(err)
 	}
+	if !hasQuotaProvider(quotas, claudeQuotaProvider) {
+		quotas = append(quotas, c.gatewayQuotas(ctx, claudeQuotaProvider)...)
+	}
 	return QuotasResponse{
 		Quotas:  quotas,
 		Reading: response.Header.Get("X-Magpie-Reading") == "1",
 	}, nil
+}
+
+const (
+	claudeQuotaProvider = "claude"
+	gatewayQuotasPath   = "/v1/magpie/quotas"
+	gatewayQuotasWait   = 3 * time.Second
+)
+
+func hasQuotaProvider(quotas []Quota, provider string) bool {
+	for _, quota := range quotas {
+		if quota.Provider == provider {
+			return true
+		}
+	}
+	return false
+}
+
+// gatewayQuotas returns the gateway's quota entries for one provider. It is
+// best effort: an absent desktop app or a gateway error just means no entry.
+func (c *Client) gatewayQuotas(ctx context.Context, provider string) []Quota {
+	if c.gateway == nil {
+		return nil
+	}
+	base := c.gateway.GatewayURL()
+	if base == "" {
+		return nil
+	}
+	requestURL, err := url.Parse(base)
+	if err != nil {
+		return nil
+	}
+	requestURL.Path = gatewayQuotasPath
+	requestURL.RawPath = ""
+
+	ctx, cancel := context.WithTimeout(ctx, gatewayQuotasWait)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return nil
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil
+	}
+
+	var body struct {
+		Data []Quota `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return nil
+	}
+	var matched []Quota
+	for _, quota := range body.Data {
+		if quota.Provider == provider {
+			matched = append(matched, quota)
+		}
+	}
+	return matched
 }
 
 func (c *Client) Sessions(ctx context.Context, limit int) (SessionsResponse, error) {

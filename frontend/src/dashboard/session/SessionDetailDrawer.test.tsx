@@ -20,6 +20,7 @@ function usage(total = 1_801, cost = 0.5, unpriced = 0): UsageDto {
     cache_hit_rate: 100 / 1_354,
     cost,
     unpriced,
+    retried: 0, output_speed: null, speed_samples: 0,
   };
 }
 

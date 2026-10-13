@@ -41,6 +41,7 @@ function usage(revision: number): UsageDto {
     cache_hit_rate: cache_read / (input + cache_read + cache_write),
     cost: revision / 100,
     unpriced: 0,
+    retried: 0, output_speed: null, speed_samples: 0,
   };
 }
 
@@ -61,6 +62,9 @@ function inclusiveUsage(self: UsageDto, subagents: UsageDto): UsageDto {
     cache_hit_rate: input + cache_read + cache_write === 0 ? null : cache_read / (input + cache_read + cache_write),
     cost: self.cost + subagents.cost,
     unpriced: self.unpriced + subagents.unpriced,
+    retried: self.retried + subagents.retried,
+    output_speed: null,
+    speed_samples: 0,
   };
 }
 

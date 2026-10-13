@@ -47,6 +47,7 @@ const ZERO_USAGE: UsageDto = {
   cache_hit_rate: null,
   cost: 0,
   unpriced: 0,
+  retried: 0, output_speed: null, speed_samples: 0,
 };
 
 const LARGE_USAGE: UsageDto = {

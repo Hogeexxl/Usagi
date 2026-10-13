@@ -22,6 +22,7 @@ function usage(total: number, cost = total / 100): UsageDto {
     cache_hit_rate: 0,
     cost,
     unpriced: 0,
+    retried: 0, output_speed: null, speed_samples: 0,
   };
 }
 

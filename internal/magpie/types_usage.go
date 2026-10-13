@@ -68,6 +68,9 @@ type UsageRequest struct {
 	Effort          string    `json:"effort,omitempty"`
 	Millis          int64     `json:"ms"`
 	TTFTMs          int64     `json:"ttft_ms,omitempty"`
+	FirstTextMs     int64     `json:"first_text_ms,omitempty"`
+	FlowMs          int64     `json:"flow_ms,omitempty"`
+	Tries           int       `json:"tries,omitempty"`
 	Status          int       `json:"status"`
 	Rejected        bool      `json:"rejected,omitempty"`
 	Error           string    `json:"err,omitempty"`

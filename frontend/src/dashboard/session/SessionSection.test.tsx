@@ -48,6 +48,7 @@ const usage: UsageDto = {
   cache_hit_rate: 100 / 1354,
   cost: 1.25,
   unpriced: 0,
+  retried: 0, output_speed: null, speed_samples: 0,
 };
 
 const item: SessionListItemDto = {

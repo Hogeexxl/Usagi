@@ -17,6 +17,7 @@ const usage = {
   cache_hit_rate: 0.143,
   cost: 1.25,
   unpriced: 0,
+  retried: 0, output_speed: null, speed_samples: 0,
 };
 
 const view: DashboardChartsView = {

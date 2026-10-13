@@ -420,3 +420,96 @@ func clientResponseJSON(path string) string {
 		return `{}`
 	}
 }
+
+type staticGateway string
+
+func (g staticGateway) GatewayURL() string { return string(g) }
+
+func gatewayQuotaServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/magpie/quotas" {
+			t.Errorf("gateway path = %q", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func webQuotaServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestQuotasAddsClaudeFromGateway(t *testing.T) {
+	web := webQuotaServer(t, `[{"provider":"codex","name":"Codex","windows":[{"name":"5 hours","used":16}]}]`)
+	gateway := gatewayQuotaServer(t, http.StatusOK, `{"object":"list","data":[`+
+		`{"provider":"claude","name":"Claude Code","plan":"pro","windows":[{"name":"5 hours","used":38,"resetsAt":"2026-10-13T07:10:00+08:00"},{"name":"7 days","used":18}]},`+
+		`{"provider":"codex","name":"Codex","windows":[{"name":"5 hours","used":99}]}]}`)
+
+	client := NewClient(web.URL, web.Client()).WithGateway(staticGateway(gateway.URL))
+	got, err := client.Quotas(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Quotas) != 2 || got.Quotas[0].Provider != "codex" || got.Quotas[0].Windows[0].Used != 16 {
+		t.Fatalf("Quotas() = %+v, want web codex untouched", got.Quotas)
+	}
+	claude := got.Quotas[1]
+	if claude.Provider != "claude" || claude.Plan != "pro" || len(claude.Windows) != 2 || claude.Windows[1].Name != "7 days" || claude.Windows[0].ResetsAt == nil {
+		t.Fatalf("Quotas() claude = %+v", claude)
+	}
+}
+
+func TestQuotasKeepsWebClaudeAndIgnoresGatewayFailures(t *testing.T) {
+	webWithClaude := webQuotaServer(t, `[{"provider":"claude","name":"Claude Code","windows":[{"name":"5 hours","used":1}]}]`)
+	gateway := gatewayQuotaServer(t, http.StatusOK, `{"data":[{"provider":"claude","windows":[{"name":"5 hours","used":50}]}]}`)
+	got, err := NewClient(webWithClaude.URL, webWithClaude.Client()).WithGateway(staticGateway(gateway.URL)).Quotas(context.Background(), false)
+	if err != nil || len(got.Quotas) != 1 || got.Quotas[0].Windows[0].Used != 1 {
+		t.Fatalf("Quotas() = %+v, %v; want the web claude entry only", got, err)
+	}
+
+	web := webQuotaServer(t, `[{"provider":"codex","windows":[]}]`)
+	for name, gateway := range map[string]GatewayLocator{
+		"no gateway":      nil,
+		"empty url":       staticGateway(""),
+		"unreachable":     staticGateway("http://127.0.0.1:1"),
+		"server error":    staticGateway(gatewayQuotaServer(t, http.StatusInternalServerError, `oops`).URL),
+		"malformed body":  staticGateway(gatewayQuotaServer(t, http.StatusOK, `not json`).URL),
+		"no claude entry": staticGateway(gatewayQuotaServer(t, http.StatusOK, `{"data":[{"provider":"codex"}]}`).URL),
+	} {
+		client := NewClient(web.URL, web.Client())
+		if gateway != nil {
+			client = client.WithGateway(gateway)
+		}
+		got, err := client.Quotas(context.Background(), false)
+		if err != nil || len(got.Quotas) != 1 || got.Quotas[0].Provider != "codex" {
+			t.Fatalf("%s: Quotas() = %+v, %v; want web quotas only", name, got, err)
+		}
+	}
+}
+
+func TestBannerScannerFindsGatewayAcrossWrites(t *testing.T) {
+	scanner := &bannerScanner{}
+	if got := scanner.GatewayURL(); got != defaultGatewayURL {
+		t.Fatalf("GatewayURL() before banner = %q, want default %q", got, defaultGatewayURL)
+	}
+	for _, chunk := range []string{
+		"● magpie web on http://127.0.0.1:61999/?k=secret\n  the link carries MAGPIE_WEB_KEY · gate",
+		"way http://127.0.0.1:4000 · Ctrl-C to stop\n",
+		"later gateway http://127.0.0.1:9 ignored\n",
+	} {
+		if n, err := scanner.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("Write() = %d, %v", n, err)
+		}
+	}
+	if got := scanner.GatewayURL(); got != "http://127.0.0.1:4000" {
+		t.Fatalf("GatewayURL() = %q", got)
+	}
+}
