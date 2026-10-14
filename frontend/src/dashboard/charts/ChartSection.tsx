@@ -17,10 +17,12 @@ export const ChartSection = memo(function ChartSection({ view, tools }: { view: 
   const projectItems = (view.projects?.items ?? []).map((item) => {
     const project = item.kind === "project"
       ? { kind: "project" as const, name: item.name, path: item.path }
-      : { kind: item.kind as "projectless" | "unknown" };
+      : item.kind === "workspace"
+        ? { kind: "workspace" as const }
+        : { kind: item.kind };
     const label = projectDisplay(project);
     return {
-      id: item.kind === "project" ? item.path : item.kind,
+      id: item.kind === "project" ? `project:${item.path}` : item.kind,
       label,
       title: item.kind === "project" ? item.path : undefined,
       totalTokens: item.usage.total,

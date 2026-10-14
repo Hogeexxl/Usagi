@@ -102,8 +102,8 @@ export function SessionTable({
       width: "150px",
       sortable: true,
       cell: (item) => {
-        const project = item.thread.project.kind === "project" ? item.thread.project.name : projectDisplay(item.thread.project);
-        const projectPath = item.thread.project.kind === "project" ? item.thread.project.path : project;
+        const project = projectDisplay(item.thread.project);
+        const projectPath = (item.thread.project.kind === "project" || item.thread.project.kind === "workspace") ? item.thread.project.path : project;
         return <span className="block truncate" title={projectPath}>{formatSessionProject(project)}</span>;
       },
     },

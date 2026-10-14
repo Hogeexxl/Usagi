@@ -113,7 +113,7 @@ function SummaryReceipt({ detail, agentDisplay }: { detail: SessionDetailRespons
   const thread = detail.thread;
   const agent = agentDisplay ? agentDisplay(thread.key.agent) : thread.key.agent;
   const project = projectDisplay(thread.project);
-  const projectPath = thread.project.kind === "project" ? thread.project.path : undefined;
+  const projectPath = (thread.project.kind === "project" || thread.project.kind === "workspace") ? thread.project.path : undefined;
   const rows = [
     ["Main Tokens", detail.self_usage.total, false],
     ["Subagent Tokens", detail.subagent_usage.total, false],

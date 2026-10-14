@@ -45,14 +45,14 @@ type modelDistributionResponseDTO struct {
 
 type projectDTO struct {
 	Kind string `json:"kind"`
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path string `json:"path,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 type projectDistributionItemDTO struct {
 	Kind  string   `json:"kind"`
-	Path  string   `json:"path"`
-	Name  string   `json:"name"`
+	Path  string   `json:"path,omitempty"`
+	Name  string   `json:"name,omitempty"`
 	Usage usageDTO `json:"usage"`
 }
 

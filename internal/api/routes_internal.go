@@ -218,7 +218,7 @@ func parseScopeRequest(r *http.Request, detail bool) (projection.ScopeQuery, pro
 	allowed := map[string]bool{
 		"range": true, "from": true, "to": true, "agent": true,
 		"model_at": true, "project_path": true, "include_projectless": true,
-		"include_unknown_project": true,
+		"include_unknown_project": true, "include_workspace": true,
 	}
 	if detail {
 		allowed["session_id"] = true
@@ -286,6 +286,9 @@ func parseFilterValues(values url.Values, detail bool) (query.UsageFilter, proje
 		return query.UsageFilter{}, projection.ThreadKey{}, err
 	}
 	if err := appendFlagSelection(values, "include_unknown_project", query.ProjectKindUnknown, &filter); err != nil {
+		return query.UsageFilter{}, projection.ThreadKey{}, err
+	}
+	if err := appendFlagSelection(values, "include_workspace", query.ProjectKindWorkspace, &filter); err != nil {
 		return query.UsageFilter{}, projection.ThreadKey{}, err
 	}
 	slices.SortFunc(filter.Projects, func(a, b query.ProjectSelection) int {

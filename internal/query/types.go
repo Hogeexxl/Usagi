@@ -14,6 +14,7 @@ type ProjectKind string
 
 const (
 	ProjectKindProject     ProjectKind = "project"
+	ProjectKindWorkspace   ProjectKind = "workspace"
 	ProjectKindProjectless ProjectKind = "projectless"
 	ProjectKindUnknown     ProjectKind = "unknown"
 )

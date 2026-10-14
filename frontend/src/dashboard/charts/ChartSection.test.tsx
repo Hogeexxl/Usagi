@@ -89,4 +89,27 @@ describe("ChartSection Spec05", () => {
     expect(within(distribution).getByRole("img", { name: "项目分布费用分布" })).toBeInTheDocument();
     expect(within(distribution).getAllByRole("button").filter((button) => button.closest('[role="tablist"]') === null)).toHaveLength(2);
   });
+
+  it("maps workspace, projectless, and unknown project kinds to their shared chart labels", () => {
+    const projectView: DashboardChartsView = {
+      ...view,
+      projects: {
+        data_revision: 1,
+        items: [
+          { kind: "workspace", usage: usage(3) },
+          { kind: "projectless", usage: usage(2) },
+          { kind: "unknown", usage: usage(1) },
+        ],
+      },
+    };
+    render(<ChartSection view={projectView} tools={tools} />);
+    const distribution = screen.getAllByRole("article")[0];
+    fireEvent.click(within(distribution).getByRole("tab", { name: "项目" }));
+
+    expect(within(distribution).getByText("临时工作区")).toBeInTheDocument();
+    expect(within(distribution).getByText("无项目会话")).toBeInTheDocument();
+    expect(within(distribution).getByText("未知会话")).toBeInTheDocument();
+    expect(within(distribution).getAllByRole("button").filter((button) => button.closest('[role="tablist"]') === null)).toHaveLength(3);
+    expect(within(distribution).getByText("临时工作区").closest("button")).not.toHaveAttribute("title");
+  });
 });

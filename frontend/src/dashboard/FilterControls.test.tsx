@@ -27,6 +27,7 @@ const projectOptions: FilterOptionsResponse = {
   models: [],
   projects: [
     { kind: "project", name: "Workspace", path: "/workspace" },
+    { kind: "workspace" },
     { kind: "projectless" },
     { kind: "unknown" },
   ],
@@ -266,7 +267,7 @@ describe("FilterControls", () => {
   });
 
 
-  it("selects normal, projectless, and unknown projects using their labels", async () => {
+  it("selects normal projects and each special project kind from one-level labels", async () => {
     const onChange = vi.fn();
     renderControls({ options: projectOptions, onChange });
     const dialog = await openPopover("项目筛选，全部");
@@ -278,6 +279,13 @@ describe("FilterControls", () => {
       projects: [{ kind: "project", path: "/workspace" }],
     });
 
+    fireEvent.click(within(dialog).getByText("临时工作区"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      agents: [],
+      models: [],
+      projects: [{ kind: "workspace" }],
+    });
+
     fireEvent.click(within(dialog).getByText("无项目会话"));
     expect(onChange).toHaveBeenLastCalledWith({
       agents: [],
@@ -285,7 +293,7 @@ describe("FilterControls", () => {
       projects: [{ kind: "projectless" }],
     });
 
-    fireEvent.click(within(dialog).getByText("未识别项目"));
+    fireEvent.click(within(dialog).getByText("未知会话"));
     expect(onChange).toHaveBeenLastCalledWith({
       agents: [],
       models: [],

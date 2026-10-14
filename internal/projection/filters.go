@@ -17,6 +17,11 @@ func (s *Service) FilterOptions(ctx context.Context, q ScopeQuery) (FilterOption
 		return FilterOptionsView{}, fmt.Errorf("projection: filter options: %w", err)
 	}
 	projects := slices.Clone(result.Projects)
+	for index := range projects {
+		if projects[index].Kind != query.ProjectKindProject {
+			projects[index] = query.ProjectRef{Kind: projects[index].Kind}
+		}
+	}
 	slices.SortFunc(projects, func(a, b query.ProjectRef) int {
 		if c := cmp.Compare(projectKindOrder(a.Kind), projectKindOrder(b.Kind)); c != 0 {
 			return c
@@ -37,9 +42,13 @@ func projectKindOrder(kind query.ProjectKind) int {
 	switch kind {
 	case query.ProjectKindProject:
 		return 0
-	case query.ProjectKindProjectless:
+	case query.ProjectKindWorkspace:
 		return 1
-	default:
+	case query.ProjectKindProjectless:
 		return 2
+	case query.ProjectKindUnknown:
+		return 3
+	default:
+		return 4
 	}
 }

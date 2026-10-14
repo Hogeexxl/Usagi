@@ -21,6 +21,7 @@ func TestSessionDatasetValidation(t *testing.T) {
 		{name: "missing project path", q: SessionQuery{Range: r, Filter: UsageFilter{Projects: []ProjectSelection{{Kind: ProjectKindProject}}}}, want: ErrInvalidFilter},
 		{name: "projectless path", q: SessionQuery{Range: r, Filter: UsageFilter{Projects: []ProjectSelection{{Kind: ProjectKindProjectless, Path: "/a"}}}}, want: ErrInvalidFilter},
 		{name: "unknown path", q: SessionQuery{Range: r, Filter: UsageFilter{Projects: []ProjectSelection{{Kind: ProjectKindUnknown, Path: "/a"}}}}, want: ErrInvalidFilter},
+		{name: "workspace path", q: SessionQuery{Range: r, Filter: UsageFilter{Projects: []ProjectSelection{{Kind: ProjectKindWorkspace, Path: "/a"}}}}, want: ErrInvalidFilter},
 	}
 	service := newService(queryTestDB(t), nil, time.UTC)
 	for _, test := range tests {
@@ -74,12 +75,12 @@ func TestSessionDatasetTotalsCountRetriedAndSpeed(t *testing.T) {
 	day := "2026-10-11"
 	base := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
 	rows := []struct {
-		at                             time.Time
-		status, tries, output          int
-		millis, ttft                   int64
-		error                          string
-		provider                       string
-		rejected                       bool
+		at                    time.Time
+		status, tries, output int
+		millis, ttft          int64
+		error                 string
+		provider              string
+		rejected              bool
 	}{
 		{at: base, status: 200, output: 500, millis: 10_000, ttft: 2_000},
 		{at: base.Add(time.Second), status: 200, tries: 2, output: 100, millis: 3_000, ttft: 1_000},

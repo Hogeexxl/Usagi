@@ -557,6 +557,13 @@ func TestInternalDTOMapperPreservesNullAndEmptyShapes(t *testing.T) {
 		!strings.Contains(string(threadJSON), `"first_usage_ms":0`) || !strings.Contains(string(threadJSON), `"session_id":""`) {
 		t.Fatalf("session mapper shape = %s", threadJSON)
 	}
+	projectJSON, err := json.Marshal(mapProjectDTO(query.ProjectRef{Kind: query.ProjectKindWorkspace, Path: "/tmp/claude-501/child"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(projectJSON) != `{"kind":"workspace","path":"/tmp/claude-501/child"}` {
+		t.Fatalf("workspace project mapper = %s, want original path without source metadata", projectJSON)
+	}
 }
 
 func TestStaticHandlerHandlesHeadAndMissingAsset(t *testing.T) {
@@ -652,5 +659,64 @@ func waitFor(t *testing.T, ready func() bool) {
 		case <-deadline.C:
 			t.Fatal("timed out waiting for server start activity")
 		}
+	}
+}
+
+func TestInternalUsageEndpointsIncludeWorkspace(t *testing.T) {
+	server, projectionService, runtime, _ := newServerFixture(t)
+	runtime.SetStatus(magpie.RuntimeStatusReady)
+
+	// Valid include_workspace=1
+	response := request(server, http.MethodGet, "/api/usage/summary?range=today&include_workspace=1&project_path=%2Frepo")
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET summary with include_workspace=1 status = %d: %s", response.Code, response.Body.String())
+	}
+	if len(projectionService.SummaryQueries) != 1 {
+		t.Fatalf("SummaryQueries count = %d, want 1", len(projectionService.SummaryQueries))
+	}
+	summaryQuery := projectionService.SummaryQueries[0]
+	found := false
+	for _, proj := range summaryQuery.Filter.Projects {
+		if proj.Kind == query.ProjectKindWorkspace {
+			found = true
+			break
+		}
+	}
+	if !found || len(summaryQuery.Filter.Projects) != 2 ||
+		summaryQuery.Filter.Projects[0] != (query.ProjectSelection{Kind: query.ProjectKindProject, Path: "/repo"}) ||
+		summaryQuery.Filter.Projects[1] != (query.ProjectSelection{Kind: query.ProjectKindWorkspace}) {
+		t.Fatalf("include_workspace did not preserve project-selection union: %+v", summaryQuery.Filter.Projects)
+	}
+
+	// Invalid include_workspace=2
+	invalid := request(server, http.MethodGet, "/api/usage/summary?range=today&include_workspace=2")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("GET summary with include_workspace=2 status = %d, want 400", invalid.Code)
+	}
+
+	// Project distributions use a single path-free workspace aggregate.
+	projectionService.ProjectDistributionResult = projection.ProjectDistributionView{
+		Items: []projection.ProjectDistributionItem{
+			{
+				Project: query.ProjectRef{Kind: query.ProjectKindWorkspace},
+				Usage:   projection.UsageView{Calls: 5},
+			},
+		},
+	}
+	projResp := request(server, http.MethodGet, "/api/usage/projects?range=today")
+	if projResp.Code != http.StatusOK {
+		t.Fatalf("GET projects status = %d: %s", projResp.Code, projResp.Body.String())
+	}
+	if !strings.Contains(projResp.Body.String(), `"kind":"workspace","usage"`) ||
+		strings.Contains(projResp.Body.String(), `"path"`) || strings.Contains(projResp.Body.String(), `"source"`) {
+		t.Fatalf("workspace distribution DTO should not expose a member path or source: %s", projResp.Body.String())
+	}
+
+	projectionService.FilterOptionsResult = projection.FilterOptionsView{
+		Projects: []query.ProjectRef{{Kind: query.ProjectKindWorkspace}},
+	}
+	optionsResp := request(server, http.MethodGet, "/api/usage/filter-options?range=today")
+	if optionsResp.Code != http.StatusOK || !strings.Contains(optionsResp.Body.String(), `"projects":[{"kind":"workspace"}]`) {
+		t.Fatalf("workspace filter option DTO = %d %s", optionsResp.Code, optionsResp.Body.String())
 	}
 }

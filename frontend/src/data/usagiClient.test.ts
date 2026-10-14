@@ -91,7 +91,10 @@ describe("Usagi Spec04 HTTP client", () => {
       data_revision: 8,
       agents: [{ agent: "aider", display_name: "Aider" }],
       models: [{ model: "same-model", provider_id: "provider-a", provider_name: "Provider A" }, { model: "same-model", provider_id: "provider-b", provider_name: "Provider B" }],
-      projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+      projects: [
+        { kind: "project", path: "/work/Usagi", name: "Usagi" },
+        { kind: "workspace" },
+      ],
     };
     const fetchMock = mockJson(options);
     await expect(usagiClient.filterOptions({ key: "custom", from: "2026-10-01", to: "2026-10-11" })).resolves.toEqual(options);
@@ -104,12 +107,12 @@ describe("Usagi Spec04 HTTP client", () => {
         { provider_id: "provider-a", model: "same-model" },
         { provider_id: "provider-a", model: "same-model" },
       ],
-      projects: [{ kind: "unknown" }, { kind: "projectless" }, { kind: "project", path: "/work/Usagi" }],
+      projects: [{ kind: "unknown" }, { kind: "workspace" }, { kind: "projectless" }, { kind: "project", path: "/work/Usagi" }],
     };
     expect(canonicalDashboardFilters(filters)).toEqual({
       agents: ["aider"],
       models: [{ provider_id: "provider-a", model: "same-model" }, { provider_id: "provider-b", model: "same-model" }],
-      projects: [{ kind: "project", path: "/work/Usagi" }, { kind: "projectless" }, { kind: "unknown" }],
+      projects: [{ kind: "project", path: "/work/Usagi" }, { kind: "workspace" }, { kind: "projectless" }, { kind: "unknown" }],
     });
     expect(modelSelectionKey({ provider_id: "provider-a", model: "same-model" })).not.toBe(modelSelectionKey({ provider_id: "provider-b", model: "same-model" }));
     expect(dashboardQueryKey({ key: "today" }, filters)).not.toBe(dashboardQueryKey({ key: "today" }, {
@@ -124,6 +127,7 @@ describe("Usagi Spec04 HTTP client", () => {
     expect(url.searchParams.getAll("agent")).toEqual(["aider"]);
     expect(url.searchParams.getAll("model_at")).toEqual(["provider-a/same-model", "provider-b/same-model"]);
     expect(url.searchParams.get("project_path")).toBe("/work/Usagi");
+    expect(url.searchParams.get("include_workspace")).toBe("1");
     expect(url.searchParams.get("include_projectless")).toBe("1");
     expect(url.searchParams.get("include_unknown_project")).toBe("1");
     expect(url.searchParams.get("from")).toBe("2026-09-01");
@@ -135,19 +139,21 @@ describe("Usagi Spec04 HTTP client", () => {
     await expect(usagiClient.modelDistribution({ key: "7d" }, emptyFilters)).resolves.toEqual({ data_revision: 8, items: [{ model: "gpt-6", usage }] });
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/usage/model-distribution?");
 
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, items: [{ kind: "project", path: "/work/Usagi", name: "Usagi", usage }] }), { status: 200 }));
-    await expect(usagiClient.projectDistribution({ key: "7d" }, emptyFilters)).resolves.toMatchObject({ items: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }] });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data_revision: 8, items: [{ kind: "project", path: "/work/Usagi", name: "Usagi", usage }, { kind: "workspace", usage }] }), { status: 200 }));
+    await expect(usagiClient.projectDistribution({ key: "7d" }, emptyFilters)).resolves.toMatchObject({ items: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }, { kind: "workspace" }] });
     expect(String(fetchMock.mock.calls[1][0])).toContain("/api/usage/projects?");
   });
 
   it("loads SessionListItemView and sends the full ThreadKey for on-demand Detail", async () => {
+    const workspaceThread = { ...thread, project: { kind: "workspace" as const, path: "/private/tmp/claude-501/child" } };
     const listResponse = {
       data_revision: 8,
       summary: { data_revision: 8, usage, session_count: 1, session_median: null, session_p90: null },
-      items: [{ thread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, has_usage_rows: false, last_activity_ms: null, subagent_count: null }],
+      items: [{ thread: workspaceThread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, has_usage_rows: false, last_activity_ms: null, subagent_count: null }],
     };
     const fetchMock = mockJson(listResponse);
     await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).resolves.toEqual(listResponse);
+    expect(listResponse.items[0].thread.project).toEqual({ kind: "workspace", path: "/private/tmp/claude-501/child" });
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/usage/sessions?");
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       ...listResponse,
@@ -159,7 +165,7 @@ describe("Usagi Spec04 HTTP client", () => {
     const child = { ...thread, key: threadKey, type: "subagent" as const, parent_thread_id: "thread-1" };
     const detailResponse = {
       data_revision: 8,
-      thread,
+      thread: workspaceThread,
       self_usage: usage,
       subagent_usage: usage,
       inclusive_usage: usage,

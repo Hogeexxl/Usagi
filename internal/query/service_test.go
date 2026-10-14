@@ -3,6 +3,8 @@ package query
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -81,17 +83,30 @@ func TestOverview(t *testing.T) {
 func TestFilterOptionsListOnlyChoicesInRange(t *testing.T) {
 	day := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
 	db := queryTestDB(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	codexRoot := filepath.Join(home, "Documents", "Codex")
 	insertDatasetSession(t, db, "codex", "s1", "/work/usagi", "", day, day, false)
 	insertDatasetSession(t, db, "codex", "s2", "", "", day, day, false)
+	insertDatasetSession(t, db, "codex", "workspace-1", filepath.Join(codexRoot, "2026-10-10", "same-slug"), "", day, day, false)
+	insertDatasetSession(t, db, "codex", "workspace-2", filepath.Join(codexRoot, "2026-10-11", "another-slug"), "", day, day, false)
+	insertDatasetSession(t, db, "codex", "project-1", "/repo-one/same-name", "", day, day, false)
+	insertDatasetSession(t, db, "codex", "project-2", "/repo-two/same-name", "", day, day, false)
 	rows := []struct {
-		time                 time.Time
-		agent, agentName     string
+		time                          time.Time
+		agent, agentName              string
 		provider, providerName, model string
-		session              string
-		rejected             int
+		session                       string
+		rejected                      int
 	}{
 		{day, "codex", "Codex", "openai", "OpenAI", "gpt-x", "s1", 0},
 		{day, "codex", "", "openai", "", "gpt-x", "s2", 0},
+		{day, "codex", "", "openai", "", "gpt-x", "workspace-1", 0},
+		{day, "codex", "", "openai", "", "gpt-x", "workspace-2", 0},
+		{day, "codex", "", "openai", "", "gpt-x", "project-1", 0},
+		{day, "codex", "", "openai", "", "gpt-x", "project-2", 0},
 		{day, "claude", "", "session-unknown", "Local session", "", "gone", 0},
 		{day, "rejected", "", "p", "", "m", "bad", 1},
 		{day.AddDate(0, 0, -1), "old", "", "old", "", "old", "old", 0},
@@ -112,7 +127,10 @@ func TestFilterOptionsListOnlyChoicesInRange(t *testing.T) {
 			{Model: UnknownModel, ProviderID: "session-unknown", ProviderName: "Local session"},
 		},
 		Projects: []ProjectRef{
+			{Kind: ProjectKindProject, Path: "/repo-one/same-name", Name: "same-name"},
+			{Kind: ProjectKindProject, Path: "/repo-two/same-name", Name: "same-name"},
 			{Kind: ProjectKindProject, Path: "/work/usagi", Name: "usagi"},
+			{Kind: ProjectKindWorkspace},
 			{Kind: ProjectKindProjectless},
 			{Kind: ProjectKindUnknown},
 		},

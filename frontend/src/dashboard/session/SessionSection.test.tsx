@@ -245,6 +245,16 @@ describe("SessionSection v0.2.0", () => {
     ]);
   });
 
+  it("shows the shared workspace label while retaining its original path as a tooltip", () => {
+    const path = "/private/tmp/claude-501/child";
+    const workspaceRow = row(1, { thread: { ...item.thread, project: { kind: "workspace", path } } });
+    const rendered = render(<SessionSection view={view({ rows: [workspaceRow] })} />);
+    const projectCell = tableRow(rendered.container, JSON.stringify(["codex", "session-1", "root-1"])).cells[2];
+
+    expect(projectCell).toHaveTextContent("临时工作区");
+    expect(projectCell.firstElementChild).toHaveAttribute("title", path);
+  });
+
   it("shows non-today activity time above the lower hierarchy date and keeps today time-only", () => {
     const now = Date.UTC(2026, 7, 10, 8, 15);
     const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);

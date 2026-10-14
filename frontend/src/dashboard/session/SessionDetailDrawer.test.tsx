@@ -136,13 +136,28 @@ describe("SessionDetailDrawer Spec04 SessionListItemView", () => {
     );
 
     expect(screen.getByText("Antigravity")).toBeInTheDocument();
-    expect(screen.getByText("未识别项目")).toBeInTheDocument();
+    expect(screen.getByText("未知会话")).toBeInTheDocument();
     const visibleId = screen.getByText("a".repeat(96));
     expect(visibleId).toHaveClass("min-w-0", "break-all");
     fireEvent.click(screen.getByRole("button", { name: "Recent subagent" }));
     const childRegion = screen.getByRole("region", { name: "Recent subagent" });
     expect(childRegion).toHaveTextContent("a".repeat(96));
     expect(childRegion).not.toHaveTextContent("antigravity:");
+  });
+
+  it("shows one workspace label and keeps the original path on the project value", () => {
+    const path = "/private/tmp/claude-501/child";
+    const workspaceThread = thread({ project: { kind: "workspace", path } });
+    const workspaceDetail = { ...detail, thread: workspaceThread };
+    const workspaceRow: SessionListItemDto = { ...row, thread: workspaceThread };
+    render(
+      <SessionDetailDrawer
+        view={view({ detail: workspaceDetail, selected_row: workspaceRow, selected_thread_key_id: threadKeyId(workspaceThread.key) })}
+        timezone={timezone}
+      />,
+    );
+
+    expect(screen.getByText("临时工作区")).toHaveAttribute("title", path);
   });
 
   it("starts accordions collapsed, opens actual child DTOs, and preserves distinct ThreadKeys", () => {

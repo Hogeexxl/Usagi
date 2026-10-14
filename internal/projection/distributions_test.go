@@ -103,6 +103,50 @@ func TestDistribution(t *testing.T) {
 	}
 }
 
+func TestProjectDistributionAggregatesWorkspaces(t *testing.T) {
+	workspaceOne := distributionRow(testTime(9, 0), "codex", "workspace-one", "provider-a", 10, 4,
+		query.ProjectRef{Kind: query.ProjectKindWorkspace, Path: "/tmp/claude-1"}, true, .5)
+	workspaceOne.CacheRead, workspaceOne.CacheWrite, workspaceOne.CacheWrite1h, workspaceOne.Reasoning = 3, 2, 1, 2
+	workspaceTwo := distributionRow(testTime(9, 1), "codex", "workspace-two", "provider-a", 20, 5,
+		query.ProjectRef{Kind: query.ProjectKindWorkspace, Path: "/tmp/claude-2"}, true, .75)
+	workspaceTwo.CacheRead, workspaceTwo.CacheWrite, workspaceTwo.CacheWrite1h, workspaceTwo.Reasoning = 4, 1, 2, 3
+	projectOne := distributionRow(testTime(9, 2), "codex", "project-one", "provider-a", 5, 5,
+		query.ProjectRef{Kind: query.ProjectKindProject, Path: "/repo-one/same-name", Name: "same-name"}, true, .4)
+	projectTwo := distributionRow(testTime(9, 3), "codex", "project-two", "provider-a", 4, 6,
+		query.ProjectRef{Kind: query.ProjectKindProject, Path: "/repo-two/same-name", Name: "same-name"}, true, .3)
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{Rows: []query.UsageRow{workspaceOne, workspaceTwo, projectOne, projectTwo}}})
+
+	view, err := service.ProjectDistribution(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("ProjectDistribution() error = %v", err)
+	}
+	if len(view.Items) != 3 {
+		t.Fatalf("ProjectDistribution() returned %d groups, want one workspace and two same-named projects: %+v", len(view.Items), view.Items)
+	}
+	projects := make(map[string]ProjectDistributionItem)
+	var workspace ProjectDistributionItem
+	for _, item := range view.Items {
+		if item.Project.Kind == query.ProjectKindWorkspace {
+			workspace = item
+		} else {
+			projects[item.Project.Path] = item
+		}
+	}
+	if workspace.Project != (query.ProjectRef{Kind: query.ProjectKindWorkspace}) {
+		t.Fatalf("workspace aggregate retained a member path or name: %+v", workspace.Project)
+	}
+	wantWorkspaceUsage := usageFromTotals(query.UsageTotals{
+		Calls: 2, Input: 30, Output: 9, CacheRead: 7, CacheWrite: 3, CacheWrite1h: 3,
+		Reasoning: 5, Cost: 1.25,
+	})
+	if !reflect.DeepEqual(workspace.Usage, wantWorkspaceUsage) {
+		t.Fatalf("workspace aggregate usage = %+v, want %+v", workspace.Usage, wantWorkspaceUsage)
+	}
+	if projects["/repo-one/same-name"].Project.Name != "same-name" || projects["/repo-two/same-name"].Project.Name != "same-name" {
+		t.Fatalf("same-named project paths were merged: %+v", projects)
+	}
+}
+
 func distributionRow(at time.Time, agent, model, provider string, input, output int64, project query.ProjectRef, priced bool, cost float64) query.UsageRow {
 	return query.UsageRow{Time: at, Agent: agent, Model: model, Provider: provider, Input: input, Output: output,
 		Project: project, Priced: priced, Cost: cost, ResolvedSession: query.SessionRef{Agent: agent, ID: "session", Matched: project.Kind != query.ProjectKindUnknown}}

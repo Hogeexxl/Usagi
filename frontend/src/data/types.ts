@@ -38,11 +38,13 @@ export type SummaryResponse = {
 
 export type ProjectFilterOption =
   | { kind: "project"; path: string; name: string }
+  | { kind: "workspace" }
   | { kind: "projectless" }
   | { kind: "unknown" };
 
 export type ProjectSelection =
   | { kind: "project"; path: string }
+  | { kind: "workspace" }
   | { kind: "projectless" }
   | { kind: "unknown" };
 
@@ -87,6 +89,7 @@ export type ModelDistributionResponse = {
 
 export type ProjectDistributionItemDto =
   | { kind: "project"; path: string; name: string; usage: UsageDto }
+  | { kind: "workspace"; usage: UsageDto }
   | { kind: "projectless" | "unknown"; usage: UsageDto };
 
 export type ProjectDistributionResponse = {
@@ -124,6 +127,7 @@ export type SessionModelEffortDto = {
 
 export type SessionProjectDto =
   | { kind: "project"; path: string; name: string }
+  | { kind: "workspace"; path: string }
   | { kind: "projectless" | "unknown"; path?: string; name?: string };
 
 export type SessionThreadDto = {

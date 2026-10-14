@@ -46,10 +46,17 @@ func (s *Service) ProjectDistribution(ctx context.Context, q ScopeQuery) (Projec
 	groups := make(map[projectKey]*usageAccumulator)
 	projects := make(map[projectKey]query.ProjectRef)
 	for _, row := range dataset.Rows {
-		key := projectKey{kind: row.Project.Kind, path: row.Project.Path}
+		key := projectKey{kind: row.Project.Kind}
+		if row.Project.Kind == query.ProjectKindProject {
+			key.path = row.Project.Path
+		}
 		if groups[key] == nil {
 			groups[key] = &usageAccumulator{}
-			projects[key] = row.Project
+			if row.Project.Kind == query.ProjectKindProject {
+				projects[key] = row.Project
+			} else {
+				projects[key] = query.ProjectRef{Kind: row.Project.Kind}
+			}
 		}
 		groups[key].AddRow(row)
 	}

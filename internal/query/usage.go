@@ -23,7 +23,7 @@ func normalizeUsageInput(r DateRange, filter UsageFilter) (UsageFilter, error) {
 			if project.Path == "" {
 				return UsageFilter{}, ErrInvalidFilter
 			}
-		case ProjectKindProjectless, ProjectKindUnknown:
+		case ProjectKindWorkspace, ProjectKindProjectless, ProjectKindUnknown:
 			if project.Path != "" {
 				return UsageFilter{}, ErrInvalidFilter
 			}

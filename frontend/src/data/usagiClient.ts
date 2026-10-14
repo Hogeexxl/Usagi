@@ -157,6 +157,7 @@ function parseProjectOption(value: unknown): ProjectFilterOption {
   const record = requiredRecord(value);
   const kind = requiredString(record, "kind");
   if (kind === "project") return { kind, path: requiredString(record, "path"), name: requiredString(record, "name") };
+  if (kind === "workspace") return { kind };
   if (kind === "projectless" || kind === "unknown") return { kind };
   throw new UsagiClientError("HTTP_ERROR", 200);
 }
@@ -213,6 +214,7 @@ function parseProjectDistribution(value: unknown): ProjectDistributionResponse {
       const kind = requiredString(item, "kind");
       const usage = parseUsage(item.usage);
       if (kind === "project") return { kind, path: requiredString(item, "path"), name: requiredString(item, "name"), usage };
+      if (kind === "workspace") return { kind, usage };
       if (kind === "projectless" || kind === "unknown") return { kind, usage };
       throw new UsagiClientError("HTTP_ERROR", 200);
     }),
@@ -232,6 +234,9 @@ function parseProject(value: unknown): SessionThreadDto["project"] {
   const record = requiredRecord(value);
   const kind = requiredString(record, "kind");
   if (kind === "project") return { kind, path: requiredString(record, "path"), name: requiredString(record, "name") };
+  if (kind === "workspace") {
+    return { kind, path: requiredString(record, "path") };
+  }
   if (kind === "projectless" || kind === "unknown") return { kind };
   throw new UsagiClientError("HTTP_ERROR", 200);
 }
@@ -455,16 +460,19 @@ function canonicalProjectSelections(projects: readonly ProjectSelection[]): Proj
   const paths = new Set<string>();
   let projectless = false;
   let unknown = false;
+  let workspace = false;
   for (const project of projects) {
     if (project.kind === "project") {
       if (!project.path || !safeText(project.path)) throw new UsagiClientError("INVALID_FILTER", 0);
       paths.add(project.path);
-    } else if (project.kind === "projectless") projectless = true;
+    } else if (project.kind === "workspace") workspace = true;
+    else if (project.kind === "projectless") projectless = true;
     else if (project.kind === "unknown") unknown = true;
     else throw new UsagiClientError("INVALID_FILTER", 0);
   }
   return [
     ...[...paths].sort().map((path) => ({ kind: "project" as const, path })),
+    ...(workspace ? [{ kind: "workspace" as const }] : []),
     ...(projectless ? [{ kind: "projectless" as const }] : []),
     ...(unknown ? [{ kind: "unknown" as const }] : []),
   ];
@@ -508,6 +516,7 @@ function filterParams(range: DashboardRange, filters: DashboardFilters, includeA
   for (const model of canonical.models) params.append("model_at", `${model.provider_id}/${model.model}`);
   for (const project of canonical.projects) {
     if (project.kind === "project") params.append("project_path", project.path);
+    if (project.kind === "workspace") params.append("include_workspace", "1");
     if (project.kind === "projectless") params.append("include_projectless", "1");
     if (project.kind === "unknown") params.append("include_unknown_project", "1");
   }
