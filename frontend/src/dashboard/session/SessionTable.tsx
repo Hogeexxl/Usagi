@@ -69,7 +69,14 @@ export function SessionTable({
       sortable: true,
       cell: (item) => {
         const value = formatSessionTime(item.last_activity_ms, timezone);
-        return <span className="block truncate" title={value.title}>{value.text}</span>;
+        const separator = value.text.indexOf(" ");
+        if (separator === -1) return <span className="block truncate" title={value.title}>{value.text}</span>;
+        return (
+          <div className="flex min-w-0 flex-col leading-5" title={value.title}>
+            <span className="block min-w-0 truncate whitespace-nowrap">{value.text.slice(separator + 1)}</span>
+            <span className="block min-w-0 truncate whitespace-nowrap text-xs leading-4 text-muted-foreground">{value.text.slice(0, separator)}</span>
+          </div>
+        );
       },
     },
     {

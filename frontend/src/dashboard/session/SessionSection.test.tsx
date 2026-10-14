@@ -245,6 +245,33 @@ describe("SessionSection v0.2.0", () => {
     ]);
   });
 
+  it("shows non-today activity time above the lower hierarchy date and keeps today time-only", () => {
+    const now = Date.UTC(2026, 7, 10, 8, 15);
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const rendered = render(<SessionSection view={view()} />);
+      const currentActivity = tableRow(rendered.container, JSON.stringify(["codex", "session-1", "root-1"])).cells[0];
+      expect(currentActivity).toHaveTextContent("16:09");
+      expect(currentActivity.firstElementChild).toHaveClass("block", "truncate");
+      expect(currentActivity.firstElementChild).toHaveAttribute("title", "2026-08-10 16:09:00");
+
+      rendered.rerender(
+        <SessionSection
+          view={view({ rows: [row(1, { last_activity_ms: Date.UTC(2025, 11, 1, 7, 8, 3) })] })}
+        />,
+      );
+      const datedActivity = tableRow(rendered.container, JSON.stringify(["codex", "session-1", "root-1"])).cells[0];
+      const lines = datedActivity.firstElementChild as HTMLElement;
+      expect(lines).toHaveClass("flex", "flex-col", "leading-5");
+      expect(lines).toHaveAttribute("title", "2025-12-01 15:08:03");
+      expect(Array.from(lines.children, (line) => line.textContent)).toEqual(["15:08", "2025-12-01"]);
+      expect(lines.children[0]).toHaveClass("block", "min-w-0", "truncate", "whitespace-nowrap");
+      expect(lines.children[1]).toHaveClass("text-xs", "leading-4", "text-muted-foreground");
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it("T17 includes mapped Agent names in the combined session details", () => {
     const mixedRows: SessionListItemDto[] = [
       row(1, { thread: { ...row(1).thread, key: { ...row(1).thread.key, agent: "codex" } } }),

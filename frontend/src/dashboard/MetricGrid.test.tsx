@@ -195,6 +195,41 @@ describe("MetricGrid Spec05", () => {
     }
   });
 
+  it("hides zero token values from both card legends while preserving their bars", () => {
+    const partialUsage = { ...usage, input: 0, cache_write: 0 };
+    const rendered = render(<MetricGridFixture usage={partialUsage} quota={quota} />);
+
+    const totalCard = cardByTitle("总 Token");
+    expect(within(totalCard).queryByText("输入")).not.toBeInTheDocument();
+    expect(within(totalCard).queryByText("缓存写")).not.toBeInTheDocument();
+    expect(within(totalCard).getByText("缓存读")).toBeInTheDocument();
+    expect(within(totalCard).getByText("输出")).toBeInTheDocument();
+    const totalBar = within(totalCard).getByLabelText(tokenBarLabel);
+    expect(totalBar.children).toHaveLength(4);
+    expect(segmentByClass(totalBar as HTMLElement, "bg-[#68c0e8]")).toHaveStyle({ width: "0%" });
+
+    const cacheCard = cardByTitle("缓存命中");
+    expect(within(cacheCard).queryByText("输入")).not.toBeInTheDocument();
+    expect(within(cacheCard).queryByText("缓存写")).not.toBeInTheDocument();
+    expect(within(cacheCard).getByText("缓存读")).toBeInTheDocument();
+    const cacheBar = within(cacheCard).getByLabelText("缓存读、输入与缓存写 Token 分布");
+    expect(cacheBar.children).toHaveLength(3);
+    expect(Array.from(cacheBar.children, (segment) => (segment as HTMLElement).style.width)).toEqual(["100%", "0%", "0%"]);
+
+    rendered.rerender(<MetricGridFixture usage={{ ...partialUsage, cache_read: 0, output: 0 }} quota={quota} />);
+    const zeroTotalCard = cardByTitle("总 Token");
+    expect(within(zeroTotalCard).queryByRole("button")).not.toBeInTheDocument();
+    const zeroTotalBar = within(zeroTotalCard).getByLabelText(tokenBarLabel);
+    expect(zeroTotalBar.children).toHaveLength(4);
+    expect(Array.from(zeroTotalBar.children, (segment) => (segment as HTMLElement).style.width)).toEqual(["0%", "0%", "0%", "0%"]);
+
+    const zeroCacheCard = cardByTitle("缓存命中");
+    expect(within(zeroCacheCard).queryByRole("button")).not.toBeInTheDocument();
+    const zeroCacheBar = within(zeroCacheCard).getByLabelText("缓存读、输入与缓存写 Token 分布");
+    expect(zeroCacheBar.children).toHaveLength(3);
+    expect(Array.from(zeroCacheBar.children, (segment) => (segment as HTMLElement).style.width)).toEqual(["0%", "0%", "0%"]);
+  });
+
   it("keeps the cache hit headline and normalizes cache read, input, and cache write", () => {
     render(<CacheHitMetric usage={usage} glare={false} />);
     const card = screen.getByText("缓存命中").closest(".h-36") as HTMLElement;

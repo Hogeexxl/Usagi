@@ -113,18 +113,18 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
         />
       </div>
       <div className="mt-auto flex min-w-0 items-center gap-1 whitespace-nowrap">
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
+        {input !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#68c0e8]" /><span className="inline-flex h-4 items-center">输入</span><CompactTicker value={input} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_read")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_read")} onBlur={() => setFocus(null)}>
+        </button> : null}
+        {cacheRead !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_read")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_read")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be506e]" /><span className="inline-flex h-4 items-center">缓存读</span><CompactTicker value={cacheRead} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
+        </button> : null}
+        {cacheWrite !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
           <Dot color={chartSeriesColor(3)} /><span className="inline-flex h-4 items-center">缓存写</span><CompactTicker value={cacheWrite} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("output")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("output")} onBlur={() => setFocus(null)}>
+        </button> : null}
+        {output !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("output")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("output")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be753e]" /><span className="inline-flex h-4 items-center">输出</span><CompactTicker value={output} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
+        </button> : null}
       </div>
     </TiltCard>
   );
@@ -156,15 +156,15 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
         <motion.div className="absolute inset-y-0" style={{ left: `${cachedPct + inputPct}%`, width: `${cacheWritePct}%`, backgroundColor: chartSeriesColor(3) }} animate={{ opacity: focus === null || focus === "cache_write" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
       </motion.div>
       <div className="mt-auto flex items-center gap-2 whitespace-nowrap">
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cached")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cached")} onBlur={() => setFocus(null)}>
+        {cached !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cached")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cached")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be506e]" /><span className="inline-flex h-4 items-center">缓存读</span><CompactTicker value={cached} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
+        </button> : null}
+        {input !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#4057a5]" /><span className="inline-flex h-4 items-center">输入</span><CompactTicker value={input} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
-        <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
+        </button> : null}
+        {cacheWrite !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cache_write")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cache_write")} onBlur={() => setFocus(null)}>
           <Dot color={chartSeriesColor(3)} /><span className="inline-flex h-4 items-center">缓存写</span><CompactTicker value={cacheWrite} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
-        </button>
+        </button> : null}
       </div>
     </TiltCard>
   );
