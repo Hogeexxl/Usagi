@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { UsagiClient } from "../data/usagiClient";
 import { createRevisionFeed } from "../data/revisionFeed";
-import type { DashboardFilters, DashboardRange, FilterOptionsResponse, RuntimeStatusResponse, SessionListItemDto, SessionListResponse, UsageDto } from "../data/types";
+import type { DashboardFilters, DashboardRange, FilterOptionsResponse, RequestMetricsDto, RuntimeStatusResponse, SessionListItemDto, SessionListResponse, UsageDto } from "../data/types";
 import { UsagiClientError } from "../data/types";
 import { useDashboardController } from "./useDashboardController";
 
@@ -39,9 +39,20 @@ const zeroUsage = (): UsageDto => ({
   cost: 0,
 });
 
+const requestMetrics: RequestMetricsDto = {
+  calls: 4,
+  errors: 1,
+  retried: 2,
+  output_speed: 60,
+  speed_samples: 3,
+  mean_ttft_seconds: 1.2,
+  ttft_samples: 2,
+};
+
 const summary = (revision = 1, input = 10, sessionCount = 3) => ({
   data_revision: revision,
   usage: usage(input),
+  request_metrics: requestMetrics,
   session_count: sessionCount,
   session_median: sessionCount === 0 ? null : input,
   session_p90: sessionCount === 0 ? null : input * 2,
@@ -135,6 +146,7 @@ describe("useDashboardController sessions snapshot", () => {
 
     await waitFor(() => expect(result.current.load_state).toBe("ready"));
     expect(result.current.metrics).toEqual(usage());
+    expect(result.current.request_metrics).toEqual(requestMetrics);
     expect(result.current.session_count).toBe(3);
     expect(result.current.session_median).toBe(10);
     expect(result.current.session_p90).toBe(20);

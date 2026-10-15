@@ -42,6 +42,7 @@ describe("ToolUsageCard Spec05", () => {
 
     expect(surface).toHaveClass("h-[264px]");
     expect(within(surface).getByRole("heading", { name: "Tool 使用分布" })).toBeInTheDocument();
+    expect(surface.querySelector("header")?.nextElementSibling).toHaveClass("mt-4");
     expect(within(surface).getAllByRole("tab").map((tab) => tab.textContent?.trim())).toEqual(["今天", "7 天", "30 天"]);
     expect(within(surface).queryByRole("tab", { name: "费用" })).not.toBeInTheDocument();
     expect(rows).toHaveLength(9);
@@ -70,7 +71,12 @@ describe("ToolUsageCard Spec05", () => {
   it("keeps all legend rows and the error message visible when refreshing fails", () => {
     render(<ToolUsageCard view={view({ loading: false, error: true })} />);
     const surface = card();
-    expect(within(surface).getByRole("status")).toHaveTextContent("工具使用加载失败");
+    const status = within(surface).getByRole("status");
+    expect(status).toHaveTextContent("工具使用加载失败");
+    expect(status.closest("header")).toBeInTheDocument();
+    expect(status).toHaveClass("truncate");
+    expect(status).toHaveAttribute("title", "工具使用加载失败");
+    expect(surface.querySelector("header")?.nextElementSibling).toHaveClass("mt-4");
     expect(legends(surface)).toHaveLength(9);
     expect(within(surface).getByRole("button", { name: "其他，25 次，25.0%" })).toBeInTheDocument();
   });

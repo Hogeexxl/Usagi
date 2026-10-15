@@ -11,6 +11,7 @@ import type {
   SessionListItemDto,
   SessionListResponse,
   SummaryResponse,
+  RequestMetricsDto,
   UsageDto,
 } from "../data/types";
 import { UsagiClientError } from "../data/types";
@@ -68,7 +69,16 @@ const zeroUsage: UsageDto = {
   unpriced: 0,
 };
 
-const summary: SummaryResponse = { data_revision: 1, usage, session_count: 1, session_median: 14, session_p90: 14 };
+const requestMetrics: RequestMetricsDto = {
+  calls: 20,
+  errors: 2,
+  retried: 4,
+  output_speed: 62.4,
+  speed_samples: 3,
+  mean_ttft_seconds: 7.6,
+  ttft_samples: 2,
+};
+const summary: SummaryResponse = { data_revision: 1, usage, request_metrics: requestMetrics, session_count: 1, session_median: 14, session_p90: 14 };
 const row: SessionListItemDto = {
   thread: {
     key: { agent: "claude", session_id: "session-1", thread_id: "thread-1" },
@@ -140,6 +150,51 @@ function deferred<T>() {
 }
 
 describe("DashboardPage Spec05 shared sessions snapshot", () => {
+  it("defaults to sessions and preserves date, filters, and dashboard content when toggled", async () => {
+    const client = clientWith({
+      filterOptions: vi.fn(async () => ({
+        data_revision: 1,
+        agents: [{ agent: "claude", display_name: "Claude Code" }],
+        models: [],
+        projects: [],
+      })),
+    });
+    renderDashboard(client);
+
+    await waitFor(() => expect(screen.getByText("Session Alpha")).toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "会话" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("会话数")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "账户额度" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "7d" }));
+    await waitFor(() => expect(client.getSessions).toHaveBeenLastCalledWith(expect.objectContaining({ range: { key: "7d" } })));
+    const dateAndFilterCallCount = vi.mocked(client.getSessions).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent筛选，全部" }));
+    const agentMenu = await screen.findByRole("dialog");
+    fireEvent.click(within(agentMenu).getByRole("checkbox", { name: "Claude Code" }));
+    await waitFor(() => expect(client.getSessions).toHaveBeenLastCalledWith(expect.objectContaining({
+      range: { key: "7d" },
+      filters: { ...emptyFilters, agents: ["claude"] },
+    })));
+    const filteredCallCount = vi.mocked(client.getSessions).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("tab", { name: "请求" }));
+    expect(screen.getByRole("tab", { name: "请求" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("请求数")).toBeInTheDocument();
+    expect(screen.getByText("输出速度")).toBeInTheDocument();
+    expect(screen.getByTitle("20")).toHaveTextContent("20");
+    expect(screen.queryByRole("group", { name: "账户额度" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Agent筛选，已选1项" })).toBeInTheDocument();
+    expect(screen.getByText("Session Alpha")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Tool 使用分布" })).toBeInTheDocument();
+    expect(vi.mocked(client.getSessions).mock.calls.length).toBe(filteredCallCount);
+    expect(vi.mocked(client.getSessions).mock.calls[dateAndFilterCallCount][0]).toMatchObject({
+      range: { key: "7d" },
+      filters: { ...emptyFilters, agents: ["claude"] },
+    });
+  });
+
   it("keeps KPI and list skeletons until one sessions response replaces them together", async () => {
     const pending = deferred<SessionListResponse>();
     const client = clientWith({ getSessions: vi.fn(() => pending.promise) });

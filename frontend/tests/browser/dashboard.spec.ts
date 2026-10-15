@@ -38,9 +38,19 @@ function summary(url: string, kind: UsageKind = "base") {
   const hasModel = params.getAll("model_at").length > 0;
   const hasProject = params.getAll("project_path").length > 0 || params.has("include_projectless") || params.has("include_unknown_project");
   const selectedKind: UsageKind = hasModel && hasProject ? "filtered" : hasModel || hasProject ? "model" : kind;
+  const selectedUsage = usage(selectedKind);
   return {
     data_revision: REVISION,
-    usage: usage(selectedKind),
+    usage: selectedUsage,
+    request_metrics: {
+      calls: selectedUsage.calls + 10,
+      errors: selectedUsage.errors + 1,
+      retried: selectedUsage.retried + 2,
+      output_speed: selectedUsage.output_speed,
+      speed_samples: selectedUsage.speed_samples,
+      mean_ttft_seconds: selectedUsage.output_speed === null ? null : 7.6,
+      ttft_samples: selectedUsage.output_speed === null ? 0 : 4,
+    },
     session_count: selectedKind === "filtered" ? 1 : 2,
     session_median: 120,
     session_p90: 180,
@@ -433,6 +443,53 @@ test("C1 desktop layout keeps the five KPIs, session table, and two chart cards 
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1512);
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(1512);
   expect(await illegalStorageWrites(page)).toBe(0);
+});
+
+test("KPI view toggle replaces the trailing cards and preserves date, filters, and page content", async ({ page }) => {
+  const sessionRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/usage/sessions") sessionRequests.push(request.url());
+  });
+  await routeStableDashboardData(page);
+  await page.goto("/");
+  await waitForDashboard(page);
+
+  await expect(page.getByRole("tab", { name: "会话" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("会话数")).toBeVisible();
+  await expect(page.getByRole("group", { name: "账户额度", exact: true })).toBeVisible();
+  await expect(page.getByText("First session")).toBeVisible();
+
+  await page.getByRole("tab", { name: "7d" }).click();
+  await expect(page.getByRole("tab", { name: "7d" })).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => sessionRequests.filter((url) => new URL(url).searchParams.get("range") === "7d").length).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Agent筛选，全部" }).click();
+  await page.getByRole("checkbox", { name: "Codex" }).click();
+  await expect(page.getByRole("button", { name: "Agent筛选，已选1项" })).toBeVisible();
+  await expect.poll(() => sessionRequests.filter((url) => new URL(url).searchParams.get("agent") === "codex").length).toBeGreaterThan(0);
+  const sessionRequestCount = sessionRequests.length;
+
+  const grid = page.getByLabel("KPI 指标");
+  await page.getByRole("tab", { name: "请求" }).click();
+  await expect(page.getByRole("tab", { name: "请求" })).toHaveAttribute("aria-selected", "true");
+  await expect(grid.locator(":scope > *")).toHaveCount(5);
+  await expect(grid.getByText("总 Token")).toBeVisible();
+  await expect(grid.getByText("缓存命中")).toBeVisible();
+  await expect(grid.getByText("等价费用")).toBeVisible();
+  await expect(grid.getByText("请求数")).toBeVisible();
+  await expect(grid.getByText("输出速度")).toBeVisible();
+  await expect(grid.getByTitle("16")).toBeVisible();
+  await expect(grid.getByText("2 次计时")).toBeVisible();
+  await expect(grid.getByText("首字平均 7.6s · 4 次计时")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Agent筛选，已选1项" })).toBeVisible();
+  await expect(page.locator("tr[data-session-thread-key-id]")).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "Tool 使用分布" })).toBeVisible();
+  expect(sessionRequests).toHaveLength(sessionRequestCount);
+
+  await page.getByRole("tab", { name: "会话" }).click();
+  await expect(page.getByText("会话数")).toBeVisible();
+  await expect(page.getByRole("group", { name: "账户额度", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "7d" })).toHaveAttribute("aria-selected", "true");
+  expect(sessionRequests).toHaveLength(sessionRequestCount);
 });
 
 test("C2 filters, merged charts, independent Tool range, sorting, and details remain interactive", async ({ page }) => {

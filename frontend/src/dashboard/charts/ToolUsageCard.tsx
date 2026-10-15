@@ -58,15 +58,17 @@ export function ToolUsageCard({ view }: { view: ToolUsageControllerView }) {
 
   return (
     <ChartSurface className="h-[264px]">
-      <header className="flex items-center justify-between gap-4">
-        <h2 className="m-0 text-sm font-medium text-foreground">Tool 使用分布</h2>
-        <Tabs value={view.range} onValueChange={(value) => view.select_range(value as ToolUsageRange)} variant="pill">
+      <header className="flex min-w-0 items-center justify-between gap-1">
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          <h2 className="m-0 shrink-0 whitespace-nowrap text-sm font-medium text-foreground">Tool 使用分布</h2>
+          {view.error ? <span className="min-w-0 truncate text-xs text-destructive" role="status" title="工具使用加载失败">工具使用加载失败</span> : null}
+        </div>
+        <Tabs className="shrink-0" value={view.range} onValueChange={(value) => view.select_range(value as ToolUsageRange)} variant="pill">
           <TabsList>
             {RANGE_LABELS.map((range) => <TabsTrigger key={range.value} value={range.value}>{range.label}</TabsTrigger>)}
           </TabsList>
         </Tabs>
       </header>
-      {view.error ? <div className="mt-1 text-xs text-destructive" role="status">工具使用加载失败</div> : null}
       <div className="mt-4 grid min-w-0 grid-cols-[140px_minmax(0,1fr)] items-start gap-8">
         <div className="relative h-[140px] w-[140px]">
           <svg className="h-[140px] w-[140px] -rotate-90" width="140" height="140" viewBox="0 0 140 140" role="img" aria-label="Tool 调用分布">

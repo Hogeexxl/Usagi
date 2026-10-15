@@ -303,7 +303,8 @@ func readDatasetRequests(ctx context.Context, tx *sql.Tx, r DateRange, location 
 	rows, err := tx.QueryContext(ctx, `SELECT t_ns, agent, agent_name, provider, provider_name,
 		model, requested, served, effort, kind, session, session_role, compaction, native_session, subagent, parent_agent,
 		source, route_id, rid, response_id, status, rejected, error, tries, input, output,
-		cache_read, cache_write, cache_write_1h, reasoning, ms, ttft_ms, first_text_ms, flow_ms,
+		cache_read, cache_write, cache_write_1h, reasoning, ms, ttft_ms, first_text_ms,
+		first_reasoning_ms, flow_ms, reasoning_hidden, handed_on,
 		magpie_cost, magpie_priced FROM requests
 		WHERE local_day >= ? AND local_day <= ? ORDER BY t_ns, id`, r.From, r.To)
 	if err != nil {
@@ -314,7 +315,7 @@ func readDatasetRequests(ctx context.Context, tx *sql.Tx, r DateRange, location 
 	for rows.Next() {
 		var request magpie.UsageRequest
 		var stamp int64
-		var rejected, priced int
+		var rejected, priced, reasoningHidden, handedOn int
 		var compaction sql.NullInt64
 		if err := rows.Scan(&stamp, &request.Agent, &request.AgentName, &request.Provider, &request.ProviderName,
 			&request.Model, &request.Requested, &request.Served, &request.Effort, &request.Kind,
@@ -322,12 +323,15 @@ func readDatasetRequests(ctx context.Context, tx *sql.Tx, r DateRange, location 
 			&request.Source, &request.RouteID, &request.RID, &request.ResponseID, &request.Status,
 			&rejected, &request.Error, &request.Tries, &request.Input, &request.Output, &request.CacheRead,
 			&request.CacheWrite, &request.CacheWrite1h, &request.Reasoning, &request.Millis, &request.TTFTMs,
-			&request.FirstTextMs, &request.FlowMs, &request.Cost, &priced); err != nil {
+			&request.FirstTextMs, &request.FirstReasoningMs, &request.FlowMs, &reasoningHidden, &handedOn,
+			&request.Cost, &priced); err != nil {
 			return nil, fmt.Errorf("query: scan session dataset request: %w", err)
 		}
 		request.Time = time.Unix(0, stamp).In(location)
 		request.Rejected = rejected != 0
 		request.Priced = priced != 0
+		request.ReasoningHidden = reasoningHidden != 0
+		request.HandedOn = handedOn != 0
 		if compaction.Valid {
 			value := compaction.Int64 != 0
 			request.Compaction = &value
@@ -406,7 +410,9 @@ func usageRowOf(request magpie.UsageRequest, agent, id string, project ProjectRe
 		ParentAgent: request.ParentAgent, Kind: request.Kind, Origin: request.Source,
 		Status: request.Status, Error: request.Error, ResolvedSession: SessionRef{Agent: agent, ID: id, Matched: matched},
 		Project: project, Tries: request.Tries, Millis: request.Millis, TTFTMs: request.TTFTMs,
-		FirstTextMs: request.FirstTextMs, FlowMs: request.FlowMs, Input: int64(request.Input),
+		FirstTextMs: request.FirstTextMs, FirstReasoningMs: request.FirstReasoningMs,
+		FlowMs: request.FlowMs, ReasoningHidden: request.ReasoningHidden, HandedOn: request.HandedOn,
+		Input:  int64(request.Input),
 		Output: int64(request.Output), CacheRead: int64(request.CacheRead), CacheWrite: int64(request.CacheWrite),
 		CacheWrite1h: int64(request.CacheWrite1h), Reasoning: int64(request.Reasoning),
 		Cost: request.Cost, Priced: request.Priced,

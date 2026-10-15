@@ -1,10 +1,11 @@
-import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Moon, RefreshCw, Sun } from "lucide-react";
 
 import { createRevisionFeed, type RevisionFeed } from "../data/revisionFeed";
 import type { ServiceClient } from "../data/serviceClient";
 import { ActionSwapIcon } from "../ui/beui/action-swap";
 import { Button } from "../ui/beui/button";
+import { Tabs, TabsList, TabsTrigger } from "../ui/beui/tabs";
 import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { ChartSection } from "./charts/ChartSection";
 import { useDashboardChartsController } from "./charts/useDashboardChartsController";
@@ -32,6 +33,7 @@ function loadErrorMessage(loadState: string): string | null {
 type DashboardPageOptions = DashboardControllerOptions & { serviceClient?: ServiceClient };
 
 export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
+  const [metricView, setMetricView] = useState<"session" | "request">("session");
   const feedRef = useRef<RevisionFeed | null>(null);
   if (!feedRef.current) {
     feedRef.current = createRevisionFeed({
@@ -134,6 +136,14 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 onClear={view.clear_filters}
                 onRetryOptions={view.retry_filter_options}
               />
+              <div className="ml-auto shrink-0">
+                <Tabs value={metricView} onValueChange={(value) => setMetricView(value as "session" | "request")} variant="pill">
+                  <TabsList>
+                    <TabsTrigger value="session">会话</TabsTrigger>
+                    <TabsTrigger value="request">请求</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </div>
             </div>
             {loadError ? (
               <div className="mt-3 flex items-center gap-2 text-xs text-destructive" role="alert" aria-live="polite">
@@ -146,6 +156,8 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           <section className="metrics-section" aria-label="关键指标" aria-busy={loading}>
             <MetricGrid
               usage={view.metrics}
+              requestMetrics={view.request_metrics}
+              displayMode={metricView}
               sessionCount={view.session_count}
               sessionMedian={view.session_median}
               sessionP90={view.session_p90}

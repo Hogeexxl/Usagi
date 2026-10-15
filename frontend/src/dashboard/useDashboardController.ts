@@ -25,6 +25,7 @@ export type DashboardViewModel = {
   range: DashboardRange;
   filters: DashboardFilters;
   metrics: SummaryResponse["usage"] | null;
+  request_metrics: SummaryResponse["request_metrics"] | null;
   session_count: number;
   session_median: number | null;
   session_p90: number | null;
@@ -386,6 +387,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     range: state.range,
     filters: state.filters,
     metrics: current?.usage ?? null,
+    request_metrics: current?.request_metrics ?? null,
     session_count: current?.session_count ?? 0,
     session_median: current?.session_median ?? null,
     session_p90: current?.session_p90 ?? null,

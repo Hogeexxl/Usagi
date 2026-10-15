@@ -31,7 +31,18 @@ type UsageView struct {
 	DecodeN      int64
 	// OutputSpeed is tokens per second over the requests whose speed Magpie can
 	// measure; nil when none can be.
-	OutputSpeed *float64
+	OutputSpeed    *float64
+	requestMetrics requestMetricsTotals
+}
+
+type RequestMetricsView struct {
+	Calls           int64
+	Errors          int64
+	Retried         int64
+	OutputSpeed     *float64
+	SpeedSamples    int64
+	MeanTTFTSeconds *float64
+	TTFTSamples     int64
 }
 
 type ModelEffortUsageView struct {
@@ -96,6 +107,7 @@ type SessionDetailView struct {
 
 type SummaryView struct {
 	Usage                    UsageView
+	RequestMetrics           RequestMetricsView
 	RootSessionCount         int64
 	RootUnpricedSessionCount int64
 	SessionMedian            *int64

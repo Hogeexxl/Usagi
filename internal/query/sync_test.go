@@ -1071,8 +1071,8 @@ func TestSyncCompactionTriStateRoundTrip(t *testing.T) {
 	day := now.Format(time.DateOnly)
 	trueValue, falseValue := true, false
 	rows := []magpie.UsageRequest{
-		{Time: now, Agent: "codex", Model: "gpt-5", Compaction: &trueValue},
-		{Time: now.Add(time.Second), Agent: "codex", Model: "gpt-5", Compaction: &falseValue},
+		{Time: now, Agent: "codex", Model: "gpt-5", Compaction: &trueValue, FirstReasoningMs: 3000, ReasoningHidden: true, HandedOn: true},
+		{Time: now.Add(time.Second), Agent: "codex", Model: "gpt-5", Compaction: &falseValue, FirstReasoningMs: 4000},
 		{Time: now.Add(2 * time.Second), Agent: "codex", Model: "gpt-5"},
 	}
 	db, _ := openSyncTestDB(t)
@@ -1104,6 +1104,11 @@ func TestSyncCompactionTriStateRoundTrip(t *testing.T) {
 		if !sameQueryBoolPointer(row.Compaction, want[index]) {
 			t.Fatalf("usage row %d compaction = %v, want %v", index, row.Compaction, want[index])
 		}
+		if row.FirstReasoningMs != rows[index].FirstReasoningMs || row.ReasoningHidden != rows[index].ReasoningHidden || row.HandedOn != rows[index].HandedOn {
+			t.Fatalf("usage row %d request metric fields = reasoning start %d, hidden %t, handed on %t; want %d/%t/%t",
+				index, row.FirstReasoningMs, row.ReasoningHidden, row.HandedOn,
+				rows[index].FirstReasoningMs, rows[index].ReasoningHidden, rows[index].HandedOn)
+		}
 	}
 }
 
@@ -1128,12 +1133,13 @@ func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *
 	upstreamRow := magpie.UsageRequest{
 		Time: oldPoint.Time, Agent: "codex", Provider: "openai", Model: "gpt-5", RID: "rid-old", ResponseID: "response-old",
 		Status: http.StatusOK, Input: 7, Output: 3, Cost: 0.125, Priced: true, Compaction: &compaction,
+		FirstReasoningMs: 2400, ReasoningHidden: true, HandedOn: true,
 	}
 	fixture.requests[oldDay] = []magpie.UsageRequest{upstreamRow}
 	db, path := openSyncTestDB(t)
 	setInitialSyncComplete(t, db)
 	seedDay(t, db, oldDay, digestBytes(t, oldPoint), now.Add(-time.Hour).UnixNano(), true)
-	if _, err := db.Exec("UPDATE sync_days SET row_count = 1, identity_backfill_pending = 1, compaction_backfill_pending = 1 WHERE day = ?", oldDay); err != nil {
+	if _, err := db.Exec("UPDATE sync_days SET row_count = 1, identity_backfill_pending = 1, compaction_backfill_pending = 1, request_metrics_backfill_pending = 1 WHERE day = ?", oldDay); err != nil {
 		t.Fatal(err)
 	}
 	seedDay(t, db, today, digestBytes(t, todayPoint), now.Add(-time.Hour).UnixNano(), false)
@@ -1155,17 +1161,20 @@ func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *
 	var input int
 	var output int
 	var cost float64
-	var priced, identityPending, pending, frozen int
+	var priced, identityPending, pending, requestMetricsPending, frozen int
 	var compactionValue sql.NullInt64
+	var handedOn, firstReasoning, reasoningHidden int
 	if err := db.QueryRow(`SELECT r.model, r.input, r.output, r.magpie_cost, r.magpie_priced, r.compaction,
-		d.identity_backfill_pending, d.compaction_backfill_pending, d.frozen
+		r.handed_on, r.first_reasoning_ms, r.reasoning_hidden,
+		d.identity_backfill_pending, d.compaction_backfill_pending, d.request_metrics_backfill_pending, d.frozen
 		FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.local_day = ?`, oldDay).
-		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &identityPending, &pending, &frozen); err != nil {
+		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &handedOn, &firstReasoning, &reasoningHidden,
+			&identityPending, &pending, &requestMetricsPending, &frozen); err != nil {
 		t.Fatal(err)
 	}
-	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || compactionValue.Valid || identityPending != 1 || pending != 1 || frozen != 1 {
-		t.Fatalf("failed replacement changed cached day: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v identity_pending=%d compaction_pending=%d frozen=%d",
-			model, input, output, cost, priced, compactionValue, identityPending, pending, frozen)
+	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || compactionValue.Valid || handedOn != 0 || firstReasoning != 0 || reasoningHidden != 0 || identityPending != 1 || pending != 1 || requestMetricsPending != 1 || frozen != 1 {
+		t.Fatalf("failed replacement changed cached day: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v fields=%d/%d/%d pending=%d/%d/%d frozen=%d",
+			model, input, output, cost, priced, compactionValue, handedOn, firstReasoning, reasoningHidden, identityPending, pending, requestMetricsPending, frozen)
 	}
 	if _, err := db.Exec("DROP TRIGGER fail_compaction_replace"); err != nil {
 		t.Fatal(err)
@@ -1182,14 +1191,16 @@ func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *
 		t.Fatalf("retry compaction backfill after reopen: %v", err)
 	}
 	if err := db.QueryRow(`SELECT r.model, r.input, r.output, r.magpie_cost, r.magpie_priced, r.compaction,
-		d.identity_backfill_pending, d.compaction_backfill_pending, d.frozen
+		r.handed_on, r.first_reasoning_ms, r.reasoning_hidden,
+		d.identity_backfill_pending, d.compaction_backfill_pending, d.request_metrics_backfill_pending, d.frozen
 		FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.local_day = ?`, oldDay).
-		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &identityPending, &pending, &frozen); err != nil {
+		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &handedOn, &firstReasoning, &reasoningHidden,
+			&identityPending, &pending, &requestMetricsPending, &frozen); err != nil {
 		t.Fatal(err)
 	}
-	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || !compactionValue.Valid || compactionValue.Int64 != 1 || identityPending != 0 || pending != 0 || frozen != 1 {
-		t.Fatalf("successful backfill state: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v identity_pending=%d compaction_pending=%d frozen=%d",
-			model, input, output, cost, priced, compactionValue, identityPending, pending, frozen)
+	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || !compactionValue.Valid || compactionValue.Int64 != 1 || handedOn != 1 || firstReasoning != 2400 || reasoningHidden != 1 || identityPending != 0 || pending != 0 || requestMetricsPending != 0 || frozen != 1 {
+		t.Fatalf("successful backfill state: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v fields=%d/%d/%d pending=%d/%d/%d frozen=%d",
+			model, input, output, cost, priced, compactionValue, handedOn, firstReasoning, reasoningHidden, identityPending, pending, requestMetricsPending, frozen)
 	}
 	var rowCount int
 	if err := db.QueryRow("SELECT COUNT(*) FROM requests WHERE local_day = ?", oldDay).Scan(&rowCount); err != nil || rowCount != 1 {

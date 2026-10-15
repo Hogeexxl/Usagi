@@ -29,13 +29,13 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 		if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'initial_sync_complete'").Scan(&initialSync); err != nil {
 			t.Fatalf("read initial sync state: %v", err)
 		}
-		if version != "3" || revision != "0" || initialSync != "0" {
+		if version != "4" || revision != "0" || initialSync != "0" {
 			t.Fatalf("app_meta = schema %q, revision %q, initial sync %q", version, revision, initialSync)
 		}
 		for table, columns := range map[string][]string{
 			"sessions":  {"role", "parent_session", "root_session", "nickname"},
-			"requests":  {"session_role", "compaction"},
-			"sync_days": {"identity_backfill_pending", "compaction_backfill_pending"},
+			"requests":  {"session_role", "compaction", "handed_on", "first_reasoning_ms", "reasoning_hidden"},
+			"sync_days": {"identity_backfill_pending", "compaction_backfill_pending", "request_metrics_backfill_pending"},
 		} {
 			for _, column := range columns {
 				if !hasColumn(t, db, table, column) {
@@ -86,7 +86,7 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 	}
 }
 
-func TestMigrationV1ToV3PreservesData(t *testing.T) {
+func TestMigrationV1ToV4PreservesData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
 	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	legacy, err := sql.Open("sqlite", fileURL.String())
@@ -128,7 +128,7 @@ func TestMigrationV1ToV3PreservesData(t *testing.T) {
 	var version, role, parent, root, sessionRole string
 	var cwd, title, dayDifference string
 	var cost, priceInput float64
-	var priced, input, rowCount, frozen int
+	var priced, input, rowCount, frozen, metricsPending int
 	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'schema_version'").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestMigrationV1ToV3PreservesData(t *testing.T) {
 	if err := db.QueryRow("SELECT session_role, input, magpie_cost, magpie_priced FROM requests WHERE local_day = '2026-10-01'").Scan(&sessionRole, &input, &cost, &priced); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT row_count, frozen, difference FROM sync_days WHERE day = '2026-10-01'").Scan(&rowCount, &frozen, &dayDifference); err != nil {
+	if err := db.QueryRow("SELECT row_count, frozen, difference, request_metrics_backfill_pending FROM sync_days WHERE day = '2026-10-01'").Scan(&rowCount, &frozen, &dayDifference, &metricsPending); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow("SELECT input FROM prices WHERE version_id = 1 AND model_key = 'gpt-5'").Scan(&priceInput); err != nil {
@@ -149,26 +149,104 @@ func TestMigrationV1ToV3PreservesData(t *testing.T) {
 		t.Fatal(err)
 	}
 	var compaction sql.NullInt64
-	if err := db.QueryRow("SELECT compaction FROM requests WHERE local_day = '2026-10-01'").Scan(&compaction); err != nil {
+	var handedOn, firstReasoning, reasoningHidden int
+	if err := db.QueryRow("SELECT compaction, handed_on, first_reasoning_ms, reasoning_hidden FROM requests WHERE local_day = '2026-10-01'").Scan(&compaction, &handedOn, &firstReasoning, &reasoningHidden); err != nil {
 		t.Fatal(err)
 	}
-	if version != "3" || role != "" || parent != "" || root != "" || cwd != "/work" || title != "Title" ||
+	if version != "4" || role != "" || parent != "" || root != "" || cwd != "/work" || title != "Title" ||
 		sessionRole != "" || input != 7 || cost != 0.125 || priced != 1 || rowCount != 1 || frozen != 1 ||
-		dayDifference != "saved" || priceInput != 2 || links != 1 || compaction.Valid {
-		t.Fatalf("migrated data: schema=%q session=%q/%q/%q cwd=%q title=%q request=%q/%d/%.3f/%d sync=%d/%d/%q price=%.1f links=%d",
-			version, role, parent, root, cwd, title, sessionRole, input, cost, priced, rowCount, frozen, dayDifference, priceInput, links)
+		dayDifference != "saved" || metricsPending != 1 || priceInput != 2 || links != 1 || compaction.Valid || handedOn != 0 || firstReasoning != 0 || reasoningHidden != 0 {
+		t.Fatalf("migrated data: schema=%q session=%q/%q/%q cwd=%q title=%q request=%q/%d/%.3f/%d sync=%d/%d/%q/%d price=%.1f links=%d new_fields=%d/%d/%d",
+			version, role, parent, root, cwd, title, sessionRole, input, cost, priced, rowCount, frozen, dayDifference, metricsPending, priceInput, links, handedOn, firstReasoning, reasoningHidden)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migrated database: %v", err)
 	}
 	if reopened, err := Open(path); err != nil {
-		t.Fatalf("reopen v3 database: %v", err)
+		t.Fatalf("reopen v4 database: %v", err)
 	} else {
 		_ = reopened.Close()
 	}
 }
 
-func TestMigrationV2ToV3QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
+func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usagi-v3.sqlite")
+	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	legacy, err := sql.Open("sqlite", fileURL.String())
+	if err != nil {
+		t.Fatalf("open v3 fixture: %v", err)
+	}
+	tx, err := legacy.Begin()
+	if err != nil {
+		legacy.Close()
+		t.Fatalf("begin v3 fixture: %v", err)
+	}
+	if _, err := tx.Exec(schemaSQL); err != nil {
+		tx.Rollback()
+		legacy.Close()
+		t.Fatalf("create v1 fixture schema: %v", err)
+	}
+	if err := migrateV1ToV2(context.Background(), tx); err != nil {
+		tx.Rollback()
+		legacy.Close()
+		t.Fatalf("migrate fixture to v2: %v", err)
+	}
+	if err := migrateV2ToV3(context.Background(), tx); err != nil {
+		tx.Rollback()
+		legacy.Close()
+		t.Fatalf("migrate fixture to v3: %v", err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO requests (t_ns, local_day, agent, model, input, output, ms, ttft_ms, first_text_ms, flow_ms, magpie_cost, magpie_priced)
+			VALUES (100, '2026-10-01', 'codex', 'gpt-5', 7, 3, 900, 100, 200, 700, 0.125, 1)`,
+		`INSERT INTO sync_days (day, row_count, last_sync_ns, frozen, difference)
+			VALUES ('2026-10-01', 1, 100, 1, 'saved')`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			tx.Rollback()
+			legacy.Close()
+			t.Fatalf("seed v3 fixture: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		legacy.Close()
+		t.Fatalf("commit v3 fixture: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v3 fixture: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate v3 fixture to v4: %v", err)
+	}
+	defer db.Close()
+	var version, model, difference string
+	var input, output, millis, ttft, firstText, flow, pending, frozen int
+	var cost float64
+	var priced int
+	if err := db.QueryRow(`SELECT m.value, r.model, r.input, r.output, r.ms, r.ttft_ms, r.first_text_ms, r.flow_ms,
+		r.magpie_cost, r.magpie_priced, d.request_metrics_backfill_pending, d.frozen, d.difference
+		FROM app_meta m JOIN requests r ON r.local_day = '2026-10-01' JOIN sync_days d ON d.day = r.local_day
+		WHERE m.key = 'schema_version'`).Scan(&version, &model, &input, &output, &millis, &ttft, &firstText, &flow,
+		&cost, &priced, &pending, &frozen, &difference); err != nil {
+		t.Fatal(err)
+	}
+	if version != "4" || model != "gpt-5" || input != 7 || output != 3 || millis != 900 || ttft != 100 || firstText != 200 || flow != 700 ||
+		cost != 0.125 || priced != 1 || pending != 1 || frozen != 1 || difference != "saved" {
+		t.Fatalf("migrated v3 row/day: schema=%q request=%q/%d/%d timing=%d/%d/%d/%d cost=%.3f/%d day=%d/%d/%q",
+			version, model, input, output, millis, ttft, firstText, flow, cost, priced, pending, frozen, difference)
+	}
+	var handedOn, firstReasoning, reasoningHidden int
+	if err := db.QueryRow("SELECT handed_on, first_reasoning_ms, reasoning_hidden FROM requests WHERE local_day = '2026-10-01'").Scan(&handedOn, &firstReasoning, &reasoningHidden); err != nil {
+		t.Fatal(err)
+	}
+	if handedOn != 0 || firstReasoning != 0 || reasoningHidden != 0 {
+		t.Fatalf("new request fields after migration = %d/%d/%d, want zero defaults", handedOn, firstReasoning, reasoningHidden)
+	}
+}
+
+func TestMigrationV2ToV4QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
 	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	legacy, err := sql.Open("sqlite", fileURL.String())
@@ -222,7 +300,7 @@ func TestMigrationV2ToV3QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	}
 	defer db.Close()
 	var version, nickname, title string
-	var frozen, codexPending, otherPending, insertedPending int
+	var frozen, codexPending, otherPending, insertedPending, metricsPending int
 	var model string
 	var input int
 	var cost float64
@@ -235,8 +313,8 @@ func TestMigrationV2ToV3QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT r.model, r.input, r.magpie_cost, r.magpie_priced, r.compaction, d.frozen,
-		d.compaction_backfill_pending FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.agent = 'codex'`).
-		Scan(&model, &input, &cost, &priced, &compaction, &frozen, &codexPending); err != nil {
+		d.compaction_backfill_pending, d.request_metrics_backfill_pending FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.agent = 'codex'`).
+		Scan(&model, &input, &cost, &priced, &compaction, &frozen, &codexPending, &metricsPending); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow("SELECT compaction_backfill_pending FROM sync_days WHERE day = '2026-10-02'").Scan(&otherPending); err != nil {
@@ -245,10 +323,10 @@ func TestMigrationV2ToV3QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	if err := db.QueryRow("SELECT compaction_backfill_pending FROM sync_days WHERE day = '2026-09-30'").Scan(&insertedPending); err != nil {
 		t.Fatal(err)
 	}
-	if version != "3" || nickname != "" || title != "Preserved title" || model != "gpt-5" || input != 7 || cost != 0.125 || priced != 1 ||
-		compaction.Valid || frozen != 1 || codexPending != 1 || otherPending != 0 || insertedPending != 1 {
-		t.Fatalf("migrated v2 state: version=%q nickname=%q title=%q request=%q/%d/%.3f/%d compaction=%v frozen=%d pending=%d other=%d inserted=%d",
-			version, nickname, title, model, input, cost, priced, compaction, frozen, codexPending, otherPending, insertedPending)
+	if version != "4" || nickname != "" || title != "Preserved title" || model != "gpt-5" || input != 7 || cost != 0.125 || priced != 1 ||
+		compaction.Valid || frozen != 1 || codexPending != 1 || otherPending != 0 || insertedPending != 1 || metricsPending != 1 {
+		t.Fatalf("migrated v2 state: version=%q nickname=%q title=%q request=%q/%d/%.3f/%d compaction=%v frozen=%d compaction_pending=%d other=%d inserted=%d metrics_pending=%d",
+			version, nickname, title, model, input, cost, priced, compaction, frozen, codexPending, otherPending, insertedPending, metricsPending)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migrated v2 database: %v", err)

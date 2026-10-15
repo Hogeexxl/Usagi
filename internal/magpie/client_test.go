@@ -66,6 +66,24 @@ func TestSessionNicknameAndCompactionJSONTriState(t *testing.T) {
 	}
 }
 
+func TestUsageRequestMetricFieldsJSON(t *testing.T) {
+	var request UsageRequest
+	if err := json.Unmarshal([]byte(`{"first_reasoning_ms":321,"reasoning_hidden":true,"handed_on":true}`), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.FirstReasoningMs != 321 || !request.ReasoningHidden || !request.HandedOn {
+		t.Fatalf("usage request metric fields = %d/%t/%t", request.FirstReasoningMs, request.ReasoningHidden, request.HandedOn)
+	}
+
+	var totals UsageTotals
+	if err := json.Unmarshal([]byte(`{"decode_n":7}`), &totals); err != nil {
+		t.Fatal(err)
+	}
+	if totals.DecodeN != 7 {
+		t.Fatalf("usage decode_n = %d, want 7", totals.DecodeN)
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func sameBoolPointer(a, b *bool) bool {

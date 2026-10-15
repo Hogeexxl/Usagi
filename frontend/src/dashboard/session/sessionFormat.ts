@@ -1,6 +1,4 @@
-import { formatCost, formatInteger, formatRatio, type FormattedValue } from "../format";
-
-const sessionIntegerFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, useGrouping: true });
+import { formatCost, formatIntegerFull, formatRatio, type FormattedValue } from "../format";
 
 export function formatSessionTitle(title: string | null): string {
   return title && title.trim() ? title : "未命名会话";
@@ -90,10 +88,7 @@ export function formatSessionTimeWithSeconds(value: number | null, timezone: str
 }
 
 export function formatSessionTokenInteger(value: number): FormattedValue {
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("Expected a non-negative safe integer");
-  const full = String(value);
-  const text = sessionIntegerFormatter.format(value);
-  return { text, title: full, accessibleName: full };
+  return formatIntegerFull(value);
 }
 
 export function formatSessionNullableTokenInteger(value: number | null): FormattedValue {

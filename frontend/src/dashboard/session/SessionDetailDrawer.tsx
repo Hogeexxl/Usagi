@@ -31,8 +31,8 @@ type SessionDetailDrawerProps = {
   agentDisplay?: AgentDisplayLookup;
 };
 
-function StaticValue({ value, ariaLabel }: { value: string; ariaLabel: string }) {
-  return <span className="tabular-nums text-foreground" aria-label={ariaLabel}>{value}</span>;
+function StaticValue({ value, ariaLabel, title }: { value: string; ariaLabel: string; title: string }) {
+  return <span className="tabular-nums text-foreground" aria-label={ariaLabel} title={title}>{value}</span>;
 }
 
 function ReceiptDivider() {
@@ -57,10 +57,10 @@ function UsageReceipt({ usage, compactionTokens, showCompaction }: { usage: Usag
       {rows.map(({ label, value, emphasized }) => (
         <div key={label} className="flex items-baseline justify-between gap-4">
           <dt className={emphasized ? "font-semibold text-foreground" : "text-muted-foreground"}>{label}</dt>
-          <dd className={emphasized ? "font-semibold" : undefined}><StaticValue value={value.text} ariaLabel={`${label}：${value.accessibleName}`} /></dd>
+          <dd className={emphasized ? "font-semibold" : undefined}><StaticValue value={value.text} ariaLabel={`${label}：${value.accessibleName}`} title={value.title} /></dd>
         </div>
       ))}
-      {showCompaction ? <div className="flex items-baseline justify-between gap-4"><dt className="text-muted-foreground">Compaction</dt><dd><StaticValue value={compactionValue.text} ariaLabel={`Compaction：${compactionValue.accessibleName}`} /></dd></div> : null}
+      {showCompaction ? <div className="flex items-baseline justify-between gap-4"><dt className="text-muted-foreground">Compaction</dt><dd><StaticValue value={compactionValue.text} ariaLabel={`Compaction：${compactionValue.accessibleName}`} title={compactionValue.title} /></dd></div> : null}
       <div className="flex items-baseline justify-between gap-4">
         <dt className="font-semibold text-foreground">Cost</dt>
         <dd className="font-semibold tabular-nums text-foreground"><CostValue value={usage.cost} unpriced={usage.unpriced} className="tabular-nums text-foreground" /></dd>
@@ -130,7 +130,10 @@ function SummaryReceipt({ detail, agentDisplay }: { detail: SessionDetailRespons
       <dl className="space-y-2 text-sm">
         <div className="flex items-baseline justify-between gap-4"><dt className="text-muted-foreground">Agent</dt><dd className="text-foreground">{agent}</dd></div>
         <div className="flex items-baseline justify-between gap-4"><dt className="text-muted-foreground">Project</dt><dd className="text-foreground" title={projectPath}>{project}</dd></div>
-        {rows.map(([label, value, emphasized]) => <div key={label} className="flex items-baseline justify-between gap-4"><dt className={emphasized ? "font-semibold text-foreground" : "text-muted-foreground"}>{label}</dt><dd className={emphasized ? "font-semibold text-foreground" : "text-foreground"}><NumberTicker value={value} locale blur={false} className="tabular-nums" /></dd></div>)}
+        {rows.map(([label, value, emphasized]) => {
+          const formatted = formatSessionTokenInteger(value);
+          return <div key={label} className="flex items-baseline justify-between gap-4"><dt className={emphasized ? "font-semibold text-foreground" : "text-muted-foreground"}>{label}</dt><dd className={emphasized ? "font-semibold text-foreground" : "text-foreground"} aria-label={`${label}：${formatted.accessibleName}`}><span title={formatted.title}><NumberTicker value={value} format={(next) => formatSessionTokenInteger(next).text} blur={false} className="tabular-nums" /></span></dd></div>;
+        })}
         {detail.unknown_usage.cost > 0 ? <div className="flex items-baseline justify-between gap-4"><dt className="text-muted-foreground">Unknown Cost</dt><dd className="text-foreground"><CostValue value={detail.unknown_usage.cost} unpriced={detail.unknown_usage.unpriced} className="tabular-nums text-foreground" /></dd></div> : null}
         <div className="flex items-baseline justify-between gap-4"><dt className="font-semibold text-foreground">Cost</dt><dd className="font-semibold tabular-nums text-foreground"><CostValue value={detail.inclusive_usage.cost} unpriced={detail.inclusive_usage.unpriced} ticker tickerBlur={false} className="tabular-nums text-foreground" /></dd></div>
       </dl>

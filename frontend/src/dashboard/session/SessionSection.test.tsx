@@ -147,6 +147,12 @@ function tableViewport(container: HTMLElement): HTMLElement {
   return table.parentElement;
 }
 
+function tableRoot(container: HTMLElement): HTMLElement {
+  const viewport = tableViewport(container);
+  if (!(viewport.parentElement instanceof HTMLElement)) throw new Error("Session table root not found");
+  return viewport.parentElement;
+}
+
 function tableRow(container: HTMLElement, threadKeyId: string): HTMLTableRowElement {
   const tableRow = container.querySelector<HTMLTableRowElement>(
     `tbody tr[data-session-thread-key-id='${threadKeyId}']`,
@@ -242,7 +248,9 @@ describe("SessionSection v0.2.0", () => {
     expect(cells[1]).toHaveTextContent("codex · gpt-5 (high), o4-mini (low) · 2 subagent");
     expect(cells[1].querySelectorAll("span")[0]).toHaveAttribute("title", "未命名会话");
     expect(cells[1].querySelectorAll("span")[1]).toHaveAttribute("title", "codex · gpt-5 (high), o4-mini (low) · 2 subagent");
-    expect(cells[3]).toHaveTextContent("5,678");
+    expect(cells[3]).toHaveTextContent("5.7K");
+    expect(cells[3].querySelector(".tabular-nums")).toHaveAttribute("title", "5,678");
+    expect(cells[3].querySelector(".tabular-nums")).toHaveAttribute("aria-label", "5,678");
     expect(cells[4]).toHaveTextContent("7.4%");
     expect(cells[5]).toHaveTextContent("$1.25");
     expect(cells[3].querySelector(".tabular-nums")).toBeTruthy();
@@ -375,7 +383,7 @@ describe("SessionSection v0.2.0", () => {
 
   it("T-S04-004 computes the table height from ready rows", () => {
     for (const [count, height] of [
-      [10, 688],
+      [6, 432],
       [3, 240],
     ] as const) {
       const rendered = render(
@@ -388,11 +396,14 @@ describe("SessionSection v0.2.0", () => {
         />,
       );
       expect(tableViewport(rendered.container)).toHaveStyle({ height: `${height}px` });
+      expect(tableRoot(rendered.container).classList.contains("[&>div:first-child]:overflow-x-auto")).toBe(true);
+      expect(tableRoot(rendered.container).classList.contains("[&>div:first-child]:overflow-y-hidden")).toBe(true);
       rendered.unmount();
     }
 
     const readyEmpty = render(<SessionSection view={view({ rows: [], total_items: 0, total_pages: 0 })} />);
     expect(tableViewport(readyEmpty.container)).toHaveStyle({ height: "192px" });
+    expect(tableRoot(readyEmpty.container).classList.contains("[&>div:first-child]:overflow-y-hidden")).toBe(true);
     readyEmpty.unmount();
   });
 
@@ -418,7 +429,8 @@ describe("SessionSection v0.2.0", () => {
     const rendered = render(<SessionSection view={view({ rows: [row(1)] })} />);
     const cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
     expect(cells[1]).toHaveTextContent("2 subagent");
-    expect(cells[3]).toHaveTextContent("5,678");
+    expect(cells[3]).toHaveTextContent("5.7K");
+    expect(cells[3].querySelector(".tabular-nums")).toHaveAttribute("title", "5,678");
     expect(cells[4]).toHaveTextContent("7.4%");
     expect(cells[5]).toHaveTextContent("$1.25");
   });
@@ -508,8 +520,9 @@ describe("SessionSection v0.2.0", () => {
     const loading = render(<SessionSection view={view({ rows: [], load_state: "initial" })} />);
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.queryByText("当前时间范围暂无 Session 记录")).not.toBeInTheDocument();
-    expect(tableViewport(loading.container)).toHaveStyle({ height: "480px" });
-    expect(loading.container.querySelectorAll("tbody tr")).toHaveLength(8);
+    expect(tableViewport(loading.container)).toHaveStyle({ height: "384px" });
+    expect(loading.container.querySelectorAll("tbody tr")).toHaveLength(6);
+    expect(tableRoot(loading.container).classList.contains("[&>div:first-child]:overflow-y-hidden")).toBe(true);
     loading.unmount();
 
     render(<SessionSection view={view({ rows: [], total_items: 0, total_pages: 0 })} />);

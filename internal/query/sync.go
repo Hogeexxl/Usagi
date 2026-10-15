@@ -30,11 +30,12 @@ const (
 var errUnstableDay = errors.New("query: usage day changed during pagination")
 
 type syncDayState struct {
-	fingerprint               []byte
-	lastSyncNS                sql.NullInt64
-	frozen                    bool
-	identityBackfillPending   bool
-	compactionBackfillPending bool
+	fingerprint                   []byte
+	lastSyncNS                    sql.NullInt64
+	frozen                        bool
+	identityBackfillPending       bool
+	compactionBackfillPending     bool
+	requestMetricsBackfillPending bool
 }
 
 type dayDigest struct {
@@ -397,6 +398,10 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 	if err != nil {
 		return err
 	}
+	days, err = s.includePendingRequestMetricsDays(ctx, days)
+	if err != nil {
+		return err
+	}
 	digests, verified, err := s.syncDigests(ctx, days)
 	if err != nil {
 		return err
@@ -411,6 +416,10 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 		state := states[day]
 		digest := digests[day].digest
 		if state.compactionBackfillPending {
+			targets = append(targets, day)
+			continue
+		}
+		if state.requestMetricsBackfillPending {
 			targets = append(targets, day)
 			continue
 		}
@@ -552,6 +561,34 @@ func (s *Service) includePendingCompactionDays(ctx context.Context, days []strin
 	return result, nil
 }
 
+func (s *Service) includePendingRequestMetricsDays(ctx context.Context, days []string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT day FROM sync_days WHERE request_metrics_backfill_pending = 1")
+	if err != nil {
+		return nil, fmt.Errorf("query: read pending request metrics days: %w", err)
+	}
+	defer rows.Close()
+	values := make(map[string]struct{}, len(days))
+	for _, day := range days {
+		values[day] = struct{}{}
+	}
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return nil, fmt.Errorf("query: scan pending request metrics day: %w", err)
+		}
+		values[day] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query: iterate pending request metrics days: %w", err)
+	}
+	result := make([]string, 0, len(values))
+	for day := range values {
+		result = append(result, day)
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
 func (s *Service) finishSessionIdentityBackfill(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -625,7 +662,8 @@ func (s *Service) syncDayStates(ctx context.Context, days []string) (map[string]
 	if len(days) == 0 {
 		return states, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT day, fingerprint, last_sync_ns, frozen, identity_backfill_pending, compaction_backfill_pending
+	rows, err := s.db.QueryContext(ctx, `SELECT day, fingerprint, last_sync_ns, frozen, identity_backfill_pending, compaction_backfill_pending,
+		request_metrics_backfill_pending
 		FROM sync_days WHERE day >= ? AND day <= ?`, days[0], days[len(days)-1])
 	if err != nil {
 		return nil, fmt.Errorf("query: read sync days: %w", err)
@@ -635,13 +673,14 @@ func (s *Service) syncDayStates(ctx context.Context, days []string) (map[string]
 		var day string
 		var fingerprint []byte
 		var state syncDayState
-		var identityPending, compactionPending int
-		if err := rows.Scan(&day, &fingerprint, &state.lastSyncNS, &state.frozen, &identityPending, &compactionPending); err != nil {
+		var identityPending, compactionPending, requestMetricsPending int
+		if err := rows.Scan(&day, &fingerprint, &state.lastSyncNS, &state.frozen, &identityPending, &compactionPending, &requestMetricsPending); err != nil {
 			return nil, fmt.Errorf("query: scan sync day: %w", err)
 		}
 		state.fingerprint = slices.Clone(fingerprint)
 		state.identityBackfillPending = identityPending != 0
 		state.compactionBackfillPending = compactionPending != 0
+		state.requestMetricsBackfillPending = requestMetricsPending != 0
 		states[day] = state
 	}
 	if err := rows.Err(); err != nil {
@@ -759,8 +798,8 @@ func (s *Service) saveSyncDay(ctx context.Context, day string, digest [32]byte, 
 		requested, served, effort, kind, session, session_role, compaction, native_session, subagent,
 		parent_agent, source, route_id, rid, response_id, status, rejected, error,
 		tries, input, output, cache_read, cache_write, cache_write_1h, reasoning,
-		ms, ttft_ms, first_text_ms, flow_ms, magpie_cost, magpie_priced
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) `)
+		ms, ttft_ms, first_text_ms, first_reasoning_ms, flow_ms, reasoning_hidden, handed_on, magpie_cost, magpie_priced
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) `)
 	if err != nil {
 		return fmt.Errorf("prepare request insert: %w", err)
 	}
@@ -772,7 +811,8 @@ func (s *Service) saveSyncDay(ctx context.Context, day string, digest [32]byte, 
 			row.RID, row.ResponseID, row.Status, boolInt(row.Rejected), row.Error,
 			row.Tries, row.Input, row.Output, row.CacheRead, row.CacheWrite,
 			row.CacheWrite1h, row.Reasoning, row.Millis, row.TTFTMs, row.FirstTextMs,
-			row.FlowMs, row.Cost, boolInt(row.Priced)); err != nil {
+			row.FirstReasoningMs, row.FlowMs, boolInt(row.ReasoningHidden), boolInt(row.HandedOn),
+			row.Cost, boolInt(row.Priced)); err != nil {
 			_ = statement.Close()
 			return fmt.Errorf("insert request row: %w", err)
 		}
@@ -786,7 +826,8 @@ func (s *Service) saveSyncDay(ctx context.Context, day string, digest [32]byte, 
 		row_count = excluded.row_count, last_sync_ns = excluded.last_sync_ns,
 		frozen = excluded.frozen, difference = '',
 		identity_backfill_pending = CASE WHEN ? THEN 0 ELSE sync_days.identity_backfill_pending END,
-		compaction_backfill_pending = 0`,
+		compaction_backfill_pending = 0,
+		request_metrics_backfill_pending = 0`,
 		day, digest[:], len(rows), now, boolInt(frozen), boolInt(clearIdentityPending)); err != nil {
 		return fmt.Errorf("save sync day state: %w", err)
 	}
@@ -903,6 +944,11 @@ func UsageFingerprint(summary magpie.UsageSummary) ([32]byte, error) {
 		Reasoning    int
 		Cost         float64
 		Unpriced     int
+		Timed        int
+		TTFTMs       int64
+		DecodeMs     int64
+		DecodeOut    int
+		DecodeN      int
 	}
 	type group struct {
 		ID       string
@@ -925,6 +971,8 @@ func UsageFingerprint(summary magpie.UsageSummary) ([32]byte, error) {
 			Calls: value.Calls, Errors: value.Errors, Input: value.Input, Output: value.Output,
 			CacheRead: value.CacheRead, CacheWrite: value.CacheWrite, CacheWrite1h: value.CacheWrite1h,
 			Reasoning: value.Reasoning, Cost: value.Cost, Unpriced: value.Unpriced,
+			Timed: value.Timed, TTFTMs: value.TTFTMs, DecodeMs: value.DecodeMs,
+			DecodeOut: value.DecodeOut, DecodeN: value.DecodeN,
 		}
 	}
 	toGroup := func(value magpie.UsageGroup) group {

@@ -268,10 +268,16 @@ func apiInt64(value int64) *int64 { return &value }
 
 func TestSessionConsistencyEmbedsListSummary(t *testing.T) {
 	server, service, _, _ := newServerFixture(t)
+	speed, meanTTFT := 72.5, 1.25
 	summary := projection.SummaryView{
-		Usage:            projection.UsageView{Calls: 2, Input: 7, Output: 5, Cost: .25},
+		Usage: projection.UsageView{Calls: 2, Input: 7, Output: 5, Cost: .25},
+		RequestMetrics: projection.RequestMetricsView{
+			Calls: 3, Errors: 1, Retried: 2, OutputSpeed: &speed, SpeedSamples: 4,
+			MeanTTFTSeconds: &meanTTFT, TTFTSamples: 5,
+		},
 		RootSessionCount: 1, SessionMedian: apiInt64(12), SessionP90: apiInt64(12),
 	}
+	service.SummaryResult = summary
 	service.SessionsResult = projection.SessionListView{
 		Summary: summary,
 		Items: []projection.SessionListItemView{{
@@ -280,7 +286,37 @@ func TestSessionConsistencyEmbedsListSummary(t *testing.T) {
 			InclusiveUsage: projection.UsageView{Calls: 2, Input: 7, Output: 5, Cost: .25},
 		}},
 	}
-	response := request(server, http.MethodGet, "/api/usage/sessions?range=today")
+	response := request(server, http.MethodGet, "/api/usage/summary?range=today")
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET summary = %d %s", response.Code, response.Body.String())
+	}
+	var standalone summaryResponseDTO
+	if err := json.Unmarshal(response.Body.Bytes(), &standalone); err != nil {
+		t.Fatalf("decode summary response: %v", err)
+	}
+	if standalone.RequestMetrics.Calls != 3 || standalone.RequestMetrics.Errors != 1 || standalone.RequestMetrics.Retried != 2 ||
+		standalone.RequestMetrics.OutputSpeed == nil || *standalone.RequestMetrics.OutputSpeed != speed || standalone.RequestMetrics.SpeedSamples != 4 ||
+		standalone.RequestMetrics.MeanTTFTSeconds == nil || *standalone.RequestMetrics.MeanTTFTSeconds != meanTTFT || standalone.RequestMetrics.TTFTSamples != 5 {
+		t.Fatalf("summary request_metrics = %+v, want all seven contract fields", standalone.RequestMetrics)
+	}
+	var summaryJSON map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &summaryJSON); err != nil {
+		t.Fatal(err)
+	}
+	var metricsJSON map[string]json.RawMessage
+	if err := json.Unmarshal(summaryJSON["request_metrics"], &metricsJSON); err != nil {
+		t.Fatalf("decode summary request_metrics object: %v", err)
+	}
+	if len(metricsJSON) != 7 {
+		t.Fatalf("request_metrics JSON keys = %v, want exactly seven fields", metricsJSON)
+	}
+	for _, key := range []string{"calls", "errors", "retried", "output_speed", "speed_samples", "mean_ttft_seconds", "ttft_samples"} {
+		if _, exists := metricsJSON[key]; !exists {
+			t.Errorf("request_metrics JSON is missing %q: %v", key, metricsJSON)
+		}
+	}
+
+	response = request(server, http.MethodGet, "/api/usage/sessions?range=today")
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET sessions = %d %s", response.Code, response.Body.String())
 	}
@@ -290,11 +326,16 @@ func TestSessionConsistencyEmbedsListSummary(t *testing.T) {
 	}
 	if got.Summary.SessionCount != 1 || got.Summary.Usage.Calls != 2 || got.Summary.Usage.Input != 7 || got.Summary.Usage.Output != 5 ||
 		got.Summary.Usage.Cost != .25 || got.Summary.SessionMedian == nil || *got.Summary.SessionMedian != 12 ||
-		got.Summary.SessionP90 == nil || *got.Summary.SessionP90 != 12 || len(got.Items) != 1 || got.Items[0].InclusiveUsage.Input != 7 {
+		got.Summary.SessionP90 == nil || *got.Summary.SessionP90 != 12 || got.Summary.RequestMetrics.Calls != 3 ||
+		got.Summary.RequestMetrics.Errors != 1 || got.Summary.RequestMetrics.Retried != 2 ||
+		got.Summary.RequestMetrics.OutputSpeed == nil || *got.Summary.RequestMetrics.OutputSpeed != speed ||
+		got.Summary.RequestMetrics.SpeedSamples != 4 || got.Summary.RequestMetrics.MeanTTFTSeconds == nil ||
+		*got.Summary.RequestMetrics.MeanTTFTSeconds != meanTTFT || got.Summary.RequestMetrics.TTFTSamples != 5 ||
+		len(got.Items) != 1 || got.Items[0].InclusiveUsage.Input != 7 {
 		t.Fatalf("sessions embedded summary and items = %+v", got)
 	}
-	if len(service.SessionQueries) != 1 || len(service.SummaryQueries) != 0 {
-		t.Fatalf("sessions endpoint called Sessions=%d Summary=%d; summary must be embedded from the same list", len(service.SessionQueries), len(service.SummaryQueries))
+	if len(service.SessionQueries) != 1 || len(service.SummaryQueries) != 1 {
+		t.Fatalf("summary endpoints called Sessions=%d Summary=%d; sessions must embed its same-list summary", len(service.SessionQueries), len(service.SummaryQueries))
 	}
 }
 

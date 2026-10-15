@@ -14,6 +14,7 @@ import {
   type QuotaProviderDto,
   type QuotaResponse,
   type QuotaWindowDto,
+  type RequestMetricsDto,
   type RevisionResponse,
   type RuntimeStatusResponse,
   type SessionDetailResponse,
@@ -141,12 +142,26 @@ function parseUsage(value: unknown) {
   };
 }
 
+function parseRequestMetrics(value: unknown): RequestMetricsDto {
+  const record = requiredRecord(value);
+  return {
+    calls: requiredSafeInteger(record, "calls"),
+    errors: requiredSafeInteger(record, "errors"),
+    retried: requiredSafeInteger(record, "retried"),
+    output_speed: nullableFiniteNumber(record, "output_speed"),
+    speed_samples: requiredSafeInteger(record, "speed_samples"),
+    mean_ttft_seconds: nullableFiniteNumber(record, "mean_ttft_seconds"),
+    ttft_samples: requiredSafeInteger(record, "ttft_samples"),
+  };
+}
+
 function parseSummary(value: unknown): SummaryResponse {
   const record = requiredRecord(value);
   const usage = parseUsage(record.usage);
   return {
     data_revision: requiredSafeInteger(record, "data_revision"),
     usage,
+    request_metrics: parseRequestMetrics(record.request_metrics),
     session_count: requiredSafeInteger(record, "session_count"),
     session_median: nullableSafeInteger(record, "session_median"),
     session_p90: nullableSafeInteger(record, "session_p90"),

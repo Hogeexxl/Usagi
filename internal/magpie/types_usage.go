@@ -17,6 +17,7 @@ type UsageTotals struct {
 	TTFTMs       int64   `json:"ttft_ms,omitempty"`
 	DecodeMs     int64   `json:"decode_ms,omitempty"`
 	DecodeOut    int     `json:"decode_out,omitempty"`
+	DecodeN      int     `json:"decode_n,omitempty"`
 }
 
 type UsageGroup struct {
@@ -50,43 +51,46 @@ type UsageSummary struct {
 }
 
 type UsageRequest struct {
-	Time            time.Time `json:"t"`
-	Agent           string    `json:"agent"`
-	AgentName       string    `json:"agentName"`
-	Provider        string    `json:"provider"`
-	ProviderName    string    `json:"providerName"`
-	ProviderAccount string    `json:"providerAccount,omitempty"`
-	Model           string    `json:"model"`
-	Requested       string    `json:"req,omitempty"`
-	Served          string    `json:"served,omitempty"`
-	Input           int       `json:"in"`
-	Output          int       `json:"out"`
-	CacheRead       int       `json:"cache_read,omitempty"`
-	CacheWrite      int       `json:"cache_write,omitempty"`
-	CacheWrite1h    int       `json:"cache_write_1h,omitempty"`
-	Reasoning       int       `json:"reasoning,omitempty"`
-	Effort          string    `json:"effort,omitempty"`
-	Millis          int64     `json:"ms"`
-	TTFTMs          int64     `json:"ttft_ms,omitempty"`
-	FirstTextMs     int64     `json:"first_text_ms,omitempty"`
-	FlowMs          int64     `json:"flow_ms,omitempty"`
-	Tries           int       `json:"tries,omitempty"`
-	Status          int       `json:"status"`
-	Rejected        bool      `json:"rejected,omitempty"`
-	Error           string    `json:"err,omitempty"`
-	Session         string    `json:"session,omitempty"`
-	SessionRole     string    `json:"session_role,omitempty"`
-	Compaction      *bool     `json:"compaction,omitempty"`
-	NativeSession   string    `json:"native_session,omitempty"`
-	Subagent        string    `json:"subagent,omitempty"`
-	ParentAgent     string    `json:"parent_agent,omitempty"`
-	Kind            string    `json:"kind,omitempty"`
-	Cost            float64   `json:"cost"`
-	Priced          bool      `json:"priced"`
-	Source          string    `json:"source,omitempty"`
-	RouteID         int       `json:"route_id,omitempty"`
-	RID             string    `json:"rid,omitempty"`
-	ResponseID      string    `json:"response_id,omitempty"`
+	Time             time.Time `json:"t"`
+	Agent            string    `json:"agent"`
+	AgentName        string    `json:"agentName"`
+	Provider         string    `json:"provider"`
+	ProviderName     string    `json:"providerName"`
+	ProviderAccount  string    `json:"providerAccount,omitempty"`
+	Model            string    `json:"model"`
+	Requested        string    `json:"req,omitempty"`
+	Served           string    `json:"served,omitempty"`
+	Input            int       `json:"in"`
+	Output           int       `json:"out"`
+	CacheRead        int       `json:"cache_read,omitempty"`
+	CacheWrite       int       `json:"cache_write,omitempty"`
+	CacheWrite1h     int       `json:"cache_write_1h,omitempty"`
+	Reasoning        int       `json:"reasoning,omitempty"`
+	Effort           string    `json:"effort,omitempty"`
+	Millis           int64     `json:"ms"`
+	TTFTMs           int64     `json:"ttft_ms,omitempty"`
+	FirstTextMs      int64     `json:"first_text_ms,omitempty"`
+	FirstReasoningMs int64     `json:"first_reasoning_ms,omitempty"`
+	FlowMs           int64     `json:"flow_ms,omitempty"`
+	ReasoningHidden  bool      `json:"reasoning_hidden,omitempty"`
+	Tries            int       `json:"tries,omitempty"`
+	HandedOn         bool      `json:"handed_on,omitempty"`
+	Status           int       `json:"status"`
+	Rejected         bool      `json:"rejected,omitempty"`
+	Error            string    `json:"err,omitempty"`
+	Session          string    `json:"session,omitempty"`
+	SessionRole      string    `json:"session_role,omitempty"`
+	Compaction       *bool     `json:"compaction,omitempty"`
+	NativeSession    string    `json:"native_session,omitempty"`
+	Subagent         string    `json:"subagent,omitempty"`
+	ParentAgent      string    `json:"parent_agent,omitempty"`
+	Kind             string    `json:"kind,omitempty"`
+	Cost             float64   `json:"cost"`
+	Priced           bool      `json:"priced"`
+	Source           string    `json:"source,omitempty"`
+	RouteID          int       `json:"route_id,omitempty"`
+	RID              string    `json:"rid,omitempty"`
+	ResponseID       string    `json:"response_id,omitempty"`
 }
 
 type UsageShare struct {

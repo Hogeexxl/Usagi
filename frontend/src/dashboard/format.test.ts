@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCompact, formatCost, formatCostPerMillionTokens, formatInteger, formatQuotaResetTime, formatRatio } from "./format";
+import { formatCompact, formatCost, formatCostPerMillionTokens, formatInteger, formatQuotaResetTime, formatRatio, formatRequestCount } from "./format";
 
 describe("dashboard formatters", () => {
   it.each([
@@ -16,6 +16,18 @@ describe("dashboard formatters", () => {
 
   it("keeps complete integers in title and accessible name", () => {
     expect(formatInteger(12_345)).toEqual({ text: "12.3K", title: "12345", accessibleName: "12345" });
+  });
+
+  it.each([
+    [0, "0", "0"],
+    [2_000, "2000", "2,000"],
+    [99_999, "99999", "99,999"],
+    [100_000, "100K", "100,000"],
+    [141_000, "141K", "141,000"],
+    [141_100, "141.1K", "141,100"],
+    [1_000_000, "1M", "1,000,000"],
+  ])("formats request count %s as %s", (value, text, full) => {
+    expect(formatRequestCount(value)).toEqual({ text, title: full, accessibleName: full });
   });
 
   it("does not turn null into zero", () => {

@@ -2,10 +2,10 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 
-import type { QuotaProviderDto, QuotaResponse, QuotaWindowDto, UsageDto } from "../data/types";
+import type { QuotaProviderDto, QuotaResponse, QuotaWindowDto, RequestMetricsDto, UsageDto } from "../data/types";
 import { chartMuted, chartSeriesColor } from "./charts/chartPalette";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/beui/popover";
-import { CacheHitMetric, CostMetric, MetricGrid, RequestMetric, quotaColor } from "./MetricGrid";
+import { CacheHitMetric, CostMetric, MetricGrid, OutputSpeedMetric, RequestMetric, quotaColor } from "./MetricGrid";
 import { formatQuotaResetTime } from "./format";
 
 const usage: UsageDto = {
@@ -38,6 +38,16 @@ const compactUsage: UsageDto = {
   cost: 1_240,
   unpriced: 0,
   retried: 0, output_speed: null, speed_samples: 0,
+};
+
+const requestMetrics: RequestMetricsDto = {
+  calls: 5,
+  errors: 1,
+  retried: 2,
+  output_speed: 62.4,
+  speed_samples: 3,
+  mean_ttft_seconds: 7.6,
+  ttft_samples: 4,
 };
 
 const tokenBarLabel = "Token 分布：输入、缓存读、缓存写和输出";
@@ -93,6 +103,8 @@ const manyProviders: QuotaResponse = {
 
 function MetricGridFixture({
   usage: currentUsage = usage,
+  requestMetrics: currentRequestMetrics = requestMetrics,
+  displayMode = "session",
   sessionCount = 8,
   sessionMedian = 1_000,
   sessionP90 = 3_000,
@@ -105,6 +117,8 @@ function MetricGridFixture({
   return (
     <MetricGrid
       usage={currentUsage}
+      requestMetrics={currentRequestMetrics}
+      displayMode={displayMode}
       sessionCount={sessionCount}
       sessionMedian={sessionMedian}
       sessionP90={sessionP90}
@@ -153,14 +167,13 @@ function glareOverlayCount(card: HTMLElement): number {
 }
 
 describe("MetricGrid Spec05", () => {
-  it("renders only the five session page cards and keeps RequestMetric available", async () => {
+  it("renders the five session cards by default", async () => {
     enableTiltEffects();
     render(<MetricGridFixture usage={usage} quota={quota} />);
     const grid = screen.getByLabelText("KPI 指标");
     await waitFor(() => expect(Array.from(grid.children).map((card) => glareOverlayCount(card as HTMLElement))).toEqual([1, 0, 0, 0, 0]));
     expect(Array.from(grid.children).map((card) => card.querySelector(".text-xs.font-medium")?.textContent)).toEqual(["总 Token", "缓存命中", "等价费用", "会话数", "账户额度"]);
     expect(within(grid).queryByText("请求数")).not.toBeInTheDocument();
-    expect(within(grid).queryByRole("button", { name: "请求失败与重试提示" })).not.toBeInTheDocument();
     expect(cardByTitle("会话数")).toHaveTextContent("中位 1K · P90 3K");
   });
 
@@ -371,30 +384,77 @@ describe("MetricGrid Spec05", () => {
     expect(screen.getByLabelText("KPI 加载中")).toHaveTextContent("");
   });
 
-  it("shows request count, failure and retry details in the hover bubble, and output speed at the bottom", async () => {
-    render(<RequestMetric usage={{ ...usage, calls: 10_091, errors: 277, retried: 36, output_speed: 61.988, speed_samples: 2_999 }} />);
+  it("renders request count with failure and retry details in the card footer", () => {
+    render(<RequestMetric metrics={{ ...requestMetrics, calls: 10_091, errors: 277, retried: 36 }} />);
     const card = cardByTitle("请求数");
-    expect(within(card).getByTitle("10,091")).toHaveTextContent("10.1K");
-    expect(within(card).getByText("输出速度：62 token/s（2,999 次）")).toBeInTheDocument();
-    const trigger = within(card).getByRole("button", { name: "请求失败与重试提示" });
-    expect(trigger).toHaveClass("text-warning");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const bubble = await screen.findByRole("dialog");
-    expect(bubble).toHaveTextContent("277 次失败 · 成功 97.3%");
-    expect(bubble).toHaveTextContent("36 次重试后成功");
-    expect(bubble.querySelectorAll(".flex-col > div")).toHaveLength(2);
+    expect(within(card).getByTitle("10,091")).toHaveTextContent("10091");
+    expect(within(card).queryByText(/输出速度/)).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "请求失败与重试提示" })).not.toBeInTheDocument();
+    const failures = within(card).getByText("277 次失败");
+    expect(failures).toHaveClass("text-destructive");
+    expect(failures.parentElement).toHaveTextContent("277 次失败 · 成功 97.3%");
+    expect(failures.parentElement?.lastElementChild).toHaveClass("text-muted-foreground");
+    expect(failures.parentElement?.parentElement?.children).toHaveLength(2);
+    const retries = within(card).getByText("36 次重试后成功");
+    expect(retries).toHaveClass("text-warning");
+    expect(retries.parentElement).toHaveTextContent("36 次重试后成功");
   });
 
-  it("keeps the request icon neutral without failures and shows a dash without a measurable speed", async () => {
-    render(<RequestMetric usage={{ ...usage, calls: 0, errors: 0, retried: 0, output_speed: null, speed_samples: 0 }} />);
+  it("shows success and retry details when there are no failures", () => {
+    render(<RequestMetric metrics={{ ...requestMetrics, calls: 0, errors: 0, retried: 0 }} />);
     const card = cardByTitle("请求数");
-    expect(within(card).getByText("输出速度：—")).toBeInTheDocument();
-    const trigger = within(card).getByRole("button", { name: "请求失败与重试提示" });
-    expect(trigger).toHaveClass("text-foreground");
-    fireEvent.pointerEnter(trigger.parentElement!, { pointerId: 1, pointerType: "mouse", buttons: 0 });
-    const bubble = await screen.findByRole("dialog");
-    expect(bubble).toHaveTextContent("0 次失败 · 成功 —");
-    expect(bubble).toHaveTextContent("0 次重试后成功");
+    const failures = within(card).getByText("0 次失败", { selector: ".text-destructive" });
+    expect(failures.parentElement).toHaveTextContent("0 次失败 · 成功 —");
+    const retries = within(card).getByText("0 次重试后成功", { selector: ".text-warning" });
+    expect(retries.parentElement).toHaveTextContent("0 次重试后成功");
+  });
+
+  it("uses compact request counts for the headline, failures, and retries", () => {
+    render(<RequestMetric metrics={{ ...requestMetrics, calls: 141_100, errors: 100_000, retried: 141_101 }} />);
+    const card = cardByTitle("请求数");
+    expect(within(card).getByTitle("141,100")).toHaveTextContent("141.1K");
+    expect(within(card).getByText("100K 次失败")).toHaveClass("text-destructive");
+    expect(within(card).getByText("100K 次失败")).toHaveAttribute("title", "100,000");
+    expect(within(card).getByText("141.1K 次重试后成功")).toHaveClass("text-warning");
+    expect(within(card).getByText("141.1K 次重试后成功")).toHaveAttribute("title", "141,101");
+  });
+
+  it("shows integer output speed and keeps speed and TTFT sample counts distinct", () => {
+    render(<OutputSpeedMetric metrics={{ ...requestMetrics, output_speed: 61.988, speed_samples: 2_999, mean_ttft_seconds: 7.6, ttft_samples: 36 }} />);
+    const card = cardByTitle("输出速度");
+    expect(within(card).getByText("token/s")).toHaveClass("text-[28px]", "font-normal", "leading-none", "tracking-tight", "text-muted-foreground");
+    expect(within(card).getByTitle("62")).toHaveTextContent("62");
+    expect(within(card).getByText("2999 次计时")).toHaveAttribute("title", "2,999 次计时");
+    expect(within(card).getByText("首字平均 7.6s · 36 次计时")).toBeInTheDocument();
+  });
+
+  it("uses request count formatting for both timing sample counts", () => {
+    render(<OutputSpeedMetric metrics={{ ...requestMetrics, output_speed: 61.988, speed_samples: 141_100, mean_ttft_seconds: 7.6, ttft_samples: 99_999 }} />);
+    const card = cardByTitle("输出速度");
+    expect(within(card).getByText("141.1K 次计时")).toHaveAttribute("title", "141,100 次计时");
+    expect(within(card).getByText("首字平均 7.6s · 99999 次计时")).toHaveAttribute("aria-label", "首字平均 7.6s · 99,999 次计时");
+  });
+
+  it("hides both timing lines when speed has no valid sample and preserves nullable TTFT", () => {
+    const { rerender } = render(<OutputSpeedMetric metrics={{ ...requestMetrics, output_speed: null, speed_samples: 4, mean_ttft_seconds: 7.6, ttft_samples: 2 }} />);
+    let card = cardByTitle("输出速度");
+    expect(within(card).getByText("—")).toBeInTheDocument();
+    expect(within(card).queryByText(/次计时/)).not.toBeInTheDocument();
+    expect(within(card).queryByText(/首字平均/)).not.toBeInTheDocument();
+
+    rerender(<OutputSpeedMetric metrics={{ ...requestMetrics, output_speed: 61.9, speed_samples: 1, mean_ttft_seconds: null, ttft_samples: 0 }} />);
+    card = cardByTitle("输出速度");
+    expect(within(card).getByText("首字平均 — · 0 次计时")).toBeInTheDocument();
+  });
+
+  it("replaces the last two cards with request metrics while keeping five KPI cards", () => {
+    render(<MetricGridFixture displayMode="request" usage={usage} requestMetrics={requestMetrics} quota={quota} />);
+    const grid = screen.getByLabelText("KPI 指标");
+    expect(grid.children).toHaveLength(5);
+    expect(Array.from(grid.children).map((card) => card.querySelector(".text-xs.font-medium")?.textContent)).toEqual([
+      "总 Token", "缓存命中", "等价费用", "请求数", "输出速度",
+    ]);
+    expect(within(grid).queryByRole("group", { name: "账户额度" })).not.toBeInTheDocument();
   });
 
   it("shows only Copilot premium requests, titled Copilot·requests, with its reset time instead of the usage text", () => {

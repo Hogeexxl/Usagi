@@ -28,9 +28,20 @@ export type UsageDto = {
   speed_samples: number;
 };
 
+export type RequestMetricsDto = {
+  calls: number;
+  errors: number;
+  retried: number;
+  output_speed: number | null;
+  speed_samples: number;
+  mean_ttft_seconds: number | null;
+  ttft_samples: number;
+};
+
 export type SummaryResponse = {
   data_revision: number;
   usage: UsageDto;
+  request_metrics: RequestMetricsDto;
   session_count: number;
   session_median: number | null;
   session_p90: number | null;

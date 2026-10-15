@@ -4,6 +4,7 @@ import { usagiClient, type UsagiClient } from "../data/usagiClient";
 import type { QuotaResponse } from "../data/types";
 
 const QUOTA_POLL_INTERVAL_MS = 60_000;
+const QUOTA_READING_POLL_INTERVAL_MS = 5_000;
 
 const loadingQuota = (): QuotaResponse => ({ reading: true, items: [] });
 
@@ -26,6 +27,7 @@ export function useDashboardQuotaController(
   const client = options.client ?? usagiClient;
   const codexOnly = options.codexOnly ?? false;
   const [quota, setQuota] = useState<QuotaResponse>(loadingQuota);
+  const quotaRef = useRef(quota);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
@@ -40,7 +42,7 @@ export function useDashboardQuotaController(
     pollTimerRef.current = window.setTimeout(() => {
       pollTimerRef.current = null;
       loadRef.current?.();
-    }, QUOTA_POLL_INTERVAL_MS);
+    }, quotaRef.current.reading ? QUOTA_READING_POLL_INTERVAL_MS : QUOTA_POLL_INTERVAL_MS);
   }, []);
 
   const loadSnapshot = useCallback(() => {
@@ -50,6 +52,7 @@ export function useDashboardQuotaController(
     void client.quota(controller.signal).then(
       (response) => {
         if (!mountedRef.current || controller.signal.aborted || requestRef.current !== controller) return;
+        quotaRef.current = response;
         setQuota(response);
         setRefreshError(false);
       },
@@ -69,6 +72,7 @@ export function useDashboardQuotaController(
   useEffect(() => {
     mountedRef.current = true;
     const initialQuota = loadingQuota();
+    quotaRef.current = initialQuota;
     setQuota(initialQuota);
     setRefreshing(false);
     loadSnapshot();
@@ -95,6 +99,7 @@ export function useDashboardQuotaController(
     void client.refreshQuota(controller.signal).then(
       (response) => {
         if (mountedRef.current && !controller.signal.aborted && requestRef.current === controller) {
+          quotaRef.current = response;
           setQuota(response);
         }
       },

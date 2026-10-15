@@ -26,11 +26,22 @@ type usageDTO struct {
 }
 
 type summaryResponseDTO struct {
-	DataRevision  int64    `json:"data_revision"`
-	Usage         usageDTO `json:"usage"`
-	SessionCount  int64    `json:"session_count"`
-	SessionMedian *int64   `json:"session_median"`
-	SessionP90    *int64   `json:"session_p90"`
+	DataRevision   int64             `json:"data_revision"`
+	Usage          usageDTO          `json:"usage"`
+	RequestMetrics requestMetricsDTO `json:"request_metrics"`
+	SessionCount   int64             `json:"session_count"`
+	SessionMedian  *int64            `json:"session_median"`
+	SessionP90     *int64            `json:"session_p90"`
+}
+
+type requestMetricsDTO struct {
+	Calls           int64    `json:"calls"`
+	Errors          int64    `json:"errors"`
+	Retried         int64    `json:"retried"`
+	OutputSpeed     *float64 `json:"output_speed"`
+	SpeedSamples    int64    `json:"speed_samples"`
+	MeanTTFTSeconds *float64 `json:"mean_ttft_seconds"`
+	TTFTSamples     int64    `json:"ttft_samples"`
 }
 
 type modelDistributionItemDTO struct {

@@ -130,7 +130,10 @@ describe("SessionDetailDrawer Spec04 SessionListItemView", () => {
     expect(summary).toHaveTextContent("Main Tokens");
     expect(summary).toHaveTextContent("Subagent Tokens");
     expect(summary).toHaveTextContent("Total Tokens");
-    expect(summary).toHaveTextContent("3,601");
+    expect(summary).toHaveTextContent("1.8K");
+    const totalTokens = summary.querySelector('dd[aria-label="Total Tokens：3,601"]');
+    expect(totalTokens).toHaveTextContent("3.6K");
+    expect(totalTokens?.querySelector("span")).toHaveAttribute("title", "3,601");
     expect(summary).toHaveTextContent("$1.20");
     expect(screen.queryByText(/复制/)).not.toBeInTheDocument();
   });
@@ -443,6 +446,68 @@ describe("SessionDetailDrawer Spec04 SessionListItemView", () => {
     expect(screen.getByText("1 条使用记录未计价")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /未命名子代理.*model-y \(low\)/ }));
     expect(screen.queryByText("Compaction")).not.toBeInTheDocument();
+  });
+
+  it("uses compact KPI formatting for every token value and retains exact values", () => {
+    const largeUsage: UsageDto = {
+      ...usage(2_345_678),
+      input: 1_801,
+      output: 1_000_000,
+      reasoning: 2_000_000,
+      cache_read: 3_000_000,
+      cache_write: 4_000_000,
+      cache_write_1h: 5_000_000,
+    };
+    const largeThread = thread({
+      model_effort: [{ model: "gpt-5", effort: "high", compaction_tokens: 6_000_000, usage: largeUsage }],
+    });
+    const largeChild = child({
+      nickname: "Large child",
+      model_effort: [{ model: "Sol", effort: "high", compaction_tokens: 6_000_000, usage: largeUsage }],
+    });
+    const largeDetail: SessionDetailResponse = {
+      ...detail,
+      thread: largeThread,
+      self_usage: usage(1_801),
+      subagent_usage: usage(2_000_000),
+      unknown_usage: usage(1_000_000_000),
+      inclusive_usage: largeUsage,
+      children: [largeChild],
+    };
+    render(<SessionDetailDrawer view={view({ detail: largeDetail, selected_row: { ...row, thread: largeThread } })} timezone={timezone} />);
+
+    const summary = screen.getByRole("region", { name: "Session 合计" });
+    for (const [label, full, compact] of [
+      ["Main Tokens", "1,801", "1.8K"],
+      ["Subagent Tokens", "2,000,000", "2M"],
+      ["Unknown Tokens", "1,000,000,000", "1B"],
+      ["Total Tokens", "2,345,678", "2.3M"],
+    ]) {
+      const value = summary.querySelector(`dd[aria-label="${label}：${full}"]`);
+      expect(value).toHaveTextContent(compact);
+      expect(value?.querySelector("span")).toHaveAttribute("title", full);
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "gpt-5 (high)" }));
+    const mainRegion = screen.getByRole("region", { name: "gpt-5 (high)" });
+    for (const [label, full, compact] of [
+      ["Total Tokens", "2,345,678", "2.3M"],
+      ["Input", "1,801", "1.8K"],
+      ["Output", "1,000,000", "1M"],
+      ["Reasoning", "2,000,000", "2M"],
+      ["Cache Read", "3,000,000", "3M"],
+      ["Cache Write", "4,000,000", "4M"],
+      ["Cache Write 1h", "5,000,000", "5M"],
+      ["Compaction", "6,000,000", "6M"],
+    ]) {
+      const value = within(mainRegion).getByLabelText(`${label}：${full}`);
+      expect(value).toHaveTextContent(compact);
+      expect(value).toHaveAttribute("title", full);
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: /Large child/ }));
+    const childRegion = screen.getByRole("region", { name: /Large child/ });
+    expect(within(childRegion).getByLabelText("Input：1,801")).toHaveTextContent("1.8K");
   });
 
   it("hides zero cache write rows for main and child usage receipts", () => {

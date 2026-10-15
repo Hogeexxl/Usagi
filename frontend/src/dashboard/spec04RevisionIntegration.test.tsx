@@ -139,7 +139,7 @@ function setupHttpWire(initial: {
     if (path === "/api/quota" || path === "/api/quota/refresh") {
       return { body: { reading: backend.quotaReading, items: backend.quotaItems }, status: 200 };
     }
-    if (path === "/api/usage/summary") return { body: { data_revision: dataRevision, usage: usage(dataRevision), session_count: 1, session_median: 1, session_p90: 1 }, status: 200 };
+    if (path === "/api/usage/summary") return { body: { data_revision: dataRevision, usage: usage(dataRevision), request_metrics: { calls: 1, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: 1, session_median: 1, session_p90: 1 }, status: 200 };
     if (path === "/api/usage/filter-options") {
       return {
         body: {
@@ -168,7 +168,7 @@ function setupHttpWire(initial: {
       return {
         body: {
           data_revision: dataRevision,
-          summary: { data_revision: dataRevision, usage: usage(dataRevision), session_count: 1, session_median: 1, session_p90: 1 },
+          summary: { data_revision: dataRevision, usage: usage(dataRevision), request_metrics: { calls: 1, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: 1, session_median: 1, session_p90: 1 },
           items: [sessionRow(dataRevision)],
         },
         status: 200,

@@ -51,7 +51,7 @@ type watchers struct {
 	usageMu       sync.Mutex
 }
 
-const quotaReadingPollInterval = 60 * time.Second
+const quotaReadingPollInterval = 5 * time.Second
 
 func newWatchers(queryService WatcherQuery, quotaService watcherQuotaService, revisions RevisionService, quotaSnapshot *QuotaSnapshot, usageInterval, quotaInterval time.Duration) *watchers {
 	return &watchers{

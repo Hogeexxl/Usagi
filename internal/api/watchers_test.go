@@ -92,20 +92,16 @@ func TestWatcherPublishesDatabaseRevisionEvenWhenSyncReportsError(t *testing.T) 
 	}
 }
 
-func TestUsageFingerprintExcludesGeneratedAndTimingFields(t *testing.T) {
+func TestUsageFingerprintIncludesTimingAndExcludesGeneratedFields(t *testing.T) {
 	base := magpie.UsageSummary{
 		Period: "all", Bucket: "month", Since: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
-		UsageTotals: magpie.UsageTotals{Calls: 2, Input: 10, Timed: 1, TTFTMs: 4, DecodeMs: 5, DecodeOut: 6},
+		UsageTotals: magpie.UsageTotals{Calls: 2, Input: 10, Timed: 1, TTFTMs: 4, DecodeMs: 5, DecodeOut: 6, DecodeN: 1},
 		Models:      []magpie.UsageGroup{{ID: "provider/model", Provider: "provider", Model: "model", UsageTotals: magpie.UsageTotals{Calls: 2, Input: 10}}},
 	}
 	changed := base
 	changed.Period = "different-generated-period"
 	changed.Bucket = "different-generated-bucket"
 	changed.Since = time.Date(2021, 2, 3, 0, 0, 0, 0, time.UTC)
-	changed.Timed++
-	changed.TTFTMs++
-	changed.DecodeMs++
-	changed.DecodeOut++
 	a, err := query.UsageFingerprint(base)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +111,26 @@ func TestUsageFingerprintExcludesGeneratedAndTimingFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a != b {
-		t.Fatal("generated boundary or timing-only changes altered the Usage fingerprint")
+		t.Fatal("generated boundary fields altered the Usage fingerprint")
+	}
+	for name, alter := range map[string]func(*magpie.UsageTotals){
+		"timed":      func(value *magpie.UsageTotals) { value.Timed++ },
+		"ttft":       func(value *magpie.UsageTotals) { value.TTFTMs++ },
+		"decode_ms":  func(value *magpie.UsageTotals) { value.DecodeMs++ },
+		"decode_out": func(value *magpie.UsageTotals) { value.DecodeOut++ },
+		"decode_n":   func(value *magpie.UsageTotals) { value.DecodeN++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			alter(&value.UsageTotals)
+			fingerprint, err := query.UsageFingerprint(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a == fingerprint {
+				t.Fatalf("timing-only %s change did not alter the Usage fingerprint", name)
+			}
+		})
 	}
 	changed.Models[0].Provider = "other-provider"
 	b, err = query.UsageFingerprint(changed)
@@ -165,13 +180,68 @@ func TestQuotaWatcherFailurePreservesSnapshotAndRecordsError(t *testing.T) {
 	}
 }
 
+func TestQuotaWatcherPollsReadingSnapshotUntilLoadedWithoutAsking(t *testing.T) {
+	reading := projection.QuotaView{Reading: true, Items: []projection.QuotaProviderView{}}
+	loaded := projection.QuotaView{Items: []projection.QuotaProviderView{{Provider: "codex", Name: "Codex", Plan: "loaded"}}}
+	service := &watcherTestQuotaService{results: []quotaResult{{view: reading}, {view: loaded}}}
+	snapshot := &QuotaSnapshot{}
+	watcher := newWatchers(nil, service, NewRevisionService(0), snapshot, time.Hour, time.Hour)
+	runtime := newStatusTestSource(magpie.RuntimeStatusReady)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.runQuota(ctx, runtime, 10*time.Millisecond)
+	}()
+
+	waitQuotaWatcherSnapshot(t, snapshot, func(view projection.QuotaView, loadedSnapshot bool, err error) bool {
+		return loadedSnapshot && err == nil && reflect.DeepEqual(view, reading)
+	})
+	waitQuotaWatcherSnapshot(t, snapshot, func(view projection.QuotaView, loadedSnapshot bool, err error) bool {
+		return loadedSnapshot && err == nil && reflect.DeepEqual(view, loaded)
+	})
+	time.Sleep(30 * time.Millisecond)
+	service.mu.Lock()
+	calls := service.calls
+	asked := append([]bool(nil), service.asked...)
+	service.mu.Unlock()
+	if calls != 2 || !reflect.DeepEqual(asked, []bool{false, false}) {
+		t.Fatalf("startup quota reads = %d asked %v, want two cached reads without asking", calls, asked)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("quota watcher did not stop after context cancellation")
+	}
+}
+
+func waitQuotaWatcherSnapshot(t *testing.T, snapshot *QuotaSnapshot, ready func(projection.QuotaView, bool, error) bool) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if view, loaded, err := snapshot.Current(); ready(view, loaded, err) {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("timed out waiting for quota snapshot")
+		}
+	}
+}
+
 func TestWatchersKeepUsageAndQuotaIntervalsIndependent(t *testing.T) {
 	watcher := newWatchers(nil, nil, NewRevisionService(0), &QuotaSnapshot{}, 7*time.Second, 11*time.Second)
 	if watcher.usageInterval != 7*time.Second || watcher.quotaInterval != 11*time.Second {
 		t.Fatalf("watcher intervals = %v/%v", watcher.usageInterval, watcher.quotaInterval)
 	}
-	if quotaReadingPollInterval != 60*time.Second {
-		t.Fatalf("quota reading interval = %v, want 60 seconds", quotaReadingPollInterval)
+	if quotaReadingPollInterval != 5*time.Second {
+		t.Fatalf("quota reading interval = %v, want 5 seconds", quotaReadingPollInterval)
 	}
 }
 

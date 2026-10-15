@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"testing"
 
@@ -100,6 +101,42 @@ func TestSummary(t *testing.T) {
 	}
 	if datasetCalls != 2 {
 		t.Fatalf("SessionDataset calls = %d, want one for each projection", datasetCalls)
+	}
+}
+
+func TestSummaryRequestMetricsIncludeUnknownAndLegacyRowsOnce(t *testing.T) {
+	project := query.ProjectRef{Kind: query.ProjectKindProject, Path: "/work", Name: "work"}
+	rows := []query.UsageRow{
+		{
+			Agent: "codex", Session: "X", SessionRole: "main", Output: 100, Millis: 1100, TTFTMs: 100,
+			ResolvedSession: query.SessionRef{Agent: "codex", ID: "X"}, Project: project,
+		},
+		{
+			Agent: "codex", Session: "X", SessionRole: "unknown", Output: 100, Millis: 2100, TTFTMs: 100, Tries: 2,
+			ResolvedSession: query.SessionRef{Agent: "codex", ID: "X"}, Project: project,
+		},
+		{
+			Agent: "codex", Session: "X", Kind: "collab_spawn", Status: 429, Input: 4, Output: 5,
+			ResolvedSession: query.SessionRef{Agent: "codex", ID: "X"}, Project: project,
+		},
+	}
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
+		Sessions: []query.SessionUsage{{Agent: "codex", ID: "X", Project: project, HasRows: true}}, Rows: rows,
+	}})
+
+	got, err := service.Summary(context.Background(), ScopeQuery{Range: query.DateRange{From: "2026-10-01", To: "2026-10-15"}})
+	if err != nil {
+		t.Fatalf("Summary() error = %v", err)
+	}
+	if got.Usage.Calls != 3 || got.Usage.Input != 4 || got.Usage.Output != 205 {
+		t.Fatalf("existing usage summary = %+v, want all three rows and their tokens", got.Usage)
+	}
+	metrics := got.RequestMetrics
+	if metrics.Calls != 3 || metrics.Errors != 1 || metrics.Retried != 1 || metrics.SpeedSamples != 2 || metrics.TTFTSamples != 2 {
+		t.Fatalf("request metrics = %+v, want main, unknown and legacy rows exactly once", metrics)
+	}
+	if metrics.OutputSpeed == nil || math.Abs(*metrics.OutputSpeed-200.0/3.0) > 1e-9 || metrics.MeanTTFTSeconds == nil || *metrics.MeanTTFTSeconds != 0.1 {
+		t.Fatalf("request aggregate speed/TTFT = %v/%v, want weighted 66.67 token/s and 0.1 seconds", metrics.OutputSpeed, metrics.MeanTTFTSeconds)
 	}
 }
 

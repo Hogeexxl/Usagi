@@ -533,6 +533,7 @@ func summaryForItems(items []SessionListItemView) SummaryView {
 			values = append(values, value)
 		}
 	}
+	result.RequestMetrics = result.Usage.requestMetrics.view()
 	if len(values) == 0 {
 		return result
 	}

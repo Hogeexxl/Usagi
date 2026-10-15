@@ -133,11 +133,14 @@ type UsageRow struct {
 	Status int
 	Error  string
 
-	Tries       int
-	Millis      int64
-	TTFTMs      int64
-	FirstTextMs int64
-	FlowMs      int64
+	Tries            int
+	Millis           int64
+	TTFTMs           int64
+	FirstTextMs      int64
+	FirstReasoningMs int64
+	FlowMs           int64
+	ReasoningHidden  bool
+	HandedOn         bool
 
 	ResolvedSession SessionRef
 	Project         ProjectRef

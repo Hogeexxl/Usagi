@@ -81,10 +81,10 @@ function fakeClient(overrides: Partial<UsagiClient> = {}): UsagiClient {
     quota: vi.fn(async () => allQuota),
     refreshQuota: vi.fn(async () => codexQuota),
     filterOptions: vi.fn(async () => ({ data_revision: 1, agents: [], models: [], projects: [] })),
-    summary: vi.fn(async () => ({ data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null })),
+    summary: vi.fn(async () => ({ data_revision: 1, usage, request_metrics: { calls: 0, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: 1, session_median: null, session_p90: null })),
     modelDistribution: vi.fn(async () => ({ data_revision: 1, items: [] })),
     projectDistribution: vi.fn(async () => ({ data_revision: 1, items: [] })),
-    getSessions: vi.fn(async () => ({ data_revision: 1, summary: { data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null }, items: [] })),
+    getSessions: vi.fn(async () => ({ data_revision: 1, summary: { data_revision: 1, usage, request_metrics: { calls: 0, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: 1, session_median: null, session_p90: null }, items: [] })),
     toolUsage: vi.fn(async (days) => ({ days, calls: 0, top: [] })),
     getSessionDetail: vi.fn(),
     getStatus: vi.fn(async () => status),
@@ -199,7 +199,7 @@ describe("TrayPanelPage Spec04", () => {
   it("recovers a failed data read through the retry control", async () => {
     const sessions = vi.fn()
       .mockRejectedValueOnce(new Error("Sessions unavailable"))
-      .mockResolvedValue({ data_revision: 1, summary: { data_revision: 1, usage, session_count: 1, session_median: null, session_p90: null }, items: [] });
+      .mockResolvedValue({ data_revision: 1, summary: { data_revision: 1, usage, request_metrics: { calls: 0, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: 1, session_median: null, session_p90: null }, items: [] });
     const client = fakeClient({
       getSessions: sessions,
       getStatus: vi.fn(async () => ({ status_revision: 1, runtime_state: "starting" as const, last_error_code: null })),

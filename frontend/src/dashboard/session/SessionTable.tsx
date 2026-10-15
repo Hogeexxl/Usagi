@@ -1,6 +1,7 @@
 import type { SessionListItemDto, SessionSortField, SessionSortOrder } from "../../data/types";
 import { threadKeyId } from "../../data/usagiClient";
 import { Table, type SortState, type TableColumn } from "../../ui/beui/table";
+import { cn } from "../../ui/lib/cn";
 import { formatCost, formatRatio } from "../format";
 import { projectDisplay } from "../shared/projectDisplay";
 import {
@@ -26,9 +27,9 @@ type SessionTableProps = {
 
 const TABLE_ROW_HEIGHT = 64;
 const TABLE_HEADER_HEIGHT = 48;
-const TABLE_PAGE_SIZE = 10;
+const TABLE_PAGE_SIZE = 6;
 const TABLE_EMPTY_HEIGHT = 192;
-const TABLE_INITIAL_LOADING_HEIGHT = 480;
+const TABLE_INITIAL_LOADING_SKELETON_HEIGHT = TABLE_ROW_HEIGHT * TABLE_PAGE_SIZE;
 
 export const sortableColumns: Array<{ field: SessionSortField; label: string }> = [
   { field: "last_activity", label: "最后活动" },
@@ -59,7 +60,7 @@ export function SessionTable({
     loadState === "loading" ||
     pageState === "loading";
   const tableHeight = rows.length === 0
-    ? loading ? TABLE_INITIAL_LOADING_HEIGHT : TABLE_EMPTY_HEIGHT
+    ? loading ? TABLE_INITIAL_LOADING_SKELETON_HEIGHT : TABLE_EMPTY_HEIGHT
     : TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT * Math.min(rows.length, TABLE_PAGE_SIZE);
   const columns: TableColumn<SessionListItemDto>[] = [
     {
@@ -113,9 +114,11 @@ export function SessionTable({
       width: "150px",
       sortable: true,
       align: "right",
-      cell: (item) => item.has_usage_rows
-        ? <span className="tabular-nums" title={String(item.inclusive_usage.total)}>{formatSessionTokenInteger(item.inclusive_usage.total).text}</span>
-        : <span>—</span>,
+      cell: (item) => {
+        if (!item.has_usage_rows) return <span>—</span>;
+        const total = formatSessionTokenInteger(item.inclusive_usage.total);
+        return <span className="tabular-nums" title={total.title} aria-label={total.accessibleName}>{total.text}</span>;
+      },
     },
     {
       key: "cache_hit_rate",
@@ -150,7 +153,7 @@ export function SessionTable({
       headerHeight={TABLE_HEADER_HEIGHT}
       height={tableHeight}
       loading={loading}
-      skeletonRows={10}
+      skeletonRows={TABLE_PAGE_SIZE}
       emptyState="当前时间范围暂无 Session 记录"
       sort={controlledSort}
       onSortChange={(next) => onSort((next?.key ?? sortBy) as SessionSortField)}
@@ -158,7 +161,10 @@ export function SessionTable({
       selectable={false}
       resizable={false}
       reorderable={false}
-      className="rounded-2xl"
+      className={cn(
+        "rounded-2xl [&>div:first-child]:overflow-x-auto [&>div:first-child]:overflow-y-hidden",
+        (rows.length > 0 || loading) && "[&>div:first-child]:!h-auto",
+      )}
       getRowProps={(item) => {
         const keyId = threadKeyId(item.thread.key);
         const activate = () => onOpenSession?.(item);

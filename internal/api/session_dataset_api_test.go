@@ -49,6 +49,10 @@ func TestDatabaseReadEndpointsUseInitialSyncGateAndSessionDTO(t *testing.T) {
 		now.Add(2*time.Second).UnixNano(), now.Format(time.DateOnly)); err != nil {
 		t.Fatalf("insert zero-token Codex child request: %v", err)
 	}
+	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,status,rejected,input,output)
+		VALUES (?,?, 'codex',403,1,99,99)`, now.Add(3*time.Second).UnixNano(), now.Format(time.DateOnly)); err != nil {
+		t.Fatalf("insert local rejected request: %v", err)
+	}
 
 	config := DefaultConfig()
 	config.StaticFS = fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}}
@@ -92,8 +96,20 @@ func TestDatabaseReadEndpointsUseInitialSyncGateAndSessionDTO(t *testing.T) {
 	}
 	if sessions.Summary.SessionCount != 3 || sessions.Summary.Usage.Calls != 3 || sessions.Summary.Usage.Input != 7 ||
 		sessions.Summary.Usage.Output != 4 || sessions.Summary.SessionMedian == nil || *sessions.Summary.SessionMedian != 3 ||
-		sessions.Summary.SessionP90 == nil || *sessions.Summary.SessionP90 != 8 {
+		sessions.Summary.SessionP90 == nil || *sessions.Summary.SessionP90 != 8 || sessions.Summary.RequestMetrics.Calls != 3 {
 		t.Fatalf("embedded session summary = %+v", sessions.Summary)
+	}
+	filteredSummaryResponse := request(server, http.MethodGet, "/api/usage/summary?range=today&agent=claude")
+	var filteredSummary summaryResponseDTO
+	if filteredSummaryResponse.Code != http.StatusOK || json.Unmarshal(filteredSummaryResponse.Body.Bytes(), &filteredSummary) != nil ||
+		filteredSummary.Usage.Calls != 1 || filteredSummary.RequestMetrics.Calls != 1 {
+		t.Fatalf("filtered summary usage/request calls = %d/%d; want the one selected Claude row", filteredSummary.Usage.Calls, filteredSummary.RequestMetrics.Calls)
+	}
+	filteredSessionsResponse := request(server, http.MethodGet, "/api/usage/sessions?range=today&agent=claude")
+	var filteredSessions sessionsResponseDTO
+	if filteredSessionsResponse.Code != http.StatusOK || json.Unmarshal(filteredSessionsResponse.Body.Bytes(), &filteredSessions) != nil ||
+		filteredSessions.Summary.Usage.Calls != 1 || filteredSessions.Summary.RequestMetrics.Calls != 1 {
+		t.Fatalf("filtered embedded summary usage/request calls = %d/%d; want the one selected Claude row", filteredSessions.Summary.Usage.Calls, filteredSessions.Summary.RequestMetrics.Calls)
 	}
 	byID := make(map[string]sessionListItemDTO, len(sessions.Items))
 	for _, item := range sessions.Items {

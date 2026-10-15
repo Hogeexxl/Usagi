@@ -61,31 +61,62 @@ function item(index: number, options: { total?: number; cost?: number; activity?
 function snapshot(items: SessionListItemDto[], dataRevision = 4): SessionListResponse {
   return {
     data_revision: dataRevision,
-    summary: { data_revision: dataRevision, usage: usage(items.length), session_count: items.length, session_median: null, session_p90: null },
+    summary: { data_revision: dataRevision, usage: usage(items.length), request_metrics: { calls: 0, errors: 0, retried: 0, output_speed: null, speed_samples: 0, mean_ttft_seconds: null, ttft_samples: 0 }, session_count: items.length, session_median: null, session_p90: null },
     items,
   };
 }
 
 describe("useSessionTableController shared snapshot", () => {
-  it("sorts and pages all snapshot items locally at ten per page", () => {
+  it("sorts all snapshot items before paging six rows at a time", () => {
     const items = Array.from({ length: 25 }, (_, index) => item(index + 1));
     const result = renderHook(() => useSessionTableController({ key: "today" }, filters, snapshot(items), "ready", undefined, vi.fn())).result;
 
     expect(result.current.sort_by).toBe("last_activity");
     expect(result.current.sort_order).toBe("desc");
-    expect(result.current.rows).toHaveLength(10);
+    expect(result.current.rows).toHaveLength(6);
     expect(result.current.rows[0].thread.title).toBe("Session 25");
     expect(result.current.total_items).toBe(25);
-    expect(result.current.total_pages).toBe(3);
+    expect(result.current.total_pages).toBe(5);
 
     act(() => result.current.select_sort("cost"));
     expect(result.current.sort_by).toBe("cost");
     expect(result.current.sort_order).toBe("desc");
     expect(result.current.rows[0].inclusive_usage.cost).toBe(0.25);
+    expect(result.current.rows.map((row) => row.inclusive_usage.cost)).toEqual([0.25, 0.24, 0.23, 0.22, 0.21, 0.2]);
     act(() => result.current.next_page());
     expect(result.current.page).toBe(2);
-    expect(result.current.rows).toHaveLength(10);
+    expect(result.current.rows).toHaveLength(6);
+    expect(result.current.rows.map((row) => row.inclusive_usage.cost)).toEqual([0.19, 0.18, 0.17, 0.16, 0.15, 0.14]);
     expect(result.current.total_items).toBe(25);
+  });
+
+  it("clamps the page after refresh and resets it on range and filter changes while keeping the sort", () => {
+    const range: DashboardRange = { key: "today" };
+    const { result, rerender } = renderHook(
+      ({ activeRange, activeFilters, sessionSnapshot }) =>
+        useSessionTableController(activeRange, activeFilters, sessionSnapshot, "ready", undefined, vi.fn()),
+      { initialProps: { activeRange: range, activeFilters: filters, sessionSnapshot: snapshot(Array.from({ length: 25 }, (_, index) => item(index + 1))) } },
+    );
+
+    act(() => result.current.go_to_page(5));
+    expect(result.current.page).toBe(5);
+    rerender({ activeRange: range, activeFilters: filters, sessionSnapshot: snapshot(Array.from({ length: 7 }, (_, index) => item(index + 1)), 5) });
+    expect(result.current.page).toBe(2);
+    expect(result.current.total_pages).toBe(2);
+    expect(result.current.rows).toHaveLength(1);
+
+    act(() => result.current.select_sort("cost"));
+    expect(result.current.sort_order).toBe("desc");
+    rerender({ activeRange: { key: "yesterday" }, activeFilters: filters, sessionSnapshot: snapshot(Array.from({ length: 7 }, (_, index) => item(index + 1)), 6) });
+    expect(result.current.page).toBe(1);
+    expect(result.current.sort_by).toBe("cost");
+    expect(result.current.sort_order).toBe("desc");
+
+    act(() => result.current.go_to_page(2));
+    rerender({ activeRange: { key: "yesterday" }, activeFilters: { ...filters, agents: ["codex"] }, sessionSnapshot: snapshot(Array.from({ length: 7 }, (_, index) => item(index + 1)), 6) });
+    expect(result.current.page).toBe(1);
+    expect(result.current.sort_by).toBe("cost");
+    expect(result.current.sort_order).toBe("desc");
   });
 
   it("keeps null last for ascending and descending sorts, using ThreadKey for ties", () => {

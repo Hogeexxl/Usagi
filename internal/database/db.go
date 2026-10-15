@@ -99,13 +99,38 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := migrateV2ToV3(ctx, tx); err != nil {
 			return err
 		}
+		fallthrough
 	case "3":
+		if err := migrateV3ToV4(ctx, tx); err != nil {
+			return err
+		}
+	case "4":
 	default:
 		return fmt.Errorf("database: unsupported schema version %q", version)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV3ToV4(ctx context.Context, tx *sql.Tx) error {
+	for _, statement := range []string{
+		"ALTER TABLE requests ADD COLUMN handed_on INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE requests ADD COLUMN first_reasoning_ms INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE requests ADD COLUMN reasoning_hidden INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sync_days ADD COLUMN request_metrics_backfill_pending INTEGER NOT NULL DEFAULT 0",
+		`INSERT OR IGNORE INTO sync_days (day, request_metrics_backfill_pending)
+			SELECT DISTINCT local_day, 1 FROM requests`,
+		`UPDATE sync_days SET request_metrics_backfill_pending = 1 WHERE EXISTS (
+			SELECT 1 FROM requests WHERE requests.local_day = sync_days.day
+		)`,
+		"UPDATE app_meta SET value = '4' WHERE key = 'schema_version'",
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("database: migrate schema version 3 to 4: %w", err)
+		}
 	}
 	return nil
 }

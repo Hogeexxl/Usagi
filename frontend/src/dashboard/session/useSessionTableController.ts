@@ -12,7 +12,7 @@ import type {
 import type { LoadState } from "../useDashboardController";
 import type { SessionTableViewModel } from "./sessionTypes";
 
-export const FRONTEND_PAGE_SIZE = 10;
+export const FRONTEND_PAGE_SIZE = 6;
 
 const DEFAULT_SORT_BY: SessionSortField = "last_activity";
 const DEFAULT_SORT_ORDER: SessionSortOrder = "desc";

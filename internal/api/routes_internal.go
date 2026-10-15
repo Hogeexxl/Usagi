@@ -206,8 +206,13 @@ func (s *Server) handleToolUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func mapSummaryDTO(dataRevision int64, view projection.SummaryView) summaryResponseDTO {
+	requestMetrics := view.RequestMetrics
 	return summaryResponseDTO{
-		DataRevision: dataRevision, Usage: mapUsageDTO(view.Usage), SessionCount: view.RootSessionCount,
+		DataRevision: dataRevision, Usage: mapUsageDTO(view.Usage), RequestMetrics: requestMetricsDTO{
+			Calls: requestMetrics.Calls, Errors: requestMetrics.Errors, Retried: requestMetrics.Retried,
+			OutputSpeed: requestMetrics.OutputSpeed, SpeedSamples: requestMetrics.SpeedSamples,
+			MeanTTFTSeconds: requestMetrics.MeanTTFTSeconds, TTFTSamples: requestMetrics.TTFTSamples,
+		}, SessionCount: view.RootSessionCount,
 		SessionMedian: view.SessionMedian, SessionP90: view.SessionP90,
 	}
 }

@@ -1,8 +1,8 @@
-import { CircleAlert, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { memo, useRef, useState } from "react";
 
-import type { QuotaProviderDto, QuotaResponse, QuotaWindowDto, UsageDto } from "../data/types";
+import type { QuotaProviderDto, QuotaResponse, QuotaWindowDto, RequestMetricsDto, UsageDto } from "../data/types";
 import { chartMuted, chartSeriesColor } from "./charts/chartPalette";
 import { EASE_OUT } from "../ui/lib/ease";
 import { NumberTicker } from "../ui/beui/number-ticker";
@@ -10,11 +10,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "../ui/beui/popover";
 import { Button } from "../ui/beui/button";
 import { NotificationStack, type NotificationStackItem } from "../ui/beui/notification-stack";
 import { TiltCard } from "../ui/beui/tilt-card";
-import { formatQuotaResetTime, formatCostFull, formatCostPerMillionTokens, formatIntegerFull, formatRatio, type FormattedValue } from "./format";
+import { formatQuotaResetTime, formatCostFull, formatCostPerMillionTokens, formatIntegerFull, formatRatio, formatRequestCount, type FormattedValue } from "./format";
 import { useHoverGesture } from "../ui/lib/use-hover-gesture";
 
 type MetricGridProps = {
   usage: UsageDto | null;
+  requestMetrics: RequestMetricsDto | null;
+  displayMode: "session" | "request";
   sessionCount: number;
   sessionMedian: number | null;
   sessionP90: number | null;
@@ -170,37 +172,59 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
   );
 }
 
-export function RequestMetric({ usage, glare = false }: { usage: UsageDto; glare?: boolean }) {
-  const hasFailures = usage.errors > 0;
-  const successRate = usage.calls > 0 ? formatRatio((usage.calls - usage.errors) / usage.calls).text : "—";
-  const speed = usage.output_speed === null || usage.speed_samples === 0
-    ? "—"
-    : `${formatIntegerFull(Math.round(usage.output_speed)).title} token/s（${formatIntegerFull(usage.speed_samples).title} 次）`;
+export function RequestMetric({ metrics, glare = false }: { metrics: RequestMetricsDto; glare?: boolean }) {
+  const successRate = metrics.calls > 0 ? formatRatio((metrics.calls - metrics.errors) / metrics.calls).text : "—";
+  const failures = formatRequestCount(metrics.errors);
+  const retries = formatRequestCount(metrics.retried);
 
   return (
     <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className={TITLE}>请求数</div>
-        <Popover trigger="hover" side="bottom" align="end">
-          <PopoverTrigger>
-            <button
-              type="button"
-              aria-label="请求失败与重试提示"
-              className={`inline-flex items-center justify-center ${hasFailures ? "text-warning" : "text-foreground"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
-            >
-              <CircleAlert className="h-4 w-4" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
-            <div className="flex flex-col gap-1">
-              <div>{formatIntegerFull(usage.errors).title} 次失败 · 成功 {successRate}</div>
-              <div>{formatIntegerFull(usage.retried).title} 次重试后成功</div>
-            </div>
-          </PopoverContent>
-        </Popover>
+      <div className={TITLE}>请求数</div>
+      <CompactTicker value={metrics.calls} formatter={formatRequestCount} />
+      <div className="mt-auto flex flex-col text-xs leading-4">
+        <div>
+          <span className="text-destructive" title={failures.title}>{failures.text} 次失败</span>
+          <span className="text-muted-foreground"> · 成功 {successRate}</span>
+        </div>
+        <div>
+          <span className="text-warning" title={retries.title}>{retries.text} 次重试后成功</span>
+        </div>
       </div>
-      <CompactTicker value={usage.calls} formatter={formatIntegerFull} />
-      <div className={`${LEGEND} mt-auto truncate`} title={`输出速度：${speed}`}>输出速度：{speed}</div>
+    </TiltCard>
+  );
+}
+
+export function OutputSpeedMetric({ metrics, glare = false }: { metrics: RequestMetricsDto; glare?: boolean }) {
+  const hasSpeedSample = metrics.output_speed !== null && metrics.speed_samples > 0;
+  const speedSamples = formatRequestCount(metrics.speed_samples);
+  const ttftSamples = formatRequestCount(metrics.ttft_samples);
+  const meanTtft = metrics.mean_ttft_seconds === null ? "—" : `${metrics.mean_ttft_seconds.toFixed(1)}s`;
+
+  return (
+    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+      <div className={TITLE}>输出速度</div>
+      {hasSpeedSample ? (
+        <>
+          <div className="mt-2 flex min-w-0 items-center gap-1">
+            <CompactTicker
+              value={Math.round(metrics.output_speed!)}
+              formatter={formatIntegerFull}
+              tickerFormatter={(next) => formatIntegerFull(next).title}
+              className="text-[28px] font-semibold leading-8 tracking-tight text-foreground"
+              wrapperClassName="inline-flex items-center"
+            />
+            <span className="inline-flex h-[1.1em] items-center truncate text-[28px] font-normal leading-none tracking-tight text-muted-foreground">token/s</span>
+          </div>
+          <div className={`${LEGEND} mt-1`} title={`${speedSamples.title} 次计时`} aria-label={`${speedSamples.accessibleName} 次计时`}>
+            {speedSamples.text} 次计时
+          </div>
+          <div className={`${LEGEND} mt-auto`} title={`首字平均 ${meanTtft} · ${ttftSamples.title} 次计时`} aria-label={`首字平均 ${meanTtft} · ${ttftSamples.accessibleName} 次计时`}>
+            首字平均 {meanTtft} · {ttftSamples.text} 次计时
+          </div>
+        </>
+      ) : (
+        <div className="mt-2 text-[28px] font-semibold leading-8 tracking-tight text-foreground">—</div>
+      )}
     </TiltCard>
   );
 }
@@ -404,6 +428,8 @@ export function SkeletonCard({ wide = false, bar = false }: { wide?: boolean; ba
 
 export const MetricGrid = memo(function MetricGrid({
   usage,
+  requestMetrics,
+  displayMode,
   sessionCount,
   sessionMedian,
   sessionP90,
@@ -428,14 +454,28 @@ export const MetricGrid = memo(function MetricGrid({
           <TotalTokenMetric usage={usage} />
           <CacheHitMetric usage={usage} glare={false} />
           <CostMetric usage={usage} glare={false} />
-          <SessionMetric count={sessionCount} median={sessionMedian} p90={sessionP90} />
-          <AccountQuotaCard
-            quota={quota}
-            onRefresh={onRefreshQuota}
-            refreshing={quotaRefreshing}
-            refreshError={quotaRefreshError}
-            refreshAvailable={quotaRefreshAvailable}
-          />
+          {displayMode === "session" ? (
+            <>
+              <SessionMetric count={sessionCount} median={sessionMedian} p90={sessionP90} />
+              <AccountQuotaCard
+                quota={quota}
+                onRefresh={onRefreshQuota}
+                refreshing={quotaRefreshing}
+                refreshError={quotaRefreshError}
+                refreshAvailable={quotaRefreshAvailable}
+              />
+            </>
+          ) : requestMetrics ? (
+            <>
+              <RequestMetric metrics={requestMetrics} glare={false} />
+              <OutputSpeedMetric metrics={requestMetrics} glare={false} />
+            </>
+          ) : (
+            <>
+              <SkeletonCard />
+              <SkeletonCard />
+            </>
+          )}
         </>
       )}
     </div>

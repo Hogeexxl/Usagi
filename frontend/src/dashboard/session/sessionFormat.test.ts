@@ -4,6 +4,7 @@ import {
   formatModelWithReasoningEffort,
   formatSessionIdForDisplay,
   formatSessionModel,
+  formatSessionNullableTokenInteger,
   formatSessionProject,
   formatSessionTime,
   formatSessionTimeWithSeconds,
@@ -75,9 +76,16 @@ describe("Session presentation contract", () => {
     });
   });
 
-  it("uses a complete locale-aware integer formatter for Session tokens", () => {
-    expect(formatSessionTokenInteger(1_801)).toMatchObject({ text: "1,801", title: "1801", accessibleName: "1801" });
-    expect(formatSessionTokenInteger(1_000_000_000).text).toBe("1,000,000,000");
+  it("uses the compact KPI formatter while retaining exact Session token values", () => {
+    expect(formatSessionTokenInteger(999)).toEqual({ text: "999", title: "999", accessibleName: "999" });
+    expect(formatSessionTokenInteger(1_801)).toEqual({ text: "1.8K", title: "1,801", accessibleName: "1,801" });
+    expect(formatSessionTokenInteger(100_000)).toEqual({ text: "100K", title: "100,000", accessibleName: "100,000" });
+    expect(formatSessionTokenInteger(1_000_000)).toEqual({ text: "1M", title: "1,000,000", accessibleName: "1,000,000" });
+    expect(formatSessionTokenInteger(1_000_000_000).text).toBe("1B");
+    expect(formatSessionNullableTokenInteger(null)).toEqual({ text: "—", title: "未知", accessibleName: "未知" });
+    for (const value of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => formatSessionTokenInteger(value)).toThrow(RangeError);
+    }
   });
 
   it("formats exact reasoning effort labels without allowlists or defaults", () => {
