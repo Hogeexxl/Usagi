@@ -11,10 +11,11 @@ import (
 )
 
 type threadProjection struct {
-	Threads   []SessionThreadView
-	byKey     map[ThreadKey]int
-	bySession map[threadSessionKey][]int
-	rollups   map[threadSessionKey]sessionRollup
+	Threads         []SessionThreadView
+	byKey           map[ThreadKey]int
+	bySession       map[threadSessionKey][]int
+	unknown         map[ThreadKey]UsageView
+	legacySubagents map[threadSessionKey]UsageView
 }
 
 type threadSessionKey struct {
@@ -84,27 +85,133 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 		return nil, nil, SummaryView{}, err
 	}
 
-	projection := &threadProjection{byKey: make(map[ThreadKey]int), rollups: make(map[threadSessionKey]sessionRollup)}
+	projection := &threadProjection{
+		byKey:   make(map[ThreadKey]int),
+		unknown: make(map[ThreadKey]UsageView), legacySubagents: make(map[threadSessionKey]UsageView),
+	}
 	sessions := make(map[threadSessionKey]query.SessionUsage, len(dataset.Sessions))
-	rootIndices := make(map[threadSessionKey]int, len(dataset.Sessions))
+	codexThreadKeys := make(map[string]ThreadKey)
+	confirmedRoots := make(map[string]bool)
 	for _, session := range dataset.Sessions {
-		key := threadSessionKey{Agent: session.Agent, SessionID: session.ID}
-		sessions[key] = session
-		thread := sessionThreadFromQuery(session)
-		thread.Usage = UsageView{}
-		thread.ModelEffort = nil
-		rootIndices[key] = len(projection.Threads)
+		sessions[threadSessionKey{Agent: session.Agent, SessionID: session.ID}] = session
+	}
+
+	addThread := func(thread SessionThreadView) int {
+		if index, exists := projection.byKey[thread.Key]; exists {
+			current := &projection.Threads[index]
+			if current.Type == ThreadUnknown && thread.Type == ThreadMain {
+				current.Type = ThreadMain
+			}
+			if current.Title == "" {
+				current.Title = thread.Title
+			}
+			if current.Nickname == "" {
+				current.Nickname = thread.Nickname
+			}
+			if current.ParentThreadID == "" {
+				current.ParentThreadID = thread.ParentThreadID
+			}
+			if current.Project.Kind == query.ProjectKindUnknown && thread.Project.Kind != query.ProjectKindUnknown {
+				current.Project = thread.Project
+			}
+			return index
+		}
 		projection.byKey[thread.Key] = len(projection.Threads)
 		projection.Threads = append(projection.Threads, thread)
+		return len(projection.Threads) - 1
+	}
+
+	for _, session := range dataset.Sessions {
+		if session.Agent != "codex" {
+			addThread(sessionThreadFromQuery(session))
+			continue
+		}
+		thread := SessionThreadView{Title: session.Title, Nickname: session.Nickname, Project: session.Project}
+		switch session.Role {
+		case "subagent":
+			anchor := session.RootSession
+			if anchor == "" {
+				anchor = session.ID
+			} else {
+				confirmedRoots[anchor] = true
+			}
+			thread.Key = ThreadKey{Agent: "codex", SessionID: anchor, ThreadID: session.ID}
+			thread.Type = ThreadSubagent
+			thread.ParentThreadID = session.ParentSession
+		case "unknown":
+			thread.Key = ThreadKey{Agent: "codex", SessionID: session.ID, ThreadID: session.ID}
+			thread.Type = ThreadUnknown
+		default:
+			thread.Key = ThreadKey{Agent: "codex", SessionID: session.ID, ThreadID: session.ID}
+			thread.Type = ThreadMain
+			if session.Role == "main" {
+				confirmedRoots[session.ID] = true
+			}
+		}
+		addThread(thread)
+		codexThreadKeys[session.ID] = thread.Key
+	}
+
+	for _, session := range dataset.Sessions {
+		if session.Agent != "codex" || session.Role != "subagent" {
+			continue
+		}
+		if session.RootSession != "" {
+			root := ThreadKey{Agent: "codex", SessionID: session.RootSession, ThreadID: session.RootSession}
+			addThread(SessionThreadView{Key: root, Type: ThreadMain})
+			codexThreadKeys[session.RootSession] = root
+		}
 	}
 
 	threadUsages := make(map[ThreadKey]*threadUsage)
-	inclusiveUsages := make(map[threadSessionKey]*threadUsage, len(dataset.Sessions))
-	subagentUsages := make(map[threadSessionKey]*threadUsage, len(dataset.Sessions))
+	unknownUsages := make(map[ThreadKey]*threadUsage)
+	legacySubagentUsages := make(map[ThreadKey]*threadUsage)
 	subagentIDs := make(map[threadSessionKey]map[string]struct{})
 	parents := make(map[ThreadKey]map[string]struct{})
 	lastActivities := make(map[threadSessionKey]time.Time, len(dataset.Sessions))
-	compactions := make(map[threadSessionKey]map[modelEffortKey]compactionUsage)
+	hasUsageRows := make(map[threadSessionKey]bool, len(dataset.Sessions))
+	compactions := make(map[ThreadKey]map[modelEffortKey]compactionUsage)
+	addParent := func(key ThreadKey, parent string) {
+		if parent == "" {
+			return
+		}
+		if parents[key] == nil {
+			parents[key] = make(map[string]struct{})
+		}
+		parents[key][parent] = struct{}{}
+	}
+	addOwnRow := func(key ThreadKey, row query.UsageRow) {
+		usage := threadUsages[key]
+		if usage == nil {
+			usage = &threadUsage{}
+			threadUsages[key] = usage
+		}
+		usage.addRow(row)
+		if key.Agent != "codex" {
+			return
+		}
+		groupKey := modelEffortKey{Model: query.ModelName(row.Model), Effort: row.Effort}
+		groups := compactions[key]
+		if groups == nil {
+			groups = make(map[modelEffortKey]compactionUsage)
+			compactions[key] = groups
+		}
+		group := groups[groupKey]
+		if row.Compaction == nil {
+			group.unavailable = true
+		} else if *row.Compaction {
+			group.tokens += row.Input + row.CacheRead + row.CacheWrite + row.Output
+		}
+		groups[groupKey] = group
+	}
+	addUnknownRow := func(key ThreadKey, row query.UsageRow) {
+		usage := unknownUsages[key]
+		if usage == nil {
+			usage = &threadUsage{}
+			unknownUsages[key] = usage
+		}
+		usage.addRow(row)
+	}
 
 	for _, row := range dataset.Rows {
 		if row.ResolvedSession.ID == "" {
@@ -114,108 +221,111 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 		if _, ok := sessions[sessionKey]; !ok {
 			continue
 		}
-		all := inclusiveUsages[sessionKey]
-		if all == nil {
-			all = &threadUsage{}
-			inclusiveUsages[sessionKey] = all
-		}
-		all.addRow(row)
-		if row.Time.After(lastActivities[sessionKey]) {
-			lastActivities[sessionKey] = row.Time
-		}
-
-		if sessionKey.Agent == "codex" {
-			groupKey := modelEffortKey{Model: query.ModelName(row.Model), Effort: row.Effort}
-			groups := compactions[sessionKey]
-			if groups == nil {
-				groups = make(map[modelEffortKey]compactionUsage)
-				compactions[sessionKey] = groups
-			}
-			group := groups[groupKey]
-			if row.Origin == "log" {
-				group.unavailable = true
-			}
-			if row.Kind == "compact" {
-				group.tokens += row.Input + row.CacheRead + row.CacheWrite + row.Output
-			}
-			groups[groupKey] = group
-		}
-
 		key := ThreadKey{Agent: sessionKey.Agent, SessionID: sessionKey.SessionID, ThreadID: sessionKey.SessionID}
-		var role string
+		var activityKey = sessionKey
 		switch sessionKey.Agent {
 		case "claude":
 			if row.Subagent != "" {
-				role = "subagent"
 				key.ThreadID = row.Subagent
 				if subagentIDs[sessionKey] == nil {
 					subagentIDs[sessionKey] = make(map[string]struct{})
 				}
 				subagentIDs[sessionKey][row.Subagent] = struct{}{}
-				if _, exists := parents[key]; !exists {
-					parents[key] = make(map[string]struct{})
-				}
-				if row.ParentAgent != "" {
-					parents[key][row.ParentAgent] = struct{}{}
-				}
-				if _, exists := projection.byKey[key]; !exists {
-					projection.byKey[key] = len(projection.Threads)
-					projection.Threads = append(projection.Threads, SessionThreadView{
-						Key: key, Type: ThreadSubagent, Project: sessions[sessionKey].Project,
-					})
-				}
+				addParent(key, row.ParentAgent)
+				addThread(SessionThreadView{Key: key, Type: ThreadSubagent, Project: sessions[sessionKey].Project})
+				addOwnRow(key, row)
 			} else {
-				role = "self"
+				addOwnRow(key, row)
 			}
 		case "codex":
-			if isCodexSubagentKind(row.Kind) {
-				role = "subagent"
-			} else {
-				role = "self"
+			switch row.SessionRole {
+			case "main":
+				key.ThreadID = row.Session
+				if key.ThreadID == "" {
+					key.ThreadID = sessionKey.SessionID
+				}
+				key.SessionID = key.ThreadID
+				confirmedRoots[key.ThreadID] = true
+				addThread(SessionThreadView{Key: key, Type: ThreadMain})
+				addOwnRow(key, row)
+			case "subagent":
+				if row.Subagent == "" {
+					continue
+				}
+				actor, found := sessions[threadSessionKey{Agent: "codex", SessionID: row.Subagent}]
+				anchor := row.Session
+				if anchor == "" {
+					anchor = actor.RootSession
+				}
+				if anchor == "" {
+					anchor = row.Subagent
+				}
+				activityKey = threadSessionKey{Agent: "codex", SessionID: anchor}
+				if anchor != row.Subagent {
+					confirmedRoots[anchor] = true
+					root := ThreadKey{Agent: "codex", SessionID: anchor, ThreadID: anchor}
+					addThread(SessionThreadView{Key: root, Type: ThreadMain})
+					codexThreadKeys[anchor] = root
+				}
+				key = ThreadKey{Agent: "codex", SessionID: anchor, ThreadID: row.Subagent}
+				thread := SessionThreadView{Key: key, Type: ThreadSubagent, Project: row.Project}
+				if found {
+					thread.Title, thread.Nickname, thread.Project = actor.Title, actor.Nickname, actor.Project
+					if actor.ParentSession != "" {
+						addParent(key, actor.ParentSession)
+					}
+				}
+				addParent(key, row.ParentAgent)
+				addThread(thread)
+				codexThreadKeys[row.Subagent] = key
+				addOwnRow(key, row)
+			case "unknown":
+				id := row.Session
+				if id == "" {
+					id = row.ResolvedSession.ID
+				}
+				unknownKey, exists := codexThreadKeys[id]
+				if !exists {
+					unknownKey = ThreadKey{Agent: "codex", SessionID: id, ThreadID: id}
+					addThread(SessionThreadView{Key: unknownKey, Type: ThreadUnknown})
+					codexThreadKeys[id] = unknownKey
+				}
+				addUnknownRow(unknownKey, row)
+				if unknownKey.SessionID != "" {
+					activityKey = threadSessionKey{Agent: "codex", SessionID: unknownKey.SessionID}
+				}
+			case "":
+				if sessions[sessionKey].Role != "" {
+					unknownKey, exists := codexThreadKeys[sessionKey.SessionID]
+					if !exists {
+						unknownKey = ThreadKey{Agent: "codex", SessionID: sessionKey.SessionID, ThreadID: sessionKey.SessionID}
+						addThread(SessionThreadView{Key: unknownKey, Type: ThreadUnknown})
+						codexThreadKeys[sessionKey.SessionID] = unknownKey
+					}
+					addUnknownRow(unknownKey, row)
+					activityKey = threadSessionKey{Agent: "codex", SessionID: unknownKey.SessionID}
+				} else if isCodexSubagentKind(row.Kind) {
+					usage := legacySubagentUsages[key]
+					if usage == nil {
+						usage = &threadUsage{}
+						legacySubagentUsages[key] = usage
+					}
+					usage.addRow(row)
+				} else {
+					addOwnRow(key, row)
+				}
+			default:
+				continue
 			}
 		default:
-			role = "self"
+			addOwnRow(key, row)
 		}
-
-		if role == "subagent" {
-			usage := subagentUsages[sessionKey]
-			if usage == nil {
-				usage = &threadUsage{}
-				subagentUsages[sessionKey] = usage
-			}
-			usage.addRow(row)
-		} else {
-			usage := threadUsages[key]
-			if usage == nil {
-				usage = &threadUsage{}
-				threadUsages[key] = usage
-			}
-			usage.addRow(row)
+		if row.Time.After(lastActivities[activityKey]) {
+			lastActivities[activityKey] = row.Time
 		}
-		if sessionKey.Agent == "claude" && row.Subagent != "" {
-			usage := threadUsages[key]
-			if usage == nil {
-				usage = &threadUsage{}
-				threadUsages[key] = usage
-			}
-			usage.addRow(row)
-		}
+		hasUsageRows[activityKey] = true
 	}
 
-	for threadKey, values := range parents {
-		index, exists := projection.byKey[threadKey]
-		if !exists {
-			continue
-		}
-		if len(values) == 1 {
-			for parent := range values {
-				projection.Threads[index].ParentThreadID = parent
-			}
-		} else if len(values) > 1 {
-			slog.Warn("conflicting parent_agent values for session subagent", "agent", threadKey.Agent,
-				"session_id", threadKey.SessionID, "thread_id", threadKey.ThreadID)
-		}
-	}
 	for key, usage := range threadUsages {
 		index, exists := projection.byKey[key]
 		if !exists {
@@ -226,7 +336,13 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 		thread.ModelEffort = usage.modelEffortViews()
 		thread.FirstUsage, thread.LastUsage = usage.first, usage.last
 	}
-	for key, index := range rootIndices {
+	for key, usage := range unknownUsages {
+		projection.unknown[key] = usage.totals.View()
+	}
+	for key, usage := range legacySubagentUsages {
+		projection.legacySubagents[threadSessionKey{Agent: key.Agent, SessionID: key.SessionID}] = usage.totals.View()
+	}
+	for key, index := range projection.byKey {
 		if key.Agent != "codex" {
 			continue
 		}
@@ -241,34 +357,59 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 		}
 	}
 
+	for key, values := range parents {
+		index, exists := projection.byKey[key]
+		if !exists {
+			continue
+		}
+		if len(values) == 1 {
+			for parent := range values {
+				projection.Threads[index].ParentThreadID = parent
+			}
+		} else if len(values) > 1 {
+			slog.Warn("conflicting parent identifiers for session subagent", "agent", key.Agent,
+				"session_id", key.SessionID, "thread_id", key.ThreadID)
+			projection.Threads[index].ParentThreadID = ""
+		}
+	}
+
 	projection.reindex()
 	items := make([]SessionListItemView, 0, len(dataset.Sessions))
-	for _, session := range dataset.Sessions {
-		key := threadSessionKey{Agent: session.Agent, SessionID: session.ID}
-		threadIndex := projection.byKey[ThreadKey{Agent: key.Agent, SessionID: key.SessionID, ThreadID: key.SessionID}]
-		thread := projection.Threads[threadIndex]
-		self := thread.Usage
-		subagent := UsageView{}
-		if value := subagentUsages[key]; value != nil {
-			subagent = value.totals.View()
+	for index, thread := range projection.Threads {
+		if thread.Type == ThreadSubagent {
+			if rootIndex, hasRoot := projection.byKey[ThreadKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID, ThreadID: thread.Key.SessionID}]; hasRoot && projection.Threads[rootIndex].Type == ThreadMain {
+				continue
+			}
 		}
-		inclusive := UsageView{}
-		if value := inclusiveUsages[key]; value != nil {
-			inclusive = value.totals.View()
+		if thread.Type != ThreadMain && thread.Type != ThreadSubagent && thread.Type != ThreadUnknown {
+			continue
 		}
-		lastActivity := lastActivities[key]
+		rollup := projection.threadRollup(index)
+		lastActivity := lastActivities[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}]
+		if lastActivity.IsZero() && thread.Key.Agent == "codex" && thread.Type == ThreadMain {
+			for _, child := range dataset.Sessions {
+				if child.Agent == "codex" && child.Role == "subagent" && child.RootSession == thread.Key.ThreadID && child.Last.After(lastActivity) {
+					lastActivity = child.Last
+				}
+			}
+		}
 		if lastActivity.IsZero() {
-			lastActivity = session.Last
+			lastActivity = sessions[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.ThreadID}].Last
 		}
+		hasRows := hasUsageRows[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}] ||
+			sessions[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.ThreadID}].HasRows
 		var count *int64
-		if key.Agent != "codex" {
-			value := int64(len(subagentIDs[key]))
+		if thread.Key.Agent != "codex" {
+			value := int64(len(subagentIDs[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}]))
+			count = &value
+		} else if thread.Type == ThreadMain && confirmedRoots[thread.Key.ThreadID] {
+			value := int64(len(rollup.children))
 			count = &value
 		}
-		projection.rollups[key] = sessionRollup{selfUsage: self, subagentUsage: subagent, inclusiveUsage: inclusive}
 		items = append(items, SessionListItemView{
-			Thread: thread, SelfUsage: self, SubagentUsage: subagent, InclusiveUsage: inclusive,
-			HasUsageRows: session.HasRows, LastActivity: lastActivity, SubagentCount: count,
+			Thread: thread, SelfUsage: rollup.selfUsage, SubagentUsage: rollup.subagentUsage,
+			UnknownUsage: rollup.unknownUsage, InclusiveUsage: rollup.inclusiveUsage,
+			HasUsageRows: hasRows, LastActivity: lastActivity, SubagentCount: count,
 		})
 	}
 	slices.SortFunc(items, func(a, b SessionListItemView) int {
@@ -281,6 +422,46 @@ func (s *Service) loadThreadProjection(ctx context.Context, q ScopeQuery) (*thre
 		return cmp.Compare(a.Thread.Key.SessionID, b.Thread.Key.SessionID)
 	})
 	return projection, items, summaryForItems(items), nil
+}
+
+func (p *threadProjection) threadRollup(index int) sessionRollup {
+	thread := p.Threads[index]
+	if thread.Type == ThreadUnknown {
+		unknown := p.unknown[thread.Key]
+		return sessionRollup{unknownUsage: unknown, inclusiveUsage: unknown}
+	}
+	result := sessionRollup{selfUsage: thread.Usage, inclusiveUsage: thread.Usage, unknownUsage: p.unknown[thread.Key]}
+	indices := p.bySession[threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}]
+	var descendants []int
+	if thread.Type == ThreadMain {
+		for _, childIndex := range indices {
+			if p.Threads[childIndex].Type == ThreadSubagent {
+				descendants = append(descendants, childIndex)
+			}
+		}
+	} else if thread.Type == ThreadSubagent {
+		descendants = p.descendants(thread.Key, indices)
+	}
+	for _, childIndex := range descendants {
+		child := p.Threads[childIndex]
+		result.children = append(result.children, childIndex)
+		if child.Type == ThreadSubagent {
+			result.subagentUsage = mergeUsage(result.subagentUsage, child.Usage)
+		}
+		result.unknownUsage = mergeUsage(result.unknownUsage, p.unknown[child.Key])
+	}
+	if thread.Type == ThreadMain {
+		if legacy := p.legacySubagentUsageFor(thread.Key); legacy != (UsageView{}) {
+			result.subagentUsage = mergeUsage(result.subagentUsage, legacy)
+		}
+	}
+	result.inclusiveUsage = mergeUsage(result.selfUsage, result.subagentUsage)
+	result.inclusiveUsage = mergeUsage(result.inclusiveUsage, result.unknownUsage)
+	return result
+}
+
+func (p *threadProjection) legacySubagentUsageFor(key ThreadKey) UsageView {
+	return p.legacySubagents[threadSessionKey{Agent: key.Agent, SessionID: key.SessionID}]
 }
 
 func isCodexSubagentKind(kind string) bool {
@@ -302,9 +483,10 @@ func sessionThreadFromQuery(session query.SessionUsage) SessionThreadView {
 		Key: ThreadKey{
 			Agent: session.Agent, SessionID: session.ID, ThreadID: session.ID,
 		},
-		Type:    ThreadMain,
-		Title:   session.Title,
-		Project: session.Project,
+		Type:     ThreadMain,
+		Title:    session.Title,
+		Nickname: session.Nickname,
+		Project:  session.Project,
 	}
 }
 
@@ -364,43 +546,13 @@ func summaryForItems(items []SessionListItemView) SummaryView {
 type sessionRollup struct {
 	selfUsage      UsageView
 	subagentUsage  UsageView
+	unknownUsage   UsageView
 	inclusiveUsage UsageView
 	children       []int
 }
 
-func (p *threadProjection) inclusiveRollup(index int) sessionRollup {
-	thread := p.Threads[index]
-	key := threadSessionKey{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID}
-	if thread.Type == ThreadMain {
-		indices := p.bySession[key]
-		result, ok := p.rollups[key]
-		if !ok {
-			result = sessionRollup{selfUsage: thread.Usage, inclusiveUsage: thread.Usage}
-		}
-		if thread.Key.Agent == "claude" {
-			for _, childIndex := range indices {
-				if p.Threads[childIndex].Type == ThreadSubagent {
-					result.children = append(result.children, childIndex)
-				}
-			}
-			return result
-		}
-		return result
-	}
-	result := sessionRollup{selfUsage: thread.Usage, inclusiveUsage: thread.Usage}
-	if thread.Type == ThreadSubagent {
-		indices := p.bySession[key]
-		result.children = p.descendants(thread.Key, indices)
-		for _, childIndex := range result.children {
-			result.subagentUsage = mergeUsage(result.subagentUsage, p.Threads[childIndex].Usage)
-		}
-		result.inclusiveUsage = mergeUsage(result.selfUsage, result.subagentUsage)
-	}
-	return result
-}
-
 func (s *Service) SessionDetail(ctx context.Context, q ScopeQuery, key ThreadKey) (SessionDetailView, error) {
-	projection, _, _, err := s.loadThreadProjection(ctx, q)
+	projection, items, _, err := s.loadThreadProjection(ctx, q)
 	if err != nil {
 		return SessionDetailView{}, err
 	}
@@ -409,10 +561,18 @@ func (s *Service) SessionDetail(ctx context.Context, q ScopeQuery, key ThreadKey
 		return SessionDetailView{}, ErrThreadNotFound
 	}
 	thread := projection.Threads[index]
-	rollup := projection.inclusiveRollup(index)
+	lastActivity := thread.LastUsage
+	for _, item := range items {
+		if item.Thread.Key == key {
+			lastActivity = item.LastActivity
+			break
+		}
+	}
+	rollup := projection.threadRollup(index)
 	detail := SessionDetailView{
-		Thread: thread, SelfUsage: rollup.selfUsage, SubagentUsage: rollup.subagentUsage,
-		InclusiveUsage: rollup.inclusiveUsage, Children: make([]SessionThreadView, 0, len(rollup.children)),
+		Thread: thread, LastActivity: lastActivity, SelfUsage: rollup.selfUsage, SubagentUsage: rollup.subagentUsage,
+		UnknownUsage: rollup.unknownUsage, InclusiveUsage: rollup.inclusiveUsage,
+		Children: make([]SessionThreadView, 0, len(rollup.children)),
 	}
 	for _, childIndex := range rollup.children {
 		detail.Children = append(detail.Children, projection.Threads[childIndex])

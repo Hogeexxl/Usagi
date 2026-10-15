@@ -97,6 +97,7 @@ type sessionThreadDTO struct {
 	Type           string           `json:"type"`
 	ParentThreadID *string          `json:"parent_thread_id"`
 	Title          string           `json:"title"`
+	Nickname       string           `json:"nickname"`
 	Project        projectDTO       `json:"project"`
 	FirstUsageMS   int64            `json:"first_usage_ms"`
 	LastUsageMS    int64            `json:"last_usage_ms"`
@@ -108,6 +109,7 @@ type sessionListItemDTO struct {
 	Thread         sessionThreadDTO `json:"thread"`
 	SelfUsage      usageDTO         `json:"self_usage"`
 	SubagentUsage  usageDTO         `json:"subagent_usage"`
+	UnknownUsage   usageDTO         `json:"unknown_usage"`
 	InclusiveUsage usageDTO         `json:"inclusive_usage"`
 	HasUsageRows   bool             `json:"has_usage_rows"`
 	LastActivityMS *int64           `json:"last_activity_ms"`
@@ -133,9 +135,11 @@ type toolUsageResponseDTO struct {
 
 type sessionDetailResponseDTO struct {
 	DataRevision   int64              `json:"data_revision"`
+	LastActivityMS *int64             `json:"last_activity_ms"`
 	Thread         sessionThreadDTO   `json:"thread"`
 	SelfUsage      usageDTO           `json:"self_usage"`
 	SubagentUsage  usageDTO           `json:"subagent_usage"`
+	UnknownUsage   usageDTO           `json:"unknown_usage"`
 	InclusiveUsage usageDTO           `json:"inclusive_usage"`
 	Children       []sessionThreadDTO `json:"children"`
 }
@@ -225,7 +229,7 @@ func mapSessionThreadDTO(thread projection.SessionThreadView) sessionThreadDTO {
 	}
 	return sessionThreadDTO{
 		Key:  threadKeyDTO{Agent: thread.Key.Agent, SessionID: thread.Key.SessionID, ThreadID: thread.Key.ThreadID},
-		Type: string(thread.Type), ParentThreadID: parent, Title: thread.Title,
+		Type: string(thread.Type), ParentThreadID: parent, Title: thread.Title, Nickname: thread.Nickname,
 		Project: mapProjectDTO(thread.Project), FirstUsageMS: timeMS(thread.FirstUsage), LastUsageMS: timeMS(thread.LastUsage),
 		ModelEffort: mapModelEffortDTOs(thread.ModelEffort), Usage: mapUsageDTO(thread.Usage),
 	}
@@ -275,6 +279,14 @@ func timeMS(value time.Time) int64 {
 
 func timePointerMS(value *time.Time) *int64 {
 	if value == nil {
+		return nil
+	}
+	result := value.UnixMilli()
+	return &result
+}
+
+func nullableTimeMS(value time.Time) *int64 {
+	if value.IsZero() {
 		return nil
 	}
 	result := value.UnixMilli()

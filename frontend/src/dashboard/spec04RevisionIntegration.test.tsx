@@ -44,6 +44,10 @@ function usage(revision: number): UsageDto {
   };
 }
 
+function zeroUsage(): UsageDto {
+  return { ...usage(0), calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0, cache_hit_rate: null, cost: 0 };
+}
+
 function inclusiveUsage(self: UsageDto, subagents: UsageDto): UsageDto {
   const input = self.input + subagents.input;
   const cache_read = self.cache_read + subagents.cache_read;
@@ -74,6 +78,7 @@ function thread(revision: number, title: string, threadKey: ThreadKey = key, typ
     type,
     parent_thread_id: type === "main" ? null : "thread-1",
     title,
+    nickname: "",
     project: { kind: "project", path: `/work/project-${revision}`, name: `project-${revision}` },
     first_usage_ms: 10,
     last_usage_ms: 20 + revision,
@@ -89,6 +94,7 @@ function sessionRow(revision: number): SessionListItemDto {
     thread: thread(revision, `session-${revision}`),
     self_usage: value,
     subagent_usage: subagentUsage,
+    unknown_usage: zeroUsage(),
     inclusive_usage: inclusiveUsage(value, subagentUsage),
     has_usage_rows: true,
     last_activity_ms: Date.UTC(2026, 7, 10, 8, revision),
@@ -174,9 +180,11 @@ function setupHttpWire(initial: {
       return {
         body: {
           data_revision: dataRevision,
+          last_activity_ms: dataRevision,
           thread: parent,
           self_usage: usage(dataRevision),
           subagent_usage: subagentUsage,
+          unknown_usage: zeroUsage(),
           inclusive_usage: inclusiveUsage(usage(dataRevision), subagentUsage),
           children: [thread(dataRevision, `child-${dataRevision}`, { ...key, thread_id: "child-thread" }, "subagent")],
         },
@@ -353,6 +361,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     await act(async () => result.current.detail.open_detail(result.current.sessions.rows[0]));
     await flushMicrotasks();
     expect(result.current.detail.detail?.data_revision).toBe(80);
+    expect(result.current.detail.detail?.last_activity_ms).toBe(80);
     const beforeFallback = api.requests.filter((request) => request.path === "/api/revision").length;
     source.onerror?.(new Event("error"));
     api.backend.revision = { data_revision: 81, status_revision: 12 };
@@ -364,6 +373,7 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
     expect(result.current.charts.models?.items[0]?.model).toBe("model-81");
     expect(result.current.sessions.rows[0]?.thread.title).toBe("session-81");
     expect(result.current.detail.detail?.data_revision).toBe(81);
+    expect(result.current.detail.detail?.last_activity_ms).toBe(81);
     expect(api.requests.filter((request) => request.path === "/api/revision")).toHaveLength(beforeFallback + 1);
     const applicationReads = api.requests.filter((request) => applicationReadPaths.has(request.path)).length;
     source.onmessage?.({ data: JSON.stringify(api.backend.revision) } as MessageEvent<string>);

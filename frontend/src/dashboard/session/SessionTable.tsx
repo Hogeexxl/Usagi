@@ -39,7 +39,7 @@ export const sortableColumns: Array<{ field: SessionSortField; label: string }> 
 ];
 
 function subagentText(item: SessionListItemDto): string {
-  return item.subagent_count === null ? "—" : `${item.subagent_count} subagent`;
+  return item.subagent_count !== null && item.subagent_count > 0 ? `${item.subagent_count} subagent` : "";
 }
 
 export function SessionTable({
@@ -86,7 +86,7 @@ export function SessionTable({
         const title = formatSessionTitle(item.thread.title);
         const agent = item.thread.key.agent;
         const agentName = agentDisplay ? agentDisplay(agent) : agent;
-        const model = formatSessionModel(item.thread.model_effort);
+        const model = formatSessionModel(item.thread.type === "unknown" ? [] : item.thread.model_effort);
         const details = [agentName, model.text, subagentText(item)].filter(Boolean).join(" · ");
         return (
           <div className="flex min-w-0 flex-col leading-5">

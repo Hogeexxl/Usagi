@@ -52,6 +52,21 @@ const usage: UsageDto = {
   output_speed: null,
   speed_samples: 0,
 };
+const zeroUsage: UsageDto = {
+  ...usage,
+  calls: 0,
+  errors: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  cache_write_1h: 0,
+  reasoning: 0,
+  total: 0,
+  cache_hit_rate: null,
+  cost: 0,
+  unpriced: 0,
+};
 
 const summary: SummaryResponse = { data_revision: 1, usage, session_count: 1, session_median: 14, session_p90: 14 };
 const row: SessionListItemDto = {
@@ -60,6 +75,7 @@ const row: SessionListItemDto = {
     type: "main",
     parent_thread_id: null,
     title: "Session Alpha",
+    nickname: "",
     project: { kind: "project", path: "/work/Usagi", name: "Usagi" },
     first_usage_ms: 1_800_000_000_000,
     last_usage_ms: 1_800_000_000_100,
@@ -68,6 +84,7 @@ const row: SessionListItemDto = {
   },
   self_usage: usage,
   subagent_usage: { ...usage, total: 0 },
+  unknown_usage: zeroUsage,
   inclusive_usage: usage,
   has_usage_rows: true,
   last_activity_ms: 1_800_000_000_100,
@@ -76,9 +93,11 @@ const row: SessionListItemDto = {
 const sessions: SessionListResponse = { data_revision: 1, summary, items: [row] };
 const detail: SessionDetailResponse = {
   data_revision: 1,
+  last_activity_ms: row.last_activity_ms,
   thread: row.thread,
   self_usage: usage,
   subagent_usage: { ...usage, total: 0 },
+  unknown_usage: zeroUsage,
   inclusive_usage: usage,
   children: [],
 };

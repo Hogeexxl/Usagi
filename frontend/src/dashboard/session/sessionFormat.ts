@@ -74,7 +74,8 @@ export function formatSessionTime(value: number | null, timezone: string, now = 
   };
 }
 
-export function formatSessionTimeWithSeconds(value: number, timezone: string, now = Date.now()): FormattedValue {
+export function formatSessionTimeWithSeconds(value: number | null, timezone: string, now = Date.now()): FormattedValue {
+  if (value === null) return { text: "—", title: "未知", accessibleName: "未知" };
   const current = dateParts(now, timezone);
   const target = dateParts(value, timezone);
   const time = `${target.hour}:${target.minute}:${target.second}`;

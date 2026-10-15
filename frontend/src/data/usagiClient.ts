@@ -244,13 +244,14 @@ function parseProject(value: unknown): SessionThreadDto["project"] {
 function parseThread(value: unknown): SessionThreadDto {
   const record = requiredRecord(value);
   const type = requiredString(record, "type");
-  if (type !== "main" && type !== "subagent") throw new UsagiClientError("HTTP_ERROR", 200);
+  if (type !== "main" && type !== "subagent" && type !== "unknown") throw new UsagiClientError("HTTP_ERROR", 200);
   if (!Array.isArray(record.model_effort)) throw new UsagiClientError("HTTP_ERROR", 200);
   return {
     key: parseThreadKey(record.key),
     type,
     parent_thread_id: nullableString(record, "parent_thread_id"),
     title: nullableString(record, "title"),
+    nickname: stringField(record, "nickname"),
     project: parseProject(record.project),
     first_usage_ms: requiredSafeInteger(record, "first_usage_ms"),
     last_usage_ms: requiredSafeInteger(record, "last_usage_ms"),
@@ -279,6 +280,7 @@ function parseSessionList(value: unknown): SessionListResponse {
         thread: parseThread(item.thread),
         self_usage: parseUsage(item.self_usage),
         subagent_usage: parseUsage(item.subagent_usage),
+        unknown_usage: parseUsage(item.unknown_usage),
         inclusive_usage: parseUsage(item.inclusive_usage),
         has_usage_rows: requiredBoolean(item, "has_usage_rows"),
         last_activity_ms: nullableSafeInteger(item, "last_activity_ms"),
@@ -308,9 +310,11 @@ function parseSessionDetail(value: unknown): SessionDetailResponse {
   if (!Array.isArray(record.children)) throw new UsagiClientError("HTTP_ERROR", 200);
   return {
     data_revision: requiredSafeInteger(record, "data_revision"),
+    last_activity_ms: nullableSafeInteger(record, "last_activity_ms"),
     thread: parseThread(record.thread),
     self_usage: parseUsage(record.self_usage),
     subagent_usage: parseUsage(record.subagent_usage),
+    unknown_usage: parseUsage(record.unknown_usage),
     inclusive_usage: parseUsage(record.inclusive_usage),
     children: record.children.map(parseThread),
   };

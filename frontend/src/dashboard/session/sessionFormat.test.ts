@@ -68,6 +68,11 @@ describe("Session presentation contract", () => {
       title: "2025-12-01 15:08:05",
       accessibleName: "2025-12-01 15:08:05",
     });
+    expect(formatSessionTimeWithSeconds(null, "Asia/Shanghai", now)).toEqual({
+      text: "—",
+      title: "未知",
+      accessibleName: "未知",
+    });
   });
 
   it("uses a complete locale-aware integer formatter for Session tokens", () => {

@@ -23,6 +23,21 @@ const usage: UsageDto = {
   unpriced: 0,
   retried: 0, output_speed: null, speed_samples: 0,
 };
+const zeroUsage: UsageDto = {
+  ...usage,
+  calls: 0,
+  errors: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  cache_write_1h: 0,
+  reasoning: 0,
+  total: 0,
+  cache_hit_rate: null,
+  cost: 0,
+  unpriced: 0,
+};
 
 function key(agent: string, sessionId: string, threadId: string): ThreadKey {
   return { agent, session_id: sessionId, thread_id: threadId };
@@ -34,22 +49,25 @@ function row(threadKey: ThreadKey): SessionListItemDto {
     type: "main" as const,
     parent_thread_id: null,
     title: "Session title",
+    nickname: "",
     project: { kind: "project" as const, path: "/work", name: "Work" },
     first_usage_ms: 10,
     last_usage_ms: 20,
     model_effort: [{ model: "gpt-6", effort: "high", usage, compaction_tokens: 0 }],
     usage,
   };
-  return { thread, self_usage: usage, subagent_usage: usage, inclusive_usage: usage, has_usage_rows: true, last_activity_ms: thread.last_usage_ms, subagent_count: 1 };
+  return { thread, self_usage: usage, subagent_usage: usage, unknown_usage: zeroUsage, inclusive_usage: usage, has_usage_rows: true, last_activity_ms: thread.last_usage_ms, subagent_count: 1 };
 }
 
 function detail(threadKey: ThreadKey, revision: number): SessionDetailResponse {
   const parent = row(threadKey).thread;
   return {
     data_revision: revision,
+    last_activity_ms: parent.last_usage_ms,
     thread: parent,
     self_usage: usage,
     subagent_usage: usage,
+    unknown_usage: zeroUsage,
     inclusive_usage: usage,
     children: [],
   };

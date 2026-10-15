@@ -84,18 +84,65 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 			return fmt.Errorf("database: apply schema version 1: %w", err)
 		}
-	} else {
-		var version string
-		if err := tx.QueryRowContext(ctx, "SELECT value FROM app_meta WHERE key = 'schema_version'").Scan(&version); err != nil {
-			return fmt.Errorf("database: read schema version: %w", err)
+	}
+	var version string
+	if err := tx.QueryRowContext(ctx, "SELECT value FROM app_meta WHERE key = 'schema_version'").Scan(&version); err != nil {
+		return fmt.Errorf("database: read schema version: %w", err)
+	}
+	switch version {
+	case "1":
+		if err := migrateV1ToV2(ctx, tx); err != nil {
+			return err
 		}
-		if version != "1" {
-			return fmt.Errorf("database: unsupported schema version %q", version)
+		fallthrough
+	case "2":
+		if err := migrateV2ToV3(ctx, tx); err != nil {
+			return err
 		}
+	case "3":
+	default:
+		return fmt.Errorf("database: unsupported schema version %q", version)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV2ToV3(ctx context.Context, tx *sql.Tx) error {
+	for _, statement := range []string{
+		"ALTER TABLE sessions ADD COLUMN nickname TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE requests ADD COLUMN compaction INTEGER",
+		"ALTER TABLE sync_days ADD COLUMN compaction_backfill_pending INTEGER NOT NULL DEFAULT 0",
+		`INSERT OR IGNORE INTO sync_days (day, compaction_backfill_pending)
+			SELECT DISTINCT local_day, 1 FROM requests WHERE agent = 'codex'`,
+		`UPDATE sync_days SET compaction_backfill_pending = 1 WHERE EXISTS (
+			SELECT 1 FROM requests WHERE requests.local_day = sync_days.day AND requests.agent = 'codex'
+		)`,
+		"UPDATE app_meta SET value = '3' WHERE key = 'schema_version'",
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("database: migrate schema version 2 to 3: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV1ToV2(ctx context.Context, tx *sql.Tx) error {
+	for _, statement := range []string{
+		"ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sessions ADD COLUMN parent_session TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sessions ADD COLUMN root_session TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE requests ADD COLUMN session_role TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sync_days ADD COLUMN identity_backfill_pending INTEGER NOT NULL DEFAULT 0",
+		"INSERT INTO app_meta (key, value) VALUES ('session_identity_backfill_started', '0')",
+		"INSERT INTO app_meta (key, value) VALUES ('session_identity_backfill_complete', '0')",
+		"UPDATE app_meta SET value = '2' WHERE key = 'schema_version'",
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("database: migrate schema version 1 to 2: %w", err)
+		}
 	}
 	return nil
 }

@@ -51,13 +51,16 @@ func TestSessionConsistencyUsesOneFilteredDatabaseDataset(t *testing.T) {
 	for _, item := range list.Items {
 		items[item.Thread.Key] = item
 	}
-	if len(list.Items) != 6 || list.Summary.RootSessionCount != 6 || len(items) != 6 {
-		t.Fatalf("list/summary count = %d/%d, want six metadata and virtual sessions: %+v", len(list.Items), list.Summary.RootSessionCount, list.Items)
+	if len(list.Items) != 5 || list.Summary.RootSessionCount != 5 || len(items) != 5 {
+		t.Fatalf("list/summary count = %d/%d, want four request-backed sessions and one Claude metadata session: %+v", len(list.Items), list.Summary.RootSessionCount, list.Items)
 	}
 	root := items[ThreadKey{Agent: "claude", SessionID: "A", ThreadID: "A"}]
 	codex := items[ThreadKey{Agent: "codex", SessionID: "C", ThreadID: "C"}]
 	virtual := items[ThreadKey{Agent: "codex", SessionID: "virtual", ThreadID: "virtual"}]
-	noRows := items[ThreadKey{Agent: "codex", SessionID: "no-rows", ThreadID: "no-rows"}]
+	empty := items[ThreadKey{Agent: "claude", SessionID: "empty", ThreadID: "empty"}]
+	if empty.HasUsageRows || empty.LastActivity.Unix() != projectionTime(18, 0).Unix() {
+		t.Fatalf("Claude metadata-only session should remain: %+v", empty)
+	}
 	if root.InclusiveUsage.Calls != 4 || root.InclusiveUsage.Input != 19 || root.InclusiveUsage.Output != 9 || root.InclusiveUsage.Unpriced != 3 || root.SubagentCount == nil || *root.SubagentCount != 2 {
 		t.Fatalf("Claude inclusive rows/children = %+v", root)
 	}
@@ -67,8 +70,8 @@ func TestSessionConsistencyUsesOneFilteredDatabaseDataset(t *testing.T) {
 	if virtual.InclusiveUsage.Calls != 1 || virtual.InclusiveUsage.Input != 6 || virtual.Thread.Project.Kind != query.ProjectKindUnknown {
 		t.Fatalf("unmatched failed row = %+v", virtual)
 	}
-	if noRows.HasUsageRows || noRows.LastActivity.Unix() != projectionTime(17, 0).Unix() || noRows.InclusiveUsage != (UsageView{}) {
-		t.Fatalf("no-row metadata projection = %+v", noRows)
+	if _, exists := items[ThreadKey{Agent: "codex", SessionID: "no-rows", ThreadID: "no-rows"}]; exists {
+		t.Fatal("metadata-only Codex session was included")
 	}
 	if list.Summary.Usage.Calls != 11 || list.Summary.Usage.Input != 142 || list.Summary.Usage.Output != 14 || list.Summary.Usage.Unpriced != 6 {
 		t.Fatalf("summary did not add each accepted row once: %+v", list.Summary)
@@ -170,6 +173,192 @@ func TestSessionConsistencyUsesOneFilteredDatabaseDataset(t *testing.T) {
 	}
 }
 
+func TestCodexSessionHierarchyKeepsOwnUsageAndUnknownSeparate(t *testing.T) {
+	db := openProjectionSessionDB(t)
+	service := NewService(query.NewService(db, nil, time.UTC))
+	dayOne := projectionTime(9, 0)
+	dayTwo := dayOne.AddDate(0, 0, 1)
+	rangeValue := query.DateRange{From: dayOne.Format(time.DateOnly), To: dayTwo.Format(time.DateOnly)}
+	addProjectionIdentitySession(t, db, "A", "/repo", "Main A", dayOne, dayTwo, "main", "", "A")
+	addProjectionIdentitySession(t, db, "B", "/repo/b", "Child B", dayOne, dayTwo, "subagent", "A", "A")
+	addProjectionIdentitySession(t, db, "C", "/repo/c", "Child C", dayOne, dayOne, "subagent", "", "A")
+	addProjectionIdentitySession(t, db, "D", "/repo/d", "Nested D", dayTwo, dayTwo, "subagent", "B", "A")
+	addProjectionIdentitySession(t, db, "E", "/orphan", "No confirmed root", dayTwo, dayTwo, "subagent", "B", "")
+	addProjectionIdentitySession(t, db, "M", "/repo/m", "Metadata only", dayTwo, dayTwo, "subagent", "", "A")
+	addProjectionIdentitySession(t, db, "U", "/unknown", "Unknown with usage", dayTwo, dayTwo, "unknown", "", "")
+	addProjectionIdentitySession(t, db, "Z", "/unknown-zero", "Unknown without usage", dayTwo, dayTwo, "unknown", "", "")
+	addProjectionIdentitySession(t, db, "V", "/zero", "Zero request", dayTwo, dayTwo, "unknown", "", "")
+	addProjectionPrices(t, db)
+
+	for _, row := range []projectionLedgerRow{
+		{at: dayOne, agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "main", input: 10, output: 5},
+		{at: dayOne.Add(30 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "main", input: 2, output: 1},
+		{at: dayOne.Add(45 * time.Minute), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "main", input: 3, output: 2},
+		{at: dayOne.Add(time.Hour), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "subagent", subagent: "B", input: 4, output: 2},
+		{at: dayOne.Add(90 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "B", input: 2, output: 1},
+		{at: dayOne.Add(2 * time.Hour), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "C", input: 5, output: 1},
+		{at: dayTwo, agent: "codex", provider: "provider-a", model: "codex-model", effort: "medium", session: "A", sessionRole: "subagent", subagent: "D", parent: "B", input: 6, output: 3},
+		{at: dayTwo, agent: "codex", provider: "provider-a", model: "orphan-model", effort: "low", sessionRole: "subagent", subagent: "E", parent: "B", input: 7},
+		{at: dayOne, agent: "codex", provider: "provider-a", model: "unknown-model", effort: "high", session: "A", sessionRole: "unknown", kind: "collab_spawn", input: 8},
+		{at: dayTwo, agent: "codex", provider: "provider-a", model: "unknown-model", effort: "low", session: "U", sessionRole: "unknown", input: 3},
+		{at: dayTwo.Add(time.Hour), agent: "codex", provider: "provider-a", model: "unknown-legacy-model", session: "U", input: 2},
+		{at: dayTwo, agent: "codex", provider: "provider-a", model: "zero-model", effort: "low", session: "V", sessionRole: "unknown"},
+	} {
+		addProjectionRequest(t, db, row)
+	}
+
+	list, err := service.Sessions(context.Background(), ScopeQuery{Range: rangeValue})
+	if err != nil {
+		t.Fatalf("Sessions() error = %v", err)
+	}
+	items := make(map[string]SessionListItemView, len(list.Items))
+	for _, item := range list.Items {
+		items[item.Thread.Key.ThreadID] = item
+	}
+	mainEffort := make(map[string]UsageView)
+	for _, group := range items["A"].Thread.ModelEffort {
+		mainEffort[group.Model+"/"+group.Effort] = group.Usage
+	}
+	if len(items) != 4 || list.Summary.RootSessionCount != 4 {
+		t.Fatalf("top-level list/session KPI count = %d/%d, want main A, orphan E, unknown U, and zero-token unknown V: %+v", len(items), list.Summary.RootSessionCount, list.Items)
+	}
+	main := items["A"]
+	if main.Thread.Type != ThreadMain || main.Thread.Title != "Main A" || main.SelfUsage.Input != 15 || main.SelfUsage.Output != 8 ||
+		main.SubagentUsage.Input != 17 || main.SubagentUsage.Output != 7 || main.UnknownUsage.Input != 8 ||
+		main.InclusiveUsage.Input != 40 || main.InclusiveUsage.Output != 15 || math.Abs(main.InclusiveUsage.Cost-.0022) > 1e-9 ||
+		main.SubagentCount == nil || *main.SubagentCount != 3 || len(mainEffort) != 3 ||
+		mainEffort["codex-model/high"].Input != 10 || mainEffort["codex-model/low"].Input != 2 || mainEffort["spawn-model/high"].Input != 3 {
+		t.Fatalf("main own/descendant/unknown rollup = %+v", main)
+	}
+	if items["E"].Thread.Type != ThreadSubagent || items["E"].Thread.Key.SessionID != "E" || items["E"].Thread.ParentThreadID != "B" ||
+		items["E"].InclusiveUsage.Input != 7 || items["E"].InclusiveUsage.Unpriced != 1 {
+		t.Fatalf("rootless child must remain an independent subagent row with its actual parent metadata: %+v", items["E"])
+	}
+	if items["U"].Thread.Type != ThreadUnknown || items["U"].UnknownUsage.Input != 5 || items["U"].SelfUsage != (UsageView{}) || items["U"].Thread.ModelEffort != nil {
+		t.Fatalf("unknown raw session usage = %+v", items["U"])
+	}
+	if items["V"].Thread.Type != ThreadUnknown || !items["V"].HasUsageRows || items["V"].InclusiveUsage.Calls != 1 || items["V"].InclusiveUsage.Input != 0 {
+		t.Fatalf("effective zero-token unknown request = %+v", items["V"])
+	}
+	if _, exists := items["Z"]; exists {
+		t.Fatal("metadata-only unknown Codex thread was included")
+	}
+	if _, exists := items["B"]; exists {
+		t.Fatalf("confirmed child was listed outside its root: %+v", list.Items)
+	}
+
+	mainDetail, err := service.SessionDetail(context.Background(), ScopeQuery{Range: rangeValue}, main.Thread.Key)
+	if err != nil {
+		t.Fatalf("main SessionDetail() error = %v", err)
+	}
+	children := make(map[string]SessionThreadView, len(mainDetail.Children))
+	for _, child := range mainDetail.Children {
+		children[child.Key.ThreadID] = child
+	}
+	if len(children) != 3 || children["B"].Title != "Child B" || children["B"].Project.Path != "/repo/b" ||
+		children["C"].Title != "Child C" || children["D"].Title != "Nested D" ||
+		children["B"].ParentThreadID != "A" || mainDetail.SelfUsage.Input != 15 || mainDetail.SubagentUsage.Input != 17 || mainDetail.UnknownUsage.Input != 8 ||
+		mainDetail.InclusiveUsage.Input != 40 || math.Abs(mainDetail.InclusiveUsage.Cost-.0022) > 1e-9 {
+		t.Fatalf("main detail children/own/unknown rollup = %+v children=%+v", mainDetail, mainDetail.Children)
+	}
+	childDetail, err := service.SessionDetail(context.Background(), ScopeQuery{Range: rangeValue}, children["B"].Key)
+	if err != nil {
+		t.Fatalf("child SessionDetail() error = %v", err)
+	}
+	childEffort := make(map[string]UsageView)
+	for _, group := range childDetail.Thread.ModelEffort {
+		childEffort[group.Model+"/"+group.Effort] = group.Usage
+	}
+	if childDetail.SelfUsage.Input != 6 || childDetail.SubagentUsage.Input != 6 || childDetail.InclusiveUsage.Input != 12 ||
+		len(childEffort) != 2 || childEffort["codex-model/high"].Input != 2 || childEffort["codex-model/low"].Input != 4 ||
+		len(childDetail.Children) != 1 || childDetail.Children[0].Key.ThreadID != "D" {
+		t.Fatalf("nested child own model/effort rollup = %+v", childDetail)
+	}
+	unknownDetail, err := service.SessionDetail(context.Background(), ScopeQuery{Range: rangeValue}, items["U"].Thread.Key)
+	if err != nil || unknownDetail.Thread.Type != ThreadUnknown || unknownDetail.UnknownUsage.Input != 5 || unknownDetail.SelfUsage.Input != 0 ||
+		!unknownDetail.Thread.LastUsage.IsZero() || !unknownDetail.LastActivity.Equal(items["U"].LastActivity) {
+		t.Fatalf("unknown detail = %+v, %v", unknownDetail, err)
+	}
+
+	models, err := service.ModelDistribution(context.Background(), ScopeQuery{Range: rangeValue})
+	if err != nil {
+		t.Fatalf("ModelDistribution() error = %v", err)
+	}
+	projects, err := service.ProjectDistribution(context.Background(), ScopeQuery{Range: rangeValue})
+	if err != nil {
+		t.Fatalf("ProjectDistribution() error = %v", err)
+	}
+	var listUsage, modelUsage, projectUsage UsageView
+	for _, item := range list.Items {
+		listUsage = mergeUsage(listUsage, item.InclusiveUsage)
+	}
+	for _, item := range models.Items {
+		modelUsage = mergeUsage(modelUsage, item.Usage)
+	}
+	for _, item := range projects.Items {
+		projectUsage = mergeUsage(projectUsage, item.Usage)
+	}
+	if !sameSessionUsage(listUsage, modelUsage) || !sameSessionUsage(listUsage, projectUsage) ||
+		!sameSessionUsage(listUsage, list.Summary.Usage) || listUsage.Input != 52 || listUsage.Output != 15 {
+		t.Fatalf("list/KPI/distribution rows diverged or were counted twice: list=%+v summary=%+v model=%+v project=%+v", listUsage, list.Summary.Usage, modelUsage, projectUsage)
+	}
+
+	filtered, err := service.Sessions(context.Background(), ScopeQuery{Range: rangeValue, Filter: query.UsageFilter{
+		Models: []query.ModelSelection{{ProviderID: "provider-a", Model: "codex-model"}},
+	}})
+	if err != nil {
+		t.Fatalf("filtered Sessions() error = %v", err)
+	}
+	filteredEffort := make(map[string]UsageView)
+	if len(filtered.Items) > 0 {
+		for _, group := range filtered.Items[0].Thread.ModelEffort {
+			filteredEffort[group.Model+"/"+group.Effort] = group.Usage
+		}
+	}
+	if len(filtered.Items) != 1 || filtered.Items[0].Thread.Type != ThreadMain || filtered.Items[0].Thread.Key.ThreadID != "A" ||
+		filtered.Items[0].SelfUsage.Input != 12 || filtered.Items[0].SubagentUsage.Input != 12 ||
+		filtered.Items[0].InclusiveUsage.Input != 24 || filtered.Items[0].InclusiveUsage.Output != 12 ||
+		len(filteredEffort) != 2 || filteredEffort["codex-model/high"].Input != 10 || filteredEffort["codex-model/low"].Input != 2 {
+		t.Fatalf("range/model-scoped main and child summaries = %+v", filtered.Items)
+	}
+}
+
+func TestCodexLegacyRowsWithConfirmedMetadataRemainUnknown(t *testing.T) {
+	db := openProjectionSessionDB(t)
+	service := NewService(query.NewService(db, nil, time.UTC))
+	day := projectionTime(9, 0)
+	rangeValue := query.DateRange{From: day.Format(time.DateOnly), To: day.Format(time.DateOnly)}
+	addProjectionIdentitySession(t, db, "A", "/repo", "Main A", day, day, "main", "", "A")
+	addProjectionIdentitySession(t, db, "B", "/repo/b", "Child B", day, day, "subagent", "A", "A")
+	for _, row := range []projectionLedgerRow{
+		{at: day, agent: "codex", provider: "provider-a", model: "old-main-model", session: "A", kind: "collab_spawn", input: 7},
+		{at: day.Add(time.Minute), agent: "codex", provider: "provider-a", model: "old-child-model", session: "B", kind: "review", input: 3},
+	} {
+		addProjectionRequest(t, db, row)
+	}
+
+	list, err := service.Sessions(context.Background(), ScopeQuery{Range: rangeValue})
+	if err != nil || len(list.Items) != 1 {
+		t.Fatalf("legacy roleless Codex rows = %+v, %v", list, err)
+	}
+	main := list.Items[0]
+	if main.Thread.Key.ThreadID != "A" || main.SelfUsage.Input != 0 || main.SubagentUsage.Input != 0 ||
+		main.Thread.Usage.Input != 0 || len(main.Thread.ModelEffort) != 0 || main.UnknownUsage.Input != 10 ||
+		main.InclusiveUsage.Input != 10 || main.SubagentCount == nil || *main.SubagentCount != 1 {
+		t.Fatalf("confirmed metadata must not claim legacy request actors: %+v", main)
+	}
+
+	detail, err := service.SessionDetail(context.Background(), ScopeQuery{Range: rangeValue}, main.Thread.Key)
+	if err != nil || len(detail.Children) != 1 || detail.Children[0].Key.ThreadID != "B" {
+		t.Fatalf("legacy row detail children = %+v, %v", detail, err)
+	}
+	childDetail, err := service.SessionDetail(context.Background(), ScopeQuery{Range: rangeValue}, detail.Children[0].Key)
+	if err != nil || childDetail.SelfUsage.Input != 0 || len(childDetail.Thread.ModelEffort) != 0 ||
+		childDetail.UnknownUsage.Input != 3 || childDetail.InclusiveUsage.Input != 3 {
+		t.Fatalf("legacy child row must remain visible as unknown usage: %+v, %v", childDetail, err)
+	}
+}
+
 func TestSessionFieldsAndQuantiles(t *testing.T) {
 	db := openProjectionSessionDB(t)
 	service := NewService(query.NewService(db, nil, time.UTC))
@@ -264,6 +453,34 @@ func TestSessionFieldsAndQuantiles(t *testing.T) {
 	}
 }
 
+func TestCodexMetadataChildUsesOutOfRangeRootMetadata(t *testing.T) {
+	db := openProjectionSessionDB(t)
+	service := NewService(query.NewService(db, nil, time.UTC))
+	childTime := projectionTime(9, 0).AddDate(0, 0, 1)
+	rootStart := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	rootLast := rootStart.Add(time.Hour)
+	addProjectionIdentitySession(t, db, "R", "/root-project", "Root title", rootStart, rootLast, "main", "", "R")
+	addProjectionIdentitySession(t, db, "P", "/child-project", "Metadata child", childTime, childTime.Add(time.Minute), "subagent", "", "R")
+	addProjectionRequest(t, db, projectionLedgerRow{at: childTime, agent: "codex", provider: "provider-a", model: "zero-model",
+		sessionRole: "subagent", subagent: "P"})
+
+	list, err := service.Sessions(context.Background(), ScopeQuery{Range: query.DateRange{
+		From: childTime.Format(time.DateOnly), To: childTime.Format(time.DateOnly),
+	}})
+	if err != nil {
+		t.Fatalf("Sessions() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("out-of-range root and in-range child list = %+v", list.Items)
+	}
+	root := list.Items[0]
+	if root.Thread.Type != ThreadMain || root.Thread.Key.ThreadID != "R" || root.Thread.Title != "Root title" ||
+		root.Thread.Project.Path != "/root-project" || !root.HasUsageRows || root.InclusiveUsage.Calls != 1 || root.InclusiveUsage.Input != 0 ||
+		root.SubagentCount == nil || *root.SubagentCount != 1 || !root.LastActivity.Equal(childTime) {
+		t.Fatalf("root should keep metadata and activity from its effective zero-token child request: %+v", root)
+	}
+}
+
 func TestSessionParentConflictsAreIsolatedAndFlat(t *testing.T) {
 	db := openProjectionSessionDB(t)
 	service := NewService(query.NewService(db, nil, time.UTC))
@@ -318,10 +535,20 @@ func addProjectionSession(t *testing.T, db *sql.DB, agent, id, cwd, title string
 	}
 }
 
+func addProjectionIdentitySession(t *testing.T, db *sql.DB, id, cwd, title string, start, last time.Time, role, parent, root string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO sessions (agent,id,cwd,title,start_ns,last_ns,first_seen_ns,last_seen_ns,disappeared,role,parent_session,root_session)
+		VALUES ('codex',?,?,?,?,?,?,?,0,?,?,?)`, id, cwd, title, start.UnixNano(), last.UnixNano(), start.UnixNano(), last.UnixNano(), role, parent, root)
+	if err != nil {
+		t.Fatalf("insert projection identity session codex/%s: %v", id, err)
+	}
+}
+
 type projectionLedgerRow struct {
 	at                     time.Time
 	agent, provider, model string
 	effort, session        string
+	sessionRole            string
 	subagent, parent       string
 	kind, err              string
 	status                 int
@@ -335,9 +562,9 @@ type projectionLedgerRow struct {
 
 func addProjectionRequest(t *testing.T, db *sql.DB, row projectionLedgerRow) {
 	t.Helper()
-	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,effort,session,subagent,parent_agent,kind,status,rejected,error,input,output,cache_read,cache_write,cache_write_1h,ms,ttft_ms,first_text_ms,flow_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.at.UnixNano(), row.at.Format(time.DateOnly), row.agent, row.provider,
-		row.model, row.effort, row.session, row.subagent, row.parent, row.kind, row.status, projectionBoolInt(row.rejected), row.err,
+	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,effort,session,session_role,subagent,parent_agent,kind,status,rejected,error,input,output,cache_read,cache_write,cache_write_1h,ms,ttft_ms,first_text_ms,flow_ms)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.at.UnixNano(), row.at.Format(time.DateOnly), row.agent, row.provider,
+		row.model, row.effort, row.session, row.sessionRole, row.subagent, row.parent, row.kind, row.status, projectionBoolInt(row.rejected), row.err,
 		row.input, row.output, row.cacheRead, row.cacheWrite, row.cacheWrite1h, row.millis, row.ttftMS, row.firstTextMS, row.flowMS); err != nil {
 		t.Fatalf("insert projection request %s/%s/%s: %v", row.agent, row.session, row.model, err)
 	}

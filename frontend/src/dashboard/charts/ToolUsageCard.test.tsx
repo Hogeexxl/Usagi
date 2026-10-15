@@ -57,7 +57,7 @@ describe("ToolUsageCard Spec05", () => {
       "其他，25 次，25.0%",
     ]);
     expect(within(surface).queryByText("Tool-9")).not.toBeInTheDocument();
-    expect(rows.every((row) => row.classList.contains("h-3.5"))).toBe(true);
+    expect(rows.every((row) => row.classList.contains("h-[18px]"))).toBe(true);
     const colors = rows.map((row) => (row.firstElementChild as HTMLElement).style.background);
     expect(colors).toEqual(Array.from({ length: 8 }, (_, index) => chartSeriesColor(index)).concat(chartSeriesColor(8, true)));
     expect(surface.querySelectorAll("svg circle")).toHaveLength(9);

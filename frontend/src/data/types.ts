@@ -132,9 +132,10 @@ export type SessionProjectDto =
 
 export type SessionThreadDto = {
   key: ThreadKey;
-  type: "main" | "subagent";
+  type: "main" | "subagent" | "unknown";
   parent_thread_id: string | null;
   title: string | null;
+  nickname: string;
   project: SessionProjectDto;
   first_usage_ms: number;
   last_usage_ms: number;
@@ -146,6 +147,7 @@ export type SessionListItemDto = {
   thread: SessionThreadDto;
   self_usage: UsageDto;
   subagent_usage: UsageDto;
+  unknown_usage: UsageDto;
   inclusive_usage: UsageDto;
   has_usage_rows: boolean;
   last_activity_ms: number | null;
@@ -180,9 +182,11 @@ export type ToolUsageResponse = {
 
 export type SessionDetailResponse = {
   data_revision: number;
+  last_activity_ms: number | null;
   thread: SessionThreadDto;
   self_usage: UsageDto;
   subagent_usage: UsageDto;
+  unknown_usage: UsageDto;
   inclusive_usage: UsageDto;
   children: SessionThreadDto[];
 };

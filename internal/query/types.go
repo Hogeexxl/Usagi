@@ -86,17 +86,21 @@ type ModelEffortUsage struct {
 }
 
 type SessionUsage struct {
-	Agent      string
-	ID         string
-	Title      string
-	Cwd        string
-	Project    ProjectRef
-	Start      time.Time
-	Last       time.Time
-	FirstUsage time.Time
-	LastUsage  time.Time
-	HasRows    bool
-	Matched    bool
+	Agent         string
+	ID            string
+	Role          string
+	ParentSession string
+	RootSession   string
+	Title         string
+	Nickname      string
+	Cwd           string
+	Project       ProjectRef
+	Start         time.Time
+	Last          time.Time
+	FirstUsage    time.Time
+	LastUsage     time.Time
+	HasRows       bool
+	Matched       bool
 
 	ModelEffort []ModelEffortUsage
 	Totals      UsageTotals
@@ -118,6 +122,8 @@ type UsageRow struct {
 	Effort       string
 
 	Session       string
+	SessionRole   string
+	Compaction    *bool
 	NativeSession string
 	Subagent      string
 	ParentAgent   string

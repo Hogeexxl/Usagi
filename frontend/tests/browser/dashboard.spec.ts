@@ -62,6 +62,7 @@ function thread(agent: string, id: string, title: string, activity: number, proj
     type,
     parent_thread_id: parent,
     title,
+    nickname: "",
     project: projectValue,
     first_usage_ms: activity - 60_000,
     last_usage_ms: activity,
@@ -84,6 +85,7 @@ function session(id: string, title: string, activity: number, cost: number, tota
     thread: sessionThread,
     self_usage: itemUsage,
     subagent_usage: usage("empty"),
+    unknown_usage: usage("empty"),
     inclusive_usage: itemUsage,
     has_usage_rows: true,
     last_activity_ms: activity,
@@ -145,9 +147,11 @@ function sessionDetail(url: string) {
   main.key.thread_id = id;
   return {
     data_revision: REVISION,
+    last_activity_ms: activity,
     thread: main,
     self_usage: usage("main", 0.4),
     subagent_usage: usage("sub", 0.2),
+    unknown_usage: usage("empty"),
     inclusive_usage: { ...usage("main", 0.6), total: 780 },
     children: [
       thread("codex", `${id}-sub-recent`, "Recent subagent", FIXTURE_NOW_MS + 180, selected.thread.project, "subagent", id),

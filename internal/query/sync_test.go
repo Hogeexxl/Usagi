@@ -1012,6 +1012,427 @@ func TestSyncSessionsUpdatesMetadataPreservesHistoryAndIgnoresLastSeenRevision(t
 	}
 }
 
+func TestSyncSessionNicknameOnlyChangeIncrementsRevisionAndKeepsTitle(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all"})
+	fixture.setSessions(magpie.Session{
+		Agent: "codex", ID: "thread-1", Title: "Saved title", Nickname: "First nickname", Name: "Codex display", Last: now,
+	})
+	db, _ := openSyncTestDB(t)
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.syncSessions(context.Background()); err != nil {
+		t.Fatalf("initial session sync: %v", err)
+	}
+	initialRevision := dbRevision(t, db)
+
+	fixture.setSessions(magpie.Session{
+		Agent: "codex", ID: "thread-1", Title: "Saved title", Nickname: "Changed nickname", Name: "Codex display", Last: now,
+	})
+	if _, err := service.syncSessions(context.Background()); err != nil {
+		t.Fatalf("nickname-only session sync: %v", err)
+	}
+	var title, nickname, agentName string
+	if err := db.QueryRow("SELECT title, nickname, agent_name FROM sessions WHERE agent = 'codex' AND id = 'thread-1'").
+		Scan(&title, &nickname, &agentName); err != nil {
+		t.Fatal(err)
+	}
+	if title != "Saved title" || nickname != "Changed nickname" || agentName != "Codex display" || dbRevision(t, db) != initialRevision+1 {
+		t.Fatalf("nickname-only sync stored title=%q nickname=%q agent=%q revision=%d; want saved title, changed nickname, distinct agent name, revision %d",
+			title, nickname, agentName, dbRevision(t, db), initialRevision+1)
+	}
+
+	fixture.setSessions(magpie.Session{
+		Agent: "codex", ID: "thread-1", Title: "Updated title", Nickname: "Changed nickname", Name: "Codex display", Last: now,
+	})
+	if _, err := service.syncSessions(context.Background()); err != nil {
+		t.Fatalf("title update session sync: %v", err)
+	}
+	if err := db.QueryRow("SELECT title, nickname FROM sessions WHERE agent = 'codex' AND id = 'thread-1'").
+		Scan(&title, &nickname); err != nil {
+		t.Fatal(err)
+	}
+	if title != "Updated title" || nickname != "Changed nickname" || dbRevision(t, db) != initialRevision+2 {
+		t.Fatalf("title update stored title=%q nickname=%q revision=%d; want updated title, preserved nickname, revision %d",
+			title, nickname, dbRevision(t, db), initialRevision+2)
+	}
+	dataset, err := service.SessionDataset(context.Background(), SessionQuery{Range: DateRange{From: now.Format(time.DateOnly), To: now.Format(time.DateOnly)}})
+	if err != nil {
+		t.Fatalf("read session nickname from dataset: %v", err)
+	}
+	if len(dataset.Sessions) != 1 || dataset.Sessions[0].Title != "Updated title" || dataset.Sessions[0].Nickname != "Changed nickname" {
+		t.Fatalf("session dataset title/nickname = %+v, want updated title and separate nickname", dataset.Sessions)
+	}
+}
+
+func TestSyncCompactionTriStateRoundTrip(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := now.Format(time.DateOnly)
+	trueValue, falseValue := true, false
+	rows := []magpie.UsageRequest{
+		{Time: now, Agent: "codex", Model: "gpt-5", Compaction: &trueValue},
+		{Time: now.Add(time.Second), Agent: "codex", Model: "gpt-5", Compaction: &falseValue},
+		{Time: now.Add(2 * time.Second), Agent: "codex", Model: "gpt-5"},
+	}
+	db, _ := openSyncTestDB(t)
+	service := newSyncTestService(t, db, newSyncHTTPFixture(magpie.UsageSummary{Period: "all"}), location, now)
+	if err := service.saveSyncDay(context.Background(), day, [32]byte{}, rows, false); err != nil {
+		t.Fatalf("save day: %v", err)
+	}
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readDatasetRequests(context.Background(), tx, DateRange{From: day, To: day}, location)
+	if err != nil {
+		tx.Rollback()
+		t.Fatalf("read saved day: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("read %d requests, want 3", len(got))
+	}
+	want := []*bool{&trueValue, &falseValue, nil}
+	for index := range want {
+		if !sameQueryBoolPointer(got[index].Compaction, want[index]) {
+			t.Fatalf("request %d compaction = %v, want %v", index, got[index].Compaction, want[index])
+		}
+		row := usageRowOf(got[index], "codex", "thread-1", ProjectRef{}, true)
+		if !sameQueryBoolPointer(row.Compaction, want[index]) {
+			t.Fatalf("usage row %d compaction = %v, want %v", index, row.Compaction, want[index])
+		}
+	}
+}
+
+func sameQueryBoolPointer(a, b *bool) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	const oldDay = "2026-10-04"
+	today := now.Format(time.DateOnly)
+	oldPoint := digestPoint(oldDay, location, 1, 7)
+	todayPoint := digestPoint(today, location, 1, 1)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{
+		Period: "all", Series: []magpie.UsagePoint{{Label: today, Time: todayPoint.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}}},
+		UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1},
+	})
+	fixture.setSessions(magpie.Session{Agent: "codex", ID: "thread-1", Role: "main"})
+	fixture.digests[oldDay], fixture.digests[today] = oldPoint, todayPoint
+	compaction := true
+	upstreamRow := magpie.UsageRequest{
+		Time: oldPoint.Time, Agent: "codex", Provider: "openai", Model: "gpt-5", RID: "rid-old", ResponseID: "response-old",
+		Status: http.StatusOK, Input: 7, Output: 3, Cost: 0.125, Priced: true, Compaction: &compaction,
+	}
+	fixture.requests[oldDay] = []magpie.UsageRequest{upstreamRow}
+	db, path := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	seedDay(t, db, oldDay, digestBytes(t, oldPoint), now.Add(-time.Hour).UnixNano(), true)
+	if _, err := db.Exec("UPDATE sync_days SET row_count = 1, identity_backfill_pending = 1, compaction_backfill_pending = 1 WHERE day = ?", oldDay); err != nil {
+		t.Fatal(err)
+	}
+	seedDay(t, db, today, digestBytes(t, todayPoint), now.Add(-time.Hour).UnixNano(), false)
+	if _, err := db.Exec(`INSERT INTO requests (t_ns, local_day, agent, provider, model, rid, response_id, status, input, output, magpie_cost, magpie_priced)
+		VALUES (?, ?, 'codex', 'openai', 'gpt-5', 'rid-old', 'response-old', ?, 7, 3, 0.125, 1)`,
+		oldPoint.Time.UnixNano(), oldDay, http.StatusOK); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_compaction_replace BEFORE INSERT ON requests
+		WHEN NEW.local_day = '2026-10-04'
+		BEGIN SELECT RAISE(ABORT, 'fixture replacement failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err == nil {
+		t.Fatal("Sync succeeded despite transactional replacement failure")
+	}
+	var model string
+	var input int
+	var output int
+	var cost float64
+	var priced, identityPending, pending, frozen int
+	var compactionValue sql.NullInt64
+	if err := db.QueryRow(`SELECT r.model, r.input, r.output, r.magpie_cost, r.magpie_priced, r.compaction,
+		d.identity_backfill_pending, d.compaction_backfill_pending, d.frozen
+		FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.local_day = ?`, oldDay).
+		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &identityPending, &pending, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || compactionValue.Valid || identityPending != 1 || pending != 1 || frozen != 1 {
+		t.Fatalf("failed replacement changed cached day: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v identity_pending=%d compaction_pending=%d frozen=%d",
+			model, input, output, cost, priced, compactionValue, identityPending, pending, frozen)
+	}
+	if _, err := db.Exec("DROP TRIGGER fail_compaction_replace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatalf("reopen pending migrated database: %v", err)
+	}
+	service = newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("retry compaction backfill after reopen: %v", err)
+	}
+	if err := db.QueryRow(`SELECT r.model, r.input, r.output, r.magpie_cost, r.magpie_priced, r.compaction,
+		d.identity_backfill_pending, d.compaction_backfill_pending, d.frozen
+		FROM requests r JOIN sync_days d ON d.day = r.local_day WHERE r.local_day = ?`, oldDay).
+		Scan(&model, &input, &output, &cost, &priced, &compactionValue, &identityPending, &pending, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-5" || input != 7 || output != 3 || cost != 0.125 || priced != 1 || !compactionValue.Valid || compactionValue.Int64 != 1 || identityPending != 0 || pending != 0 || frozen != 1 {
+		t.Fatalf("successful backfill state: model=%q input=%d output=%d cost=%.3f priced=%d compaction=%v identity_pending=%d compaction_pending=%d frozen=%d",
+			model, input, output, cost, priced, compactionValue, identityPending, pending, frozen)
+	}
+	var rowCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM requests WHERE local_day = ?", oldDay).Scan(&rowCount); err != nil || rowCount != 1 {
+		t.Fatalf("request count after backfill = %d, %v; want one source row", rowCount, err)
+	}
+	pageCalls := countPageCalls(fixture.calls())
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatalf("reopen completed database: %v", err)
+	}
+	service = newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync after completed backfill: %v", err)
+	}
+	if got := countPageCalls(fixture.calls()); got != pageCalls {
+		t.Fatalf("completed backfill made %d repeat full-day requests", got-pageCalls)
+	}
+}
+
+func TestSyncBackfillsFrozenDaysRetriesAndRefreshesChangedIdentity(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	today := now.Format(time.DateOnly)
+	days, err := daysBetween("2026-10-06", today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all"})
+	for index, day := range days {
+		point := digestPoint(day, location, 1, index+1)
+		fixture.digests[day] = point
+		fixture.summary.Series = append(fixture.summary.Series, magpie.UsagePoint{
+			Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: index + 1},
+		})
+		row := magpie.UsageRequest{
+			Time: point.Time, Agent: "codex", Model: "fetched", Input: 2, Status: http.StatusOK,
+			Session: fmt.Sprintf("thread-%d", index), SessionRole: "main", Cost: 0.125, Priced: true,
+		}
+		if index == 0 {
+			row.Session, row.NativeSession, row.Subagent, row.ParentAgent = "root-a", "root-a", "child-a", "parent-a"
+			row.SessionRole = "subagent"
+		} else if index == 2 {
+			row.Session, row.NativeSession = "root-a", "root-a"
+		}
+		fixture.requests[day] = []magpie.UsageRequest{row}
+	}
+	fixture.summary.UsageTotals.Calls = len(days)
+	fixture.setSessions(
+		magpie.Session{Agent: "codex", ID: "root-a", Role: "main"},
+		magpie.Session{Agent: "codex", ID: "child-a", Role: "subagent", ParentSession: "parent-a", RootSession: "root-a"},
+	)
+	failedDay := days[1]
+	fixture.setPageFailure(failedDay, 0, true)
+	db, _ := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	cutoff := now.AddDate(0, 0, -7).Format(time.DateOnly)
+	for _, day := range days {
+		point := fixture.digests[day]
+		if _, err := db.Exec(`INSERT INTO sync_days (day, fingerprint, row_count, last_sync_ns, frozen)
+			VALUES (?, ?, 1, ?, ?)`, day, digestBytes(t, point), now.Add(-time.Hour).UnixNano(), boolInt(day < cutoff)); err != nil {
+			t.Fatalf("seed sync day %s: %v", day, err)
+		}
+		identitySession, identityNative := "thread", ""
+		if day == days[0] || day == days[2] {
+			identitySession, identityNative = "root-a", "root-a"
+		}
+		if _, err := db.Exec(`INSERT INTO requests (
+			t_ns, local_day, agent, model, input, session, native_session, magpie_cost, magpie_priced
+		) VALUES (?, ?, 'codex', 'baseline', 1, ?, ?, 0.75, 1)`, fixture.digests[day].Time.UnixNano(), day,
+			identitySession, identityNative); err != nil {
+			t.Fatalf("seed request %s: %v", day, err)
+		}
+	}
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err == nil {
+		t.Fatal("first identity backfill succeeded despite one failed day")
+	}
+	var savedSessionRole, savedSessionParent, savedSessionRoot string
+	if err := db.QueryRow(`SELECT role, parent_session, root_session FROM sessions
+		WHERE agent = 'codex' AND id = 'child-a'`).Scan(&savedSessionRole, &savedSessionParent, &savedSessionRoot); err != nil {
+		t.Fatal(err)
+	}
+	if savedSessionRole != "subagent" || savedSessionParent != "parent-a" || savedSessionRoot != "root-a" {
+		t.Fatalf("saved session identity = %q/%q/%q", savedSessionRole, savedSessionParent, savedSessionRoot)
+	}
+	var started, complete string
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_started'").Scan(&started); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_complete'").Scan(&complete); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sync_days WHERE identity_backfill_pending = 1").Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if started != "1" || complete != "0" || pending != 1 {
+		t.Fatalf("failed backfill state = started %q complete %q pending %d", started, complete, pending)
+	}
+	var oldModel string
+	var oldCost float64
+	var oldPriced int
+	if err := db.QueryRow("SELECT model, magpie_cost, magpie_priced FROM requests WHERE local_day = ?", failedDay).Scan(&oldModel, &oldCost, &oldPriced); err != nil {
+		t.Fatal(err)
+	}
+	if oldModel != "baseline" || oldCost != 0.75 || oldPriced != 1 {
+		t.Fatalf("failed day lost prior data: model %q cost %.3f priced %d", oldModel, oldCost, oldPriced)
+	}
+	var frozen, refreshedPending int
+	if err := db.QueryRow("SELECT frozen, identity_backfill_pending FROM sync_days WHERE day = ?", days[0]).Scan(&frozen, &refreshedPending); err != nil {
+		t.Fatal(err)
+	}
+	var fetchedModel, fetchedRole string
+	if err := db.QueryRow("SELECT model, session_role FROM requests WHERE local_day = ?", days[0]).Scan(&fetchedModel, &fetchedRole); err != nil {
+		t.Fatal(err)
+	}
+	if frozen != 1 || refreshedPending != 0 || fetchedModel != "fetched" || fetchedRole != "subagent" {
+		t.Fatalf("frozen history refresh = frozen %d pending %d model %q role %q", frozen, refreshedPending, fetchedModel, fetchedRole)
+	}
+
+	firstPages := countPageCalls(fixture.calls())
+	fixture.setPageFailure(failedDay, 0, false)
+	service = newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("retry identity backfill: %v", err)
+	}
+	if got := countPageCalls(fixture.calls()); got != firstPages+1 {
+		t.Fatalf("retry made %d full-day requests, want only the failed day", got-firstPages)
+	}
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_complete'").Scan(&complete); err != nil || complete != "1" {
+		t.Fatalf("backfill completion = %q, %v; want 1", complete, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM sync_days WHERE identity_backfill_pending = 1").Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("pending days after retry = %d, %v; want 0", pending, err)
+	}
+
+	child := magpie.Session{Agent: "codex", ID: "child-a", Role: "subagent", ParentSession: "parent-b", RootSession: "root-a"}
+	fixture.setSessions(magpie.Session{Agent: "codex", ID: "root-a", Role: "main"}, child)
+	changed := fixture.requests[days[0]][0]
+	changed.ParentAgent = "parent-b"
+	fixture.requests[days[0]] = []magpie.UsageRequest{changed}
+	identityRevision := dbRevision(t, db)
+	identityPages := countPageCalls(fixture.calls())
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("refresh changed identity day: %v", err)
+	}
+	if got := dbRevision(t, db); got <= identityRevision {
+		t.Fatalf("identity change did not refresh data revision: before %d, after %d", identityRevision, got)
+	}
+	if got := countPageCalls(fixture.calls()); got != identityPages+2 {
+		t.Fatalf("identity change made %d full-day requests, want both root-linked days", got-identityPages)
+	}
+	var savedParent string
+	if err := db.QueryRow("SELECT parent_agent FROM requests WHERE local_day = ?", days[0]).Scan(&savedParent); err != nil || savedParent != "parent-b" {
+		t.Fatalf("changed parent identity = %q, %v", savedParent, err)
+	}
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_complete'").Scan(&complete); err != nil || complete != "1" {
+		t.Fatalf("completion after identity change = %q, %v; want 1", complete, err)
+	}
+	changedPages := countPageCalls(fixture.calls())
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged identity Sync: %v", err)
+	}
+	if got := countPageCalls(fixture.calls()); got != changedPages {
+		t.Fatalf("unchanged identity caused %d additional historical requests", got-changedPages)
+	}
+
+	var oldSession, oldNative, oldSubagent, oldParent string
+	if err := db.QueryRow(`SELECT session, native_session, subagent, parent_agent FROM requests WHERE local_day = ?`, days[2]).
+		Scan(&oldSession, &oldNative, &oldSubagent, &oldParent); err != nil {
+		t.Fatal(err)
+	}
+	if oldSession != "root-a" || oldNative != "root-a" || oldSubagent != "" || oldParent != "" {
+		t.Fatalf("request before new child appears = %q/%q/%q/%q", oldSession, oldNative, oldSubagent, oldParent)
+	}
+	childB := magpie.Session{Agent: "codex", ID: "child-b", Role: "subagent", ParentSession: "root-a", RootSession: "root-a"}
+	fixture.setSessions(magpie.Session{Agent: "codex", ID: "root-a", Role: "main"}, child, childB)
+	newChildRequest := fixture.requests[days[2]][0]
+	newChildRequest.SessionRole, newChildRequest.Subagent = "subagent", "child-b"
+	fixture.requests[days[2]] = []magpie.UsageRequest{newChildRequest}
+	newChildPages := countPageCalls(fixture.calls())
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("refresh history for new child: %v", err)
+	}
+	if got := countPageCalls(fixture.calls()); got != newChildPages+2 {
+		t.Fatalf("new child identity made %d full-day requests, want both root-linked days", got-newChildPages)
+	}
+	var savedChild, savedRole string
+	if err := db.QueryRow("SELECT subagent, session_role FROM requests WHERE local_day = ?", days[2]).Scan(&savedChild, &savedRole); err != nil {
+		t.Fatal(err)
+	}
+	if savedChild != "child-b" || savedRole != "subagent" {
+		t.Fatalf("new child request identity = %q/%q", savedChild, savedRole)
+	}
+	newChildSyncedPages := countPageCalls(fixture.calls())
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged new child identity Sync: %v", err)
+	}
+	if got := countPageCalls(fixture.calls()); got != newChildSyncedPages {
+		t.Fatalf("unchanged new child identity caused %d additional historical requests", got-newChildSyncedPages)
+	}
+}
+
+func TestSyncOldUpstreamPreservesStoredSessionIdentityAndDoesNotStartBackfill(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := now.Format(time.DateOnly)
+	point := digestPoint(day, location, 1, 1)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{
+		Period: "all", Series: []magpie.UsagePoint{{Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}}},
+		UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1},
+	})
+	fixture.digests[day] = point
+	fixture.setSessions(magpie.Session{Agent: "codex", ID: "thread-1", Cwd: "/repo"})
+	db, _ := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	if _, err := db.Exec(`INSERT INTO sessions (
+		agent, id, role, parent_session, root_session, first_seen_ns, last_seen_ns
+	) VALUES ('codex', 'thread-1', 'subagent', 'parent-1', 'root-1', ?, ?)`, now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync against old upstream: %v", err)
+	}
+	var role, parent, root, started, complete string
+	if err := db.QueryRow("SELECT role, parent_session, root_session FROM sessions WHERE agent = 'codex' AND id = 'thread-1'").Scan(&role, &parent, &root); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_started'").Scan(&started); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'session_identity_backfill_complete'").Scan(&complete); err != nil {
+		t.Fatal(err)
+	}
+	if role != "subagent" || parent != "parent-1" || root != "root-1" || started != "0" || complete != "0" {
+		t.Fatalf("old upstream state: identity %q/%q/%q backfill %q/%q", role, parent, root, started, complete)
+	}
+}
+
 func TestSyncInitialCompletionContinuesAndSurvivesRestart(t *testing.T) {
 	location := time.FixedZone("UTC+8", 8*60*60)
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)

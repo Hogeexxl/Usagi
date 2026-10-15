@@ -140,8 +140,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		response.Items = append(response.Items, sessionListItemDTO{
 			Thread: mapSessionThreadDTO(item.Thread), SelfUsage: mapUsageDTO(item.SelfUsage),
-			SubagentUsage: mapUsageDTO(item.SubagentUsage), InclusiveUsage: mapUsageDTO(item.InclusiveUsage),
-			HasUsageRows: item.HasUsageRows, LastActivityMS: lastActivityMS, SubagentCount: item.SubagentCount,
+			SubagentUsage: mapUsageDTO(item.SubagentUsage), UnknownUsage: mapUsageDTO(item.UnknownUsage),
+			InclusiveUsage: mapUsageDTO(item.InclusiveUsage),
+			HasUsageRows:   item.HasUsageRows, LastActivityMS: lastActivityMS, SubagentCount: item.SubagentCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -160,9 +161,10 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := sessionDetailResponseDTO{
-		DataRevision: dataRevision, Thread: mapSessionThreadDTO(view.Thread),
+		DataRevision: dataRevision, LastActivityMS: nullableTimeMS(view.LastActivity), Thread: mapSessionThreadDTO(view.Thread),
 		SelfUsage: mapUsageDTO(view.SelfUsage), SubagentUsage: mapUsageDTO(view.SubagentUsage),
-		InclusiveUsage: mapUsageDTO(view.InclusiveUsage), Children: make([]sessionThreadDTO, 0, len(view.Children)),
+		UnknownUsage: mapUsageDTO(view.UnknownUsage), InclusiveUsage: mapUsageDTO(view.InclusiveUsage),
+		Children: make([]sessionThreadDTO, 0, len(view.Children)),
 	}
 	for _, child := range view.Children {
 		response.Children = append(response.Children, mapSessionThreadDTO(child))

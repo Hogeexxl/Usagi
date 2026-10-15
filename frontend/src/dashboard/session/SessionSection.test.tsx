@@ -50,6 +50,21 @@ const usage: UsageDto = {
   unpriced: 0,
   retried: 0, output_speed: null, speed_samples: 0,
 };
+const zeroUsage: UsageDto = {
+  ...usage,
+  calls: 0,
+  errors: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  cache_write_1h: 0,
+  reasoning: 0,
+  total: 0,
+  cache_hit_rate: null,
+  cost: 0,
+  unpriced: 0,
+};
 
 const item: SessionListItemDto = {
   thread: {
@@ -57,6 +72,7 @@ const item: SessionListItemDto = {
     type: "main",
     parent_thread_id: null,
     title: null,
+    nickname: "",
     project: { kind: "project", name: "Usagi", path: "/work/Usagi" },
     first_usage_ms: Date.UTC(2026, 7, 10, 8, 0),
     last_usage_ms: Date.UTC(2026, 7, 10, 8, 9),
@@ -70,6 +86,7 @@ const item: SessionListItemDto = {
   inclusive_usage: { ...usage, total: 5_678 },
   self_usage: { ...usage, total: 1_234 },
   subagent_usage: usage,
+  unknown_usage: zeroUsage,
   has_usage_rows: true,
   last_activity_ms: Date.UTC(2026, 7, 10, 8, 9),
 };
@@ -406,6 +423,20 @@ describe("SessionSection v0.2.0", () => {
     expect(cells[5]).toHaveTextContent("$1.25");
   });
 
+  it("does not attribute a model to unknown thread rows", () => {
+    const unknown = row(3, {
+      thread: {
+        ...row(3).thread,
+        type: "unknown",
+        model_effort: [{ model: "unconfirmed-model", effort: "high", usage, compaction_tokens: null }],
+      },
+    });
+    const rendered = render(<SessionSection view={view({ rows: [unknown] })} />);
+    const cells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-3", "root-3"])}'] td`);
+
+    expect(cells[1]).not.toHaveTextContent("unconfirmed-model");
+  });
+
   it("shows em dashes when a session has no usage rows and preserves subagent count semantics", () => {
     const codexNoRows = row(1, {
       has_usage_rows: false,
@@ -420,11 +451,12 @@ describe("SessionSection v0.2.0", () => {
     const rendered = render(<SessionSection view={view({ rows: [codexNoRows, claudeZero] })} />);
     const codexCells = rendered.container.querySelectorAll(`tbody tr[data-session-thread-key-id='${JSON.stringify(["codex", "session-1", "root-1"])}'] td`);
     expect(codexCells[0]).toHaveTextContent("—");
-    expect(codexCells[1]).toHaveTextContent("codex · —");
-    expect(codexCells[1]).not.toHaveTextContent(" ·  · ");
+    expect(codexCells[1].querySelectorAll("span")[1]).toHaveTextContent("codex");
+    expect(codexCells[1].querySelectorAll("span")[1]).not.toHaveTextContent("—");
     for (const index of [3, 4, 5]) expect(codexCells[index]).toHaveTextContent("—");
     const claudeSession = rendered.container.querySelector(`tbody tr[data-session-thread-key-id='${JSON.stringify(["claude", "session-2", "root-2"])}'] td:nth-child(2)`);
-    expect(claudeSession).toHaveTextContent("claude · gpt-5 (high), o4-mini (low) · 0 subagent");
+    expect(claudeSession).toHaveTextContent("claude · gpt-5 (high), o4-mini (low)");
+    expect(claudeSession).not.toHaveTextContent("0 subagent");
   });
 
   it("T-S04-006 keeps pagination in the Session header and commits the real page-input flow", () => {

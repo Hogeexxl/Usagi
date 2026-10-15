@@ -111,7 +111,7 @@ export function ToolUsageCard({ view }: { view: ToolUsageControllerView }) {
               key={segment.id}
               title={segment.name}
               aria-label={`${segment.name}，${formatIntegerFull(segment.calls).text} 次，${(segment.percentage * 100).toFixed(1)}%`}
-              className="grid h-3.5 w-full grid-cols-[10px_minmax(0,1fr)_auto_48px] items-center gap-x-2 text-xs leading-3 text-muted-foreground"
+              className="grid h-[18px] w-full grid-cols-[10px_minmax(0,1fr)_auto_48px] items-center gap-x-2 text-xs leading-4 text-muted-foreground"
               animate={{ opacity: focusOpacity(focusedId, segment.id) }}
               transition={reduce ? { duration: 0 } : SPRING_LAYOUT}
               onPointerEnter={() => setFocusedId(segment.id)}

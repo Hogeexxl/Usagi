@@ -26,6 +26,10 @@ function usage(total: number, cost = total / 100): UsageDto {
   };
 }
 
+function zeroUsage(): UsageDto {
+  return { ...usage(0, 0), calls: 0, cache_hit_rate: null };
+}
+
 function item(index: number, options: { total?: number; cost?: number; activity?: number | null; hasUsage?: boolean; project?: string | null } = {}): SessionListItemDto {
   const rowUsage = usage(options.total ?? index, options.cost ?? index / 100);
   const project = options.project === null
@@ -37,6 +41,7 @@ function item(index: number, options: { total?: number; cost?: number; activity?
       type: "main",
       parent_thread_id: null,
       title: `Session ${index}`,
+      nickname: "",
       project,
       first_usage_ms: index,
       last_usage_ms: index,
@@ -45,6 +50,7 @@ function item(index: number, options: { total?: number; cost?: number; activity?
     },
     self_usage: rowUsage,
     subagent_usage: usage(0, 0),
+    unknown_usage: zeroUsage(),
     inclusive_usage: rowUsage,
     has_usage_rows: options.hasUsage ?? true,
     last_activity_ms: options.activity === undefined ? index : options.activity,

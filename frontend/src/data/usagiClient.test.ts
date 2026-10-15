@@ -19,12 +19,28 @@ const usage: UsageDto = {
   unpriced: 1,
   retried: 0, output_speed: null, speed_samples: 0,
 };
+const zeroUsage: UsageDto = {
+  ...usage,
+  calls: 0,
+  errors: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  cache_write_1h: 0,
+  reasoning: 0,
+  total: 0,
+  cache_hit_rate: null,
+  cost: 0,
+  unpriced: 0,
+};
 
 const thread = {
   key: { agent: "claude", session_id: "session-1", thread_id: "thread-1" },
   type: "main" as const,
   parent_thread_id: null,
   title: "Session one",
+  nickname: "",
   project: { kind: "project" as const, path: "/work/Usagi", name: "Usagi" },
   first_usage_ms: 100,
   last_usage_ms: 200,
@@ -149,7 +165,7 @@ describe("Usagi Spec04 HTTP client", () => {
     const listResponse = {
       data_revision: 8,
       summary: { data_revision: 8, usage, session_count: 1, session_median: null, session_p90: null },
-      items: [{ thread: workspaceThread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, inclusive_usage: usage, has_usage_rows: false, last_activity_ms: null, subagent_count: null }],
+      items: [{ thread: workspaceThread, self_usage: usage, subagent_usage: { ...usage, total: 1 }, unknown_usage: zeroUsage, inclusive_usage: usage, has_usage_rows: false, last_activity_ms: null, subagent_count: null }],
     };
     const fetchMock = mockJson(listResponse);
     await expect(usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters })).resolves.toEqual(listResponse);
@@ -165,9 +181,11 @@ describe("Usagi Spec04 HTTP client", () => {
     const child = { ...thread, key: threadKey, type: "subagent" as const, parent_thread_id: "thread-1" };
     const detailResponse = {
       data_revision: 8,
+      last_activity_ms: null,
       thread: workspaceThread,
       self_usage: usage,
       subagent_usage: usage,
+      unknown_usage: zeroUsage,
       inclusive_usage: usage,
       children: [child],
     };
@@ -180,6 +198,101 @@ describe("Usagi Spec04 HTTP client", () => {
     expect(url.searchParams.get("thread_id")).toBe("subagent-1");
     expect(threadKeyId(threadKey)).toBe(JSON.stringify(["claude", "session-1", "subagent-1"]));
     expect(detailResponse.children).toEqual([child]);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ...detailResponse, last_activity_ms: "not-a-number" }), { status: 200 }));
+    await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, key: threadKey })).rejects.toMatchObject({ code: "HTTP_ERROR", status: 200 });
+    const { last_activity_ms: _lastActivity, ...missingActivity } = detailResponse;
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(missingActivity), { status: 200 }));
+    await expect(usagiClient.getSessionDetail({ range: { key: "today" }, filters: emptyFilters, key: threadKey })).rejects.toMatchObject({ code: "HTTP_ERROR", status: 200 });
+  });
+
+  it("parses Codex main and child identities alongside unknown thread usage", async () => {
+    const mainId = "01a135e4-9b71-7fa1-8bb0-2dd2bdaf5497";
+    const childId = "01a138ab-909f-7990-a365-9555077faea2";
+    const mainThread = {
+      ...thread,
+      key: { agent: "codex", session_id: mainId, thread_id: mainId },
+      type: "main" as const,
+      parent_thread_id: null,
+    };
+    const childThread = {
+      ...thread,
+      key: { agent: "codex", session_id: mainId, thread_id: childId },
+      type: "subagent" as const,
+      parent_thread_id: mainId,
+      title: "Codex child",
+      nickname: "Child nickname",
+    };
+    const unknownThread = {
+      ...thread,
+      key: { agent: "codex", session_id: mainId, thread_id: "unknown-calls" },
+      type: "unknown" as const,
+      parent_thread_id: null,
+      model_effort: [],
+      usage: zeroUsage,
+    };
+    const unknownUsage = { ...zeroUsage, calls: 1, input: 4, total: 4, cost: 0.02 };
+    const mainItem = {
+      thread: mainThread,
+      self_usage: usage,
+      subagent_usage: usage,
+      unknown_usage: zeroUsage,
+      inclusive_usage: usage,
+      has_usage_rows: true,
+      last_activity_ms: 200,
+      subagent_count: 1,
+    };
+    const unknownItem = {
+      thread: unknownThread,
+      self_usage: zeroUsage,
+      subagent_usage: zeroUsage,
+      unknown_usage: unknownUsage,
+      inclusive_usage: unknownUsage,
+      has_usage_rows: true,
+      last_activity_ms: 200,
+      subagent_count: null,
+    };
+    const summary = { data_revision: 8, usage, session_count: 2, session_median: null, session_p90: null };
+    const fetchMock = mockJson({ data_revision: 8, summary, items: [mainItem, unknownItem] });
+
+    const sessions = await usagiClient.getSessions({ range: { key: "today" }, filters: emptyFilters });
+    expect(sessions.items.map((item) => item.thread.type)).toEqual(["main", "unknown"]);
+    expect(sessions.items[1].unknown_usage).toEqual(unknownUsage);
+
+    const mainDetail = {
+      data_revision: 8,
+      last_activity_ms: 200,
+      thread: mainThread,
+      self_usage: usage,
+      subagent_usage: usage,
+      unknown_usage: zeroUsage,
+      inclusive_usage: usage,
+      children: [childThread],
+    };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(mainDetail), { status: 200 }));
+    const parsedMainDetail = await usagiClient.getSessionDetail({
+      range: { key: "today" }, filters: emptyFilters, key: mainThread.key,
+    });
+    expect(parsedMainDetail.children).toEqual([childThread]);
+    expect(parsedMainDetail.last_activity_ms).toBe(200);
+    expect(parsedMainDetail.children[0].parent_thread_id).toBe(mainId);
+    expect(parsedMainDetail.children[0].model_effort[0].usage).toEqual(usage);
+
+    const unknownDetail = {
+      data_revision: 8,
+      last_activity_ms: null,
+      thread: unknownThread,
+      self_usage: zeroUsage,
+      subagent_usage: zeroUsage,
+      unknown_usage: unknownUsage,
+      inclusive_usage: unknownUsage,
+      children: [],
+    };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(unknownDetail), { status: 200 }));
+    const parsedUnknownDetail = await usagiClient.getSessionDetail({
+      range: { key: "today" }, filters: emptyFilters, key: unknownThread.key,
+    });
+    expect(parsedUnknownDetail.thread.type).toBe("unknown");
+    expect(parsedUnknownDetail.unknown_usage).toEqual(unknownUsage);
   });
 
   it("loads Tool usage by days and parses the original top order", async () => {

@@ -17,6 +17,15 @@ type SessionModel struct {
 	SessionTokens
 }
 
+type SessionModelEffort struct {
+	Model     string  `json:"model"`
+	Effort    string  `json:"effort"`
+	Reasoning int     `json:"reasoning"`
+	Cost      float64 `json:"cost"`
+	Priced    bool    `json:"priced"`
+	SessionTokens
+}
+
 type SessionVia struct {
 	Provider string    `json:"provider"`
 	Model    string    `json:"model"`
@@ -27,21 +36,26 @@ type SessionVia struct {
 }
 
 type Session struct {
-	ReadOnly bool           `json:"read_only,omitempty"`
-	Gateway  bool           `json:"gateway,omitempty"`
-	Agent    string         `json:"agent"`
-	ID       string         `json:"id"`
-	Cwd      string         `json:"cwd"`
-	Title    string         `json:"title"`
-	Start    time.Time      `json:"start"`
-	Last     time.Time      `json:"last"`
-	Models   []SessionModel `json:"models"`
-	Cost     float64        `json:"cost"`
-	Unpriced int            `json:"unpriced"`
-	Name     string         `json:"name"`
-	Icon     string         `json:"icon"`
-	Path     string         `json:"path,omitempty"`
-	Via      []SessionVia   `json:"via,omitempty"`
+	ReadOnly      bool                 `json:"read_only,omitempty"`
+	Gateway       bool                 `json:"gateway,omitempty"`
+	Role          string               `json:"role,omitempty"`
+	ParentSession string               `json:"parent_session,omitempty"`
+	RootSession   string               `json:"root_session,omitempty"`
+	Agent         string               `json:"agent"`
+	ID            string               `json:"id"`
+	Cwd           string               `json:"cwd"`
+	Title         string               `json:"title"`
+	Nickname      string               `json:"nickname,omitempty"`
+	Start         time.Time            `json:"start"`
+	Last          time.Time            `json:"last"`
+	Models        []SessionModel       `json:"models"`
+	Cost          float64              `json:"cost"`
+	Unpriced      int                  `json:"unpriced"`
+	Name          string               `json:"name"`
+	Icon          string               `json:"icon"`
+	Path          string               `json:"path,omitempty"`
+	Via           []SessionVia         `json:"via,omitempty"`
+	ModelEffort   []SessionModelEffort `json:"model_effort,omitempty"`
 	SessionTokens
 }
 

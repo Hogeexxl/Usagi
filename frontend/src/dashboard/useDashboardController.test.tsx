@@ -26,6 +26,18 @@ const usage = (input = 10): UsageDto => ({
   output_speed: null,
   speed_samples: 0,
 });
+const zeroUsage = (): UsageDto => ({
+  ...usage(0),
+  calls: 0,
+  input: 0,
+  output: 0,
+  cache_read: 0,
+  cache_write: 0,
+  reasoning: 0,
+  total: 0,
+  cache_hit_rate: null,
+  cost: 0,
+});
 
 const summary = (revision = 1, input = 10, sessionCount = 3) => ({
   data_revision: revision,
@@ -43,6 +55,7 @@ function row(title: string, revision = 1, input = 10): SessionListItemDto {
       type: "main",
       parent_thread_id: null,
       title,
+      nickname: "",
       project: { kind: "project", path: "/work/Usagi", name: "Usagi" },
       first_usage_ms: 100,
       last_usage_ms: 200,
@@ -51,6 +64,7 @@ function row(title: string, revision = 1, input = 10): SessionListItemDto {
     },
     self_usage: rowUsage,
     subagent_usage: usage(0),
+    unknown_usage: zeroUsage(),
     inclusive_usage: rowUsage,
     has_usage_rows: true,
     last_activity_ms: 200,

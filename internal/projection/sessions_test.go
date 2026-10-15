@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -142,6 +143,13 @@ func TestSessionProjectionClaudeWithoutMainRows(t *testing.T) {
 	if !main.FirstUsage.IsZero() || !main.LastUsage.IsZero() || !list.Items[0].LastActivity.Equal(testTime(11, 0)) {
 		t.Fatalf("main own thread activity = %v..%v, session last activity = %v", main.FirstUsage, main.LastUsage, list.Items[0].LastActivity)
 	}
+	detail, err := service.SessionDetail(context.Background(), ScopeQuery{}, main.Key)
+	if err != nil {
+		t.Fatalf("SessionDetail() error = %v", err)
+	}
+	if !detail.Thread.LastUsage.IsZero() || !detail.LastActivity.Equal(list.Items[0].LastActivity) {
+		t.Fatalf("main detail activity/usage = %v / %v, list activity = %v", detail.LastActivity, detail.Thread.LastUsage, list.Items[0].LastActivity)
+	}
 	if list.Items[0].SubagentCount == nil || *list.Items[0].SubagentCount != 1 || list.Items[0].SubagentUsage.Input != 5 || list.Items[0].InclusiveUsage.Input != 5 {
 		t.Fatalf("subagent rollup = %+v", list.Items[0])
 	}
@@ -162,12 +170,16 @@ func TestSessionFieldsCompactionTokens(t *testing.T) {
 	}
 	rows := []query.UsageRow{
 		testUsageRow("codex", "X", "", "", testTime(9, 0), "gpt", "high", 10, 3, 0, 0, "", "gateway"),
-		testUsageRow("codex", "X", "", "", testTime(9, 10), "gpt", "high", 2, 1, 0, 4, "compact", "gateway"),
+		testUsageRow("codex", "X", "", "", testTime(9, 10), "gpt", "high", 2, 1, 0, 4, "", "log"),
 		testUsageRow("codex", "X", "", "", testTime(9, 20), "gpt", "low", 3, 1, 0, 0, "", "gateway"),
 		testUsageRow("codex", "X", "", "", testTime(9, 30), "o3", "high", 4, 1, 0, 0, "", "gateway"),
 		testUsageRow("codex", "X", "", "", testTime(9, 40), "o3", "high", 1, 1, 1, 0, "compact", "gateway"),
 		testUsageRow("codex", "X", "", "", testTime(9, 50), "o3", "high", 1, 0, 0, 0, "", "log"),
 	}
+	rows[0].Compaction = compactionEvidence(false)
+	rows[1].Compaction = compactionEvidence(true)
+	rows[2].Compaction = compactionEvidence(false)
+	rows[3].Compaction = compactionEvidence(false)
 	rows[0].Cost = 0.25
 	rows[1].Cost = 0.5
 	rows[2].Cost = 0.125
@@ -390,13 +402,13 @@ func TestSessionFieldsCompactionOnUnknownModel(t *testing.T) {
 		Agent: "codex", ID: "A", LastUsage: testTime(12, 0),
 		ModelEffort: []query.ModelEffortUsage{{Model: query.UnknownModel, Totals: query.UsageTotals{Calls: 2, Input: 5}}},
 	}
-	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{
-		Sessions: []query.SessionUsage{session},
-		Rows: []query.UsageRow{
-			testUsageRow("codex", "A", "", "", testTime(10, 0), "", "", 3, 0, 0, 0, "", "gateway"),
-			testUsageRow("codex", "A", "", "", testTime(11, 0), "", "", 2, 0, 0, 0, "compact", "gateway"),
-		},
-	}})
+	rows := []query.UsageRow{
+		testUsageRow("codex", "A", "", "", testTime(10, 0), "", "", 3, 0, 0, 0, "", "gateway"),
+		testUsageRow("codex", "A", "", "", testTime(11, 0), "", "", 2, 0, 0, 0, "compact", "gateway"),
+	}
+	rows[0].Compaction = compactionEvidence(false)
+	rows[1].Compaction = compactionEvidence(true)
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{Sessions: []query.SessionUsage{session}, Rows: rows}})
 	list, err := service.Sessions(context.Background(), ScopeQuery{})
 	if err != nil || len(list.Items) != 1 {
 		t.Fatalf("Sessions() = %+v, %v", list, err)
@@ -406,3 +418,68 @@ func TestSessionFieldsCompactionOnUnknownModel(t *testing.T) {
 		t.Fatalf("unknown model group = %+v, want compaction matched from model-less rows", groups)
 	}
 }
+
+func TestNativeCompactionEvidenceIsGroupedByThreadAndDoesNotChangeUsageTotals(t *testing.T) {
+	main := query.SessionUsage{
+		Agent: "codex", ID: "A", Role: "main", Title: "Main task", Nickname: "Main alias",
+		HasRows: true, Matched: true,
+	}
+	child := query.SessionUsage{
+		Agent: "codex", ID: "B", Role: "subagent", ParentSession: "A", RootSession: "A",
+		Title: "Child task", Nickname: "Child alias", HasRows: true, Matched: true,
+	}
+	rows := []query.UsageRow{
+		{Time: testTime(9, 0), Agent: "codex", Model: "gpt", Effort: "high", Session: "A", SessionRole: "main", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 2, Output: 3, CacheRead: 1, CacheWrite: 4, Cost: 0.5, Priced: true, Origin: "log", Compaction: compactionEvidence(true)},
+		{Time: testTime(9, 1), Agent: "codex", Model: "gpt", Effort: "high", Session: "A", SessionRole: "main", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 1, Output: 1, Cost: 0.1, Priced: true, Compaction: compactionEvidence(false)},
+		{Time: testTime(9, 2), Agent: "codex", Model: "zero", Effort: "low", Session: "A", SessionRole: "main", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 4, Output: 1, Cost: 0.2, Priced: true, Compaction: compactionEvidence(false)},
+		{Time: testTime(9, 3), Agent: "codex", Model: "unknown", Effort: "high", Session: "A", SessionRole: "main", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 5, Output: 1, Cost: 0.3, Priced: true, Compaction: compactionEvidence(true)},
+		{Time: testTime(9, 4), Agent: "codex", Model: "unknown", Effort: "high", Session: "A", SessionRole: "main", Kind: "compact", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 3, Output: 1, Cost: 0.05, Priced: true},
+		{Time: testTime(9, 5), Agent: "codex", Model: "false-compact", Effort: "low", Session: "A", SessionRole: "main", Kind: "compact", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 2, Output: 1, Cost: 0.05, Priced: true, Compaction: compactionEvidence(false)},
+		{Time: testTime(9, 6), Agent: "codex", Model: "gpt", Effort: "high", Session: "A", SessionRole: "subagent", Subagent: "B", ResolvedSession: query.SessionRef{Agent: "codex", ID: "A", Matched: true}, Input: 6, Output: 2, CacheRead: 3, CacheWrite: 2, Cost: 0.4, Priced: true, Compaction: compactionEvidence(true)},
+	}
+	service := newService(&fakeQuery{dataset: query.SessionDatasetResult{Sessions: []query.SessionUsage{main, child}, Rows: rows}})
+	list, err := service.Sessions(context.Background(), ScopeQuery{})
+	if err != nil {
+		t.Fatalf("Sessions() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("top-level session count = %d, want 1", len(list.Items))
+	}
+	detail, err := service.SessionDetail(context.Background(), ScopeQuery{}, ThreadKey{Agent: "codex", SessionID: "A", ThreadID: "A"})
+	if err != nil {
+		t.Fatalf("SessionDetail() error = %v", err)
+	}
+	if detail.Thread.Title != "Main task" || detail.Thread.Nickname != "Main alias" || len(detail.Children) != 1 || detail.Children[0].Title != "Child task" || detail.Children[0].Nickname != "Child alias" {
+		t.Fatalf("main/child titles and nicknames = %+v / %+v", detail.Thread, detail.Children)
+	}
+	mainGroups := make(map[string]ModelEffortUsageView, len(detail.Thread.ModelEffort))
+	childGroups := make(map[string]ModelEffortUsageView, len(detail.Children[0].ModelEffort))
+	for _, group := range detail.Thread.ModelEffort {
+		mainGroups[group.Model+"/"+group.Effort] = group
+	}
+	for _, group := range detail.Children[0].ModelEffort {
+		childGroups[group.Model+"/"+group.Effort] = group
+	}
+	if group := mainGroups["gpt/high"]; group.CompactionTokens == nil || *group.CompactionTokens != 10 {
+		t.Fatalf("main native/log compaction = %+v, want 10", group)
+	}
+	if group := mainGroups["zero/low"]; group.CompactionTokens == nil || *group.CompactionTokens != 0 {
+		t.Fatalf("explicit false compaction = %+v, want known zero", group)
+	}
+	if group := mainGroups["unknown/high"]; group.CompactionTokens != nil {
+		t.Fatalf("true and unknown compaction rows = %+v, want unknown", group)
+	}
+	if group := mainGroups["false-compact/low"]; group.CompactionTokens == nil || *group.CompactionTokens != 0 {
+		t.Fatalf("explicit false compact row = %+v, want known zero", group)
+	}
+	if group := childGroups["gpt/high"]; group.CompactionTokens == nil || *group.CompactionTokens != 13 {
+		t.Fatalf("child compaction = %+v, want isolated 13", group)
+	}
+	if detail.Thread.Usage.Input != 17 || detail.Thread.Usage.Output != 8 || detail.Thread.Usage.Total != 30 || math.Abs(detail.Thread.Usage.Cost-1.2) > 1e-9 ||
+		detail.Children[0].Usage.Input != 6 || detail.Children[0].Usage.Output != 2 || detail.Children[0].Usage.Total != 13 || detail.Children[0].Usage.Cost != 0.4 ||
+		detail.SelfUsage.Total != 30 || detail.SubagentUsage.Total != 13 || detail.InclusiveUsage.Total != 43 {
+		t.Fatalf("native compaction changed usage/cost totals: main=%+v child=%+v detail=%+v", detail.Thread.Usage, detail.Children[0].Usage, detail)
+	}
+}
+
+func compactionEvidence(value bool) *bool { return &value }

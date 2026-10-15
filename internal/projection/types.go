@@ -46,6 +46,7 @@ type ThreadType string
 const (
 	ThreadMain     ThreadType = "main"
 	ThreadSubagent ThreadType = "subagent"
+	ThreadUnknown  ThreadType = "unknown"
 )
 
 type ThreadKey struct {
@@ -59,6 +60,7 @@ type SessionThreadView struct {
 	Type           ThreadType
 	ParentThreadID string
 	Title          string
+	Nickname       string
 	Project        query.ProjectRef
 	FirstUsage     time.Time
 	LastUsage      time.Time
@@ -70,6 +72,7 @@ type SessionListItemView struct {
 	Thread         SessionThreadView
 	SelfUsage      UsageView
 	SubagentUsage  UsageView
+	UnknownUsage   UsageView
 	InclusiveUsage UsageView
 	HasUsageRows   bool
 	LastActivity   time.Time
@@ -83,8 +86,10 @@ type SessionListView struct {
 
 type SessionDetailView struct {
 	Thread         SessionThreadView
+	LastActivity   time.Time
 	SelfUsage      UsageView
 	SubagentUsage  UsageView
+	UnknownUsage   UsageView
 	InclusiveUsage UsageView
 	Children       []SessionThreadView
 }

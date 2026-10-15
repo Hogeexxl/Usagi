@@ -75,6 +75,8 @@ type UsageRequest struct {
 	Rejected        bool      `json:"rejected,omitempty"`
 	Error           string    `json:"err,omitempty"`
 	Session         string    `json:"session,omitempty"`
+	SessionRole     string    `json:"session_role,omitempty"`
+	Compaction      *bool     `json:"compaction,omitempty"`
 	NativeSession   string    `json:"native_session,omitempty"`
 	Subagent        string    `json:"subagent,omitempty"`
 	ParentAgent     string    `json:"parent_agent,omitempty"`

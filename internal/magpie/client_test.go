@@ -2,6 +2,7 @@ package magpie
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/cookiejar"
@@ -10,6 +11,66 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSessionNicknameAndCompactionJSONTriState(t *testing.T) {
+	var session Session
+	if err := json.Unmarshal([]byte(`{"title":"Saved title","nickname":"short name"}`), &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Title != "Saved title" || session.Nickname != "short name" {
+		t.Fatalf("session title/nickname = %q/%q", session.Title, session.Nickname)
+	}
+
+	for _, test := range []struct {
+		name string
+		json string
+		want *bool
+	}{
+		{name: "missing", json: `{}`},
+		{name: "true", json: `{"compaction":true}`, want: boolPointer(true)},
+		{name: "false", json: `{"compaction":false}`, want: boolPointer(false)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var request UsageRequest
+			if err := json.Unmarshal([]byte(test.json), &request); err != nil {
+				t.Fatal(err)
+			}
+			if !sameBoolPointer(request.Compaction, test.want) {
+				t.Fatalf("decoded compaction = %v, want %v", request.Compaction, test.want)
+			}
+		})
+	}
+
+	encoded, err := json.Marshal(UsageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fields["compaction"]; exists {
+		t.Fatalf("missing compaction was encoded as %s", fields["compaction"])
+	}
+
+	encoded, err = json.Marshal(UsageRequest{Compaction: boolPointer(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields = nil
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["compaction"]) != "false" {
+		t.Fatalf("false compaction encoded as %s", fields["compaction"])
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func sameBoolPointer(a, b *bool) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
 
 func TestClientEndpoints(t *testing.T) {
 	tests := []struct {
@@ -72,7 +133,7 @@ func TestClientEndpoints(t *testing.T) {
 					t.Fatalf("UsageRequests() rows = %d, want 1", len(got.Rows))
 				}
 				row := got.Rows[0]
-				if row.Effort != "high" || row.Session != "session-1" || row.Subagent != "worker" ||
+				if row.Effort != "high" || row.Session != "session-1" || row.SessionRole != "subagent" || row.Subagent != "worker" ||
 					row.ParentAgent != "codex" || row.Cost != 0.125 || !row.Rejected {
 					t.Fatalf("UsageRequests() row = %+v", row)
 				}
@@ -121,7 +182,12 @@ func TestClientEndpoints(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(got.Sessions) != 1 || got.Sessions[0].Cwd != "/project" ||
+				if len(got.Sessions) != 1 || got.Sessions[0].Cwd != "/project" || got.Sessions[0].Role != "subagent" ||
+					got.Sessions[0].ParentSession != "thread-parent" || got.Sessions[0].RootSession != "thread-root" ||
+					len(got.Sessions[0].ModelEffort) != 1 ||
+					got.Sessions[0].ModelEffort[0].Model != "gpt" || got.Sessions[0].ModelEffort[0].Effort != "high" ||
+					got.Sessions[0].ModelEffort[0].Reasoning != 3 || got.Sessions[0].ModelEffort[0].Cost != 0.25 ||
+					!got.Sessions[0].ModelEffort[0].Priced || got.Sessions[0].ModelEffort[0].Input != 10 ||
 					len(got.Sessions[0].Models) != 1 || len(got.Sessions[0].Via) != 1 ||
 					got.Sessions[0].Via[0].Effort != "high" {
 					t.Fatalf("Sessions() = %+v", got)
@@ -371,11 +437,11 @@ func clientResponseJSON(path string) string {
 	case "/api/usage":
 		return `{"period":"today","input":42,"output":7,"calls":2,"future_field":"ignored"}`
 	case "/api/usage/requests":
-		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}]}`
+		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","session_role":"subagent","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}]}`
 	case "/api/usage/quotas":
 		return `[{"provider":"openai","name":"OpenAI","windows":[{"name":"5h","used":0.4,"resetsAt":"2026-10-11T15:00:00Z"}],"resets":{"count":1,"until":"2026-10-11T15:00:00Z"}}]`
 	case "/api/sessions":
-		return `{"sessions":[{"agent":"codex","id":"session-1","cwd":"/project","models":[{"model":"gpt","cost":0.25,"priced":true,"input":10}],"via":[{"provider":"openai","model":"gpt","effort":"high","calls":1,"tokens":10,"last":"2026-10-11T10:00:00Z"}],"input":10}]}`
+		return `{"sessions":[{"agent":"codex","id":"session-1","cwd":"/project","role":"subagent","parent_session":"thread-parent","root_session":"thread-root","model_effort":[{"model":"gpt","effort":"high","input":10,"reasoning":3,"cost":0.25,"priced":true}],"models":[{"model":"gpt","cost":0.25,"priced":true,"input":10}],"via":[{"provider":"openai","model":"gpt","effort":"high","calls":1,"tokens":10,"last":"2026-10-11T10:00:00Z"}],"input":10}]}`
 	case "/api/sessions/stats":
 		return `{"from":"2026-10-11","to":"2026-10-11","days":[{"date":"2026-10-11","usage":[{"agent":"codex","cwd":"/project","model":"gpt","cost":0.25,"priced":true,"input":10}]}],"agents":{"codex":"Codex"}}`
 	case "/api/sessions/overview":
