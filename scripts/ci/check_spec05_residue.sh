@@ -21,6 +21,16 @@ assert_absent() {
 	fi
 }
 
+scan_active_source() {
+	local pattern="$1"
+	shift
+	grep -R -n -i -E \
+		--include='*.go' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' --include='*.jsx' \
+		--include='*.py' --include='*.sh' --include='*.yml' --include='*.yaml' --include='*.json' --include='*.html' --include='*.css' \
+		--exclude-dir=dist --exclude-dir=node_modules --exclude='check_spec05_residue.sh' \
+		-e "$pattern" "$@"
+}
+
 expect_no_source_hits() {
 	local label="$1"
 	local pattern="$2"
@@ -29,12 +39,12 @@ expect_no_source_hits() {
 	if [[ "${#paths[@]}" -eq 0 ]]; then paths=(cmd internal frontend scripts .github/workflows/ci.yml); fi
 	local matches
 	local status
-	if matches="$(rg -n -i --color never --glob '*.{go,ts,tsx,js,mjs,jsx,py,sh,yml,yaml,json,html,css}' --glob '!**/dist/**' --glob '!**/node_modules/**' --glob '!**/check_spec05_residue.sh' -e "$pattern" "${paths[@]}" 2>&1)"; then
+	if matches="$(scan_active_source "$pattern" "${paths[@]}" 2>&1)"; then
 		fail_with_matches "$label found in active source or CI:" "$matches"
 	else
 		status=$?
 		if [[ "$status" -ne 1 ]]; then
-			fail_with_matches "could not scan active source for $label (rg exit $status):" "$matches"
+			fail_with_matches "could not scan active source for $label (scan exit $status):" "$matches"
 		fi
 	fi
 }
@@ -44,12 +54,12 @@ expect_no_ci_hits() {
 	local pattern="$2"
 	local matches
 	local status
-	if matches="$(rg -n -i --color never -e "$pattern" .github/workflows/ci.yml 2>&1)"; then
+	if matches="$(grep -n -i -E -e "$pattern" .github/workflows/ci.yml 2>&1)"; then
 		fail_with_matches "$label found in current CI:" "$matches"
 	else
 		status=$?
 		if [[ "$status" -ne 1 ]]; then
-			fail_with_matches "could not scan current CI for $label (rg exit $status):" "$matches"
+			fail_with_matches "could not scan current CI for $label (grep exit $status):" "$matches"
 		fi
 	fi
 }
