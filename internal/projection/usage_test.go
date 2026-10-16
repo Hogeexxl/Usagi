@@ -161,3 +161,11 @@ func TestRequestMetricsMagpieDecodeBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// usageWithRequestCalls builds the expected view for accumulated rows that all
+// count as plain request-metric calls.
+func usageWithRequestCalls(totals query.UsageTotals, calls int64) UsageView {
+	usage := usageFromTotals(totals)
+	usage.requestMetrics.calls = calls
+	return usage
+}

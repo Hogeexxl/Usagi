@@ -1024,6 +1024,11 @@ func TestSyncSessionNicknameOnlyChangeIncrementsRevisionAndKeepsTitle(t *testing
 	if _, err := service.syncSessions(context.Background()); err != nil {
 		t.Fatalf("initial session sync: %v", err)
 	}
+	// Codex sessions only materialise in the dataset when a request row backs them.
+	if _, err := db.Exec(`INSERT INTO requests (t_ns, local_day, agent, provider, model, session, session_role, input, output)
+		VALUES (?, ?, 'codex', 'provider-a', 'gpt-5', 'thread-1', 'main', 10, 5)`, now.UnixNano(), now.Format(time.DateOnly)); err != nil {
+		t.Fatalf("insert session request: %v", err)
+	}
 	initialRevision := dbRevision(t, db)
 
 	fixture.setSessions(magpie.Session{

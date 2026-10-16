@@ -195,20 +195,20 @@ func TestSessionFieldsCompactionTokens(t *testing.T) {
 		t.Fatalf("session item count = %d, want 1", len(list.Items))
 	}
 	thread := list.Items[0].Thread
-	wantUsage := usageFromTotals(query.UsageTotals{Calls: 6, Input: 21, Output: 7, CacheRead: 1, CacheWrite: 4, Cost: 1.5})
+	wantUsage := usageWithRequestCalls(query.UsageTotals{Calls: 6, Input: 21, Output: 7, CacheRead: 1, CacheWrite: 4, Cost: 1.5}, 6)
 	if thread.Type != ThreadMain || thread.ParentThreadID != "" || !reflect.DeepEqual(thread.Usage, wantUsage) || thread.Usage.Total != 33 || thread.Usage.Cost != 1.5 {
 		t.Fatalf("Codex main-thread usage = %+v, want %+v", thread.Usage, wantUsage)
 	}
 	if len(thread.ModelEffort) != 3 {
 		t.Fatalf("ModelEffort count = %d, want 3: %+v", len(thread.ModelEffort), thread.ModelEffort)
 	}
-	if thread.ModelEffort[0].Model != "gpt" || thread.ModelEffort[0].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[0].Usage, usageFromTotals(session.ModelEffort[0].Totals)) || thread.ModelEffort[0].CompactionTokens == nil || *thread.ModelEffort[0].CompactionTokens != 7 {
+	if thread.ModelEffort[0].Model != "gpt" || thread.ModelEffort[0].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[0].Usage, usageWithRequestCalls(session.ModelEffort[0].Totals, 2)) || thread.ModelEffort[0].CompactionTokens == nil || *thread.ModelEffort[0].CompactionTokens != 7 {
 		t.Fatalf("known compaction group = %+v", thread.ModelEffort[0])
 	}
-	if thread.ModelEffort[1].Model != "o3" || thread.ModelEffort[1].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[1].Usage, usageFromTotals(session.ModelEffort[2].Totals)) || thread.ModelEffort[1].CompactionTokens != nil {
+	if thread.ModelEffort[1].Model != "o3" || thread.ModelEffort[1].Effort != "high" || !reflect.DeepEqual(thread.ModelEffort[1].Usage, usageWithRequestCalls(session.ModelEffort[2].Totals, 3)) || thread.ModelEffort[1].CompactionTokens != nil {
 		t.Fatalf("unavailable compaction group = %+v", thread.ModelEffort[1])
 	}
-	if thread.ModelEffort[2].Model != "gpt" || thread.ModelEffort[2].Effort != "low" || !reflect.DeepEqual(thread.ModelEffort[2].Usage, usageFromTotals(session.ModelEffort[1].Totals)) || thread.ModelEffort[2].CompactionTokens == nil || *thread.ModelEffort[2].CompactionTokens != 0 {
+	if thread.ModelEffort[2].Model != "gpt" || thread.ModelEffort[2].Effort != "low" || !reflect.DeepEqual(thread.ModelEffort[2].Usage, usageWithRequestCalls(session.ModelEffort[1].Totals, 1)) || thread.ModelEffort[2].CompactionTokens == nil || *thread.ModelEffort[2].CompactionTokens != 0 {
 		t.Fatalf("known zero compaction group = %+v", thread.ModelEffort[2])
 	}
 	for _, modelEffort := range thread.ModelEffort {

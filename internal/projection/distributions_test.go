@@ -79,9 +79,9 @@ func TestDistribution(t *testing.T) {
 		t.Fatalf("ModelDistribution() error = %v", err)
 	}
 	wantModels := ModelDistributionView{Items: []ModelDistributionItem{
-		{Model: "zeta", Usage: usageFromTotals(query.UsageTotals{Calls: 2, Input: 10, Output: 5, Cost: 0.25})},
-		{Model: "alpha", Usage: usageFromTotals(query.UsageTotals{Calls: 2, Input: 10, Unpriced: 1})},
-		{Model: "mid", Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 8})},
+		{Model: "zeta", Usage: usageWithRequestCalls(query.UsageTotals{Calls: 2, Input: 10, Output: 5, Cost: 0.25}, 2)},
+		{Model: "alpha", Usage: usageWithRequestCalls(query.UsageTotals{Calls: 2, Input: 10, Unpriced: 1}, 2)},
+		{Model: "mid", Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 8}, 1)},
 	}}
 	if !reflect.DeepEqual(models, wantModels) {
 		t.Fatalf("ModelDistribution() = %+v, want %+v", models, wantModels)
@@ -92,11 +92,11 @@ func TestDistribution(t *testing.T) {
 		t.Fatalf("ProjectDistribution() error = %v", err)
 	}
 	wantProjects := ProjectDistributionView{Items: []ProjectDistributionItem{
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5, Output: 5, Cost: .25})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 8})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindProjectless}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5})},
-		{Project: query.ProjectRef{Kind: query.ProjectKindUnknown}, Usage: usageFromTotals(query.UsageTotals{Calls: 1, Input: 5, Unpriced: 1})},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/z", Name: "z"}, Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 5, Output: 5, Cost: .25}, 1)},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/large", Name: "large"}, Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 8}, 1)},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProject, Path: "/a", Name: "a"}, Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 5}, 1)},
+		{Project: query.ProjectRef{Kind: query.ProjectKindProjectless}, Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 5}, 1)},
+		{Project: query.ProjectRef{Kind: query.ProjectKindUnknown}, Usage: usageWithRequestCalls(query.UsageTotals{Calls: 1, Input: 5, Unpriced: 1}, 1)},
 	}}
 	if !reflect.DeepEqual(projects, wantProjects) {
 		t.Fatalf("ProjectDistribution() = %+v, want %+v", projects, wantProjects)
@@ -135,10 +135,10 @@ func TestProjectDistributionAggregatesWorkspaces(t *testing.T) {
 	if workspace.Project != (query.ProjectRef{Kind: query.ProjectKindWorkspace}) {
 		t.Fatalf("workspace aggregate retained a member path or name: %+v", workspace.Project)
 	}
-	wantWorkspaceUsage := usageFromTotals(query.UsageTotals{
+	wantWorkspaceUsage := usageWithRequestCalls(query.UsageTotals{
 		Calls: 2, Input: 30, Output: 9, CacheRead: 7, CacheWrite: 3, CacheWrite1h: 3,
 		Reasoning: 5, Cost: 1.25,
-	})
+	}, 2)
 	if !reflect.DeepEqual(workspace.Usage, wantWorkspaceUsage) {
 		t.Fatalf("workspace aggregate usage = %+v, want %+v", workspace.Usage, wantWorkspaceUsage)
 	}

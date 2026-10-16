@@ -85,9 +85,9 @@ func TestSummary(t *testing.T) {
 	if datasetCalls != 1 {
 		t.Fatalf("Summary SessionDataset calls = %d, want one", datasetCalls)
 	}
-	wantUsage := usageFromTotals(query.UsageTotals{
+	wantUsage := usageWithRequestCalls(query.UsageTotals{
 		Calls: 4, Input: 20, Output: 10, Cost: 0.5, Unpriced: 1,
-	})
+	}, 4)
 	if !reflect.DeepEqual(got.Usage, wantUsage) || got.RootSessionCount != 2 || got.RootUnpricedSessionCount != 1 ||
 		got.SessionMedian == nil || *got.SessionMedian != 9 || got.SessionP90 == nil || *got.SessionP90 != 21 {
 		t.Fatalf("Summary() = %+v; want usage %+v and two roots with one unpriced root", got, wantUsage)

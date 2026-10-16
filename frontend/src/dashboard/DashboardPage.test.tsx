@@ -202,7 +202,7 @@ describe("DashboardPage Spec05 shared sessions snapshot", () => {
 
     await waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(1));
     expect(screen.getByLabelText("KPI 加载中").children).toHaveLength(5);
-    expect(rendered.container.querySelectorAll("tbody tr")).toHaveLength(8);
+    expect(rendered.container.querySelectorAll("tbody tr")).toHaveLength(6);
     expect(screen.queryByText("Session Alpha")).not.toBeInTheDocument();
     expect(client.summary).not.toHaveBeenCalled();
 

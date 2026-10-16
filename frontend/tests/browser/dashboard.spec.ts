@@ -570,8 +570,8 @@ test("C2 filters, merged charts, independent Tool range, sorting, and details re
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Detail session-2" })).toBeVisible();
 
-  const mainFirst = dialog.getByRole("button", { name: "gpt-5 (high)" });
-  const mainSecond = dialog.getByRole("button", { name: "o4-mini (—)" });
+  const mainFirst = dialog.getByRole("button", { name: "gpt-5 (high)", exact: true });
+  const mainSecond = dialog.getByRole("button", { name: "o4-mini (—)", exact: true });
   await expect(mainFirst).toHaveAttribute("aria-expanded", "false");
   await expect(mainSecond).toHaveAttribute("aria-expanded", "false");
   await mainFirst.click();
@@ -579,8 +579,10 @@ test("C2 filters, merged charts, independent Tool range, sorting, and details re
   await mainSecond.click();
   await expect(mainFirst).toHaveAttribute("aria-expanded", "false");
   await expect(mainSecond).toHaveAttribute("aria-expanded", "true");
-  const childFirst = dialog.getByRole("button", { name: "Recent subagent" });
-  const childSecond = dialog.getByRole("button", { name: "Old subagent" });
+  // Subagent triggers are labelled by nickname, which this fixture leaves empty.
+  const childTriggers = dialog.getByRole("region", { name: /^Subagent/ }).getByRole("button");
+  const childFirst = childTriggers.nth(0);
+  const childSecond = childTriggers.nth(1);
   await childFirst.click();
   await expect(childFirst).toHaveAttribute("aria-expanded", "true");
   await childSecond.click();

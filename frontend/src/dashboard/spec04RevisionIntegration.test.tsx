@@ -414,15 +414,16 @@ describe("Spec04 RevisionFeed and HTTP consumer integration", () => {
       read_at_ms: 81,
     }];
 
+    // A snapshot that is still reading is re-polled after 5 seconds; ready snapshots resume at 60 seconds.
     await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
-    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(1);
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     await flushMicrotasks();
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(2);
     expect(result.current.quota.quota).toEqual({ reading: false, items: api.backend.quotaItems });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
-    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(2);
+    expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     await flushMicrotasks();
     expect(api.requests.filter((request) => request.path === "/api/quota" && request.method === "GET")).toHaveLength(3);

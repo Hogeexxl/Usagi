@@ -298,7 +298,7 @@ link_count = connection.execute("SELECT COUNT(*) FROM session_links").fetchone()
 request_row = connection.execute("SELECT source, provider, model, session FROM requests").fetchone()
 price_row = connection.execute("SELECT canonical_model_id, input, output, cache_read, cache_write, cache_write_1h FROM prices").fetchone()
 connection.close()
-assert schema_version == "1" and initial_sync == "1", f"schema / initial sync = {schema_version}/{initial_sync}"
+assert schema_version == "4" and initial_sync == "1", f"schema / initial sync = {schema_version}/{initial_sync}"
 assert link_count == 0, f"session_links contains {link_count} rows"
 assert revision == summary["data_revision"], f"database/API revision differs: {revision}/{summary['data_revision']}"
 assert request_row == ("magpie-http", "openai", "gpt-6-luna", "smoke-session"), f"stored HTTP row was {request_row!r}"
@@ -369,7 +369,7 @@ if [[ -e "$DESCRIPTOR" ]]; then
 	cat "$OFFLINE_LOG" >&2
 	exit 1
 fi
-printf 'runtime smoke passed: first sync, DATA_LOADING, complete offline reads, schema 1, and empty session_links\n'
+printf 'runtime smoke passed: first sync, DATA_LOADING, complete offline reads, schema 4, and empty session_links\n'
 
 cat > "$TMP_ROOT/occupy.py" <<'PY'
 import socket

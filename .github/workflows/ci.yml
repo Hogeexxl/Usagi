@@ -36,10 +36,6 @@ jobs:
       - name: Install Playwright Chromium
         working-directory: frontend
         run: npx playwright install chromium
-      - name: Run Go tests
-        run: go test ./...
-      - name: Run Go vet
-        run: go vet ./...
       - name: Run frontend tests
         working-directory: frontend
         run: npm test
@@ -48,6 +44,11 @@ jobs:
         run: npm run check
       - name: Build production runtime
         run: bash scripts/build_macos_runtime.sh
+      # The Go suite serves the production Vite assets, so it runs after the build.
+      - name: Run Go tests
+        run: go test ./...
+      - name: Run Go vet
+        run: go vet ./...
       - name: Residue gate
         run: bash scripts/ci/check_spec05_residue.sh
       - name: Runtime smoke
