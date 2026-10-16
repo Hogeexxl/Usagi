@@ -4,73 +4,60 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
 func TestRuntimeDescriptorPath(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
-	want := filepath.Join(home, "Library", "Application Support", "Usagi", "runtime.json")
+	want := filepath.Join(home, "Library", "Application Support", "Usagi", runtimeDescriptorName(runtimeMode()))
 	if got := runtimeDescriptorPath(home); got != want {
 		t.Fatalf("runtimeDescriptorPath = %q, want %q", got, want)
 	}
+	if got := runtimeDescriptorName("production"); got != "runtime.json" {
+		t.Fatalf("production descriptor name = %q", got)
+	}
+	if got := runtimeDescriptorName("development"); got != "runtime-dev.json" {
+		t.Fatalf("development descriptor name = %q", got)
+	}
 }
 
-func TestRuntimeDescriptorBuildModeBehavior(t *testing.T) {
+func TestRuntimeDescriptorWriteAndModeOwnedRemoval(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "Usagi", "runtime.json")
-	descriptor := RuntimeDescriptor{SchemaVersion: 1, PID: 12345, Port: 37891, BaseURL: "http://127.0.0.1:37891"}
-
-	if !RuntimeDescriptorEnabled() {
-		if err := writeRuntimeDescriptor(path, descriptor); err != nil {
-			t.Fatal(err)
-		}
-		if err := removeRuntimeDescriptor(path); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
-			t.Fatalf("development descriptor operation created parent directory: %v", err)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		original := []byte("existing production descriptor")
-		if err := os.WriteFile(path, original, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeRuntimeDescriptor(path, descriptor); err != nil {
-			t.Fatal(err)
-		}
-		if err := removeRuntimeDescriptor(path); err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(path)
-		if err != nil || !reflect.DeepEqual(got, original) {
-			t.Fatalf("development descriptor operation changed existing file: %q, %v", got, err)
-		}
-		return
-	}
-
-	if err := writeRuntimeDescriptor(path, descriptor); err != nil {
+	directory := filepath.Join(root, "Usagi")
+	productionPath := filepath.Join(directory, runtimeDescriptorName("production"))
+	developmentPath := filepath.Join(directory, runtimeDescriptorName("development"))
+	production := RuntimeDescriptor{SchemaVersion: 1, PID: 12345, Port: 37891, BaseURL: "http://127.0.0.1:37891", RuntimeMode: "production"}
+	development := RuntimeDescriptor{SchemaVersion: 1, PID: 23456, Port: 37991, BaseURL: "http://127.0.0.1:37991", RuntimeMode: "development"}
+	if err := writeRuntimeDescriptor(productionPath, production); err != nil {
 		t.Fatal(err)
 	}
-	checkRuntimeDescriptor(t, path, descriptor)
-
-	replacement := RuntimeDescriptor{SchemaVersion: 1, PID: 23456, Port: 37892, BaseURL: "http://127.0.0.1:37892"}
-	if err := writeRuntimeDescriptor(path, replacement); err != nil {
+	if err := writeRuntimeDescriptor(developmentPath, development); err != nil {
 		t.Fatal(err)
 	}
-	checkRuntimeDescriptor(t, path, replacement)
+	checkRuntimeDescriptor(t, productionPath, production)
+	checkRuntimeDescriptor(t, developmentPath, development)
 
-	if err := removeRuntimeDescriptor(path); err != nil {
+	if err := removeRuntimeDescriptor(productionPath, production.PID+1, production.RuntimeMode); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeRuntimeDescriptor(path); err != nil {
+	checkRuntimeDescriptor(t, productionPath, production)
+	if err := removeRuntimeDescriptor(productionPath, production.PID, development.RuntimeMode); err != nil {
+		t.Fatal(err)
+	}
+	checkRuntimeDescriptor(t, productionPath, production)
+
+	if err := removeRuntimeDescriptor(productionPath, production.PID, production.RuntimeMode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(productionPath); !os.IsNotExist(err) {
+		t.Fatalf("production descriptor still exists after removal: %v", err)
+	}
+	checkRuntimeDescriptor(t, developmentPath, development)
+	if err := removeRuntimeDescriptor(productionPath, production.PID, production.RuntimeMode); err != nil {
 		t.Fatalf("removing absent runtime descriptor: %v", err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("descriptor still exists after removal: %v", err)
+	if err := removeRuntimeDescriptor(developmentPath, development.PID, development.RuntimeMode); err != nil {
+		t.Fatal(err)
 	}
 }
 

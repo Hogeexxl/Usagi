@@ -35,6 +35,7 @@ func (s *Server) handlePublicV1Info(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, publicV1InfoDTO{
 		Service: "usagi", AppVersion: s.config.AppVersion, APIVersion: "1", Capabilities: publicV1Capabilities,
+		RuntimeMode: s.config.RuntimeMode,
 	})
 }
 

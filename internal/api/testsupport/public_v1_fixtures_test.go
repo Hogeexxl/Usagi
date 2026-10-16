@@ -18,6 +18,7 @@ type infoDTO struct {
 	AppVersion   string   `json:"app_version"`
 	APIVersion   string   `json:"api_version"`
 	Capabilities []string `json:"capabilities"`
+	RuntimeMode  string   `json:"runtime_mode"`
 }
 
 type statusDTO struct {
@@ -103,7 +104,7 @@ func decodeFixture[T any](t *testing.T, name string) T {
 
 func TestPublicV1FixturesDecodeLikePeekFlowDTOs(t *testing.T) {
 	info := decodeFixture[infoDTO](t, "info.json")
-	if info.Service != "usagi" || info.AppVersion != "0.2.6" || info.APIVersion != "1" || len(info.Capabilities) != 5 {
+	if info.Service != "usagi" || info.AppVersion != "0.2.6" || info.APIVersion != "1" || len(info.Capabilities) != 5 || info.RuntimeMode != "development" {
 		t.Fatalf("unexpected info fixture: %+v", info)
 	}
 

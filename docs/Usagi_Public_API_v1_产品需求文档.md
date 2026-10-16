@@ -97,13 +97,18 @@ POST /api/update/open-release
 
 ## 4. 网络与安全边界
 
-Public API v1 复用 Mu 当前 HTTP Server，并继续固定监听：
+Public API v1 复用 Usagi 当前 HTTP Server，固定监听 `127.0.0.1` 回环地址；端口按运行模式从对应的 32 端口范围动态选择：正式版 `37891–37922`，开发版 `37991–38022`。
 
 ~~~text
-127.0.0.1:3210
+production: 127.0.0.1:<port in 37891–37922>
+development: 127.0.0.1:<port in 37991–38022>
 ~~~
 
-不得为了 Public API 改为 0.0.0.0。
+macOS 正式版运行时描述符位于 `~/Library/Application Support/Usagi/runtime.json`，开发版位于同目录下的 `runtime-dev.json`。描述符包含 `schema_version`、`pid`、`port`、`base_url` 和 `runtime_mode`；`base_url` 为 `http://127.0.0.1:<port>`，其中端口必须与 `port` 字段相同。客户端只读取这两个固定文件并验证 `/api/health` 和 `/api/v1/info`，不扫描端口或从描述符读取启动命令。
+
+客户端初次自动发现依次验证正式版、开发版；用户明确选择模式启动时，只等待并连接该模式。已连接模式保持有效，直到其服务失联。两模式的 Public API 使用同一组 v1 路径，`info.runtime_mode` 必须与匹配的运行时描述符一致。
+
+不得为了 Public API 改为 0.0.0.0。两模式继续使用同一 schema v4 数据库；安装的正式版必须与开发源码 schema 配套，旧版二进制不属于兼容范围。
 
 “Public”表示对本机其他应用形成公开、稳定的 API 契约，不表示对局域网或互联网开放。
 
@@ -111,7 +116,7 @@ Public API v1 复用 Mu 当前 HTTP Server，并继续固定监听：
 
 | 数据 / 能力 | API 地址 | 提供的数据 | API 作用 |
 | --- | --- | --- | --- |
-| 服务信息 | GET /api/v1/info | Mu 应用版本、Public API 版本、capabilities | 服务发现与兼容性判断；确认当前连接的是 Mu，并判断客户端所需能力是否存在 |
+| 服务信息 | GET /api/v1/info | Usagi 应用版本、Public API 版本、capabilities、runtime_mode | 服务发现与兼容性判断；确认服务模式并判断客户端所需能力是否存在 |
 | Revision | GET /api/v1/revision | data_revision、status_revision | 轻量判断 Usage 数据或 Mu 状态是否发生变化；用于启动校验、SSE 断线恢复和降级 polling |
 | Revision SSE | GET /api/v1/events | SSE revision event，payload 为 data_revision、status_revision | 长连接变化通知；Mu 有变化时主动通知客户端，客户端再通过 GET 拉取真实数据 |
 | Mu 状态 | GET /api/v1/status | 数据 revision、扫描状态、数据源状态、最近扫描结果/时间与安全错误码 | 告诉第三方应用 Mu 当前具体处于什么状态，用于 ready / updating / unavailable 等判断 |
@@ -179,11 +184,12 @@ GET /revision 用于：
     "status",
     "codex-quota",
     "usage-summary"
-  ]
+  ],
+  "runtime_mode": "production"
 }
 ~~~
 
-客户端不应仅依赖 Mu 应用版本猜测 endpoint 是否存在。
+`runtime_mode` 为 `production` 或 `development`，必须与当前服务构建模式相同。客户端不应仅依赖应用版本猜测 endpoint 是否存在。
 
 ## 8. GET /api/v1/revision
 
@@ -327,7 +333,14 @@ to 为包含式自然日。例如 from=2026-09-01、to=2026-09-14 实际查询�
 
 ## 15. 推荐客户端流程
 
-初始化：
+macOS 客户端先按用户选择或默认顺序读取并验证运行时描述符，然后以描述符中的 `base_url` 连接服务：
+
+~~~text
+~/Library/Application Support/Usagi/runtime.json
+~/Library/Application Support/Usagi/runtime-dev.json
+~~~
+
+验证通过后，初始化 Public API v1：
 
 ~~~text
 GET /api/v1/info
@@ -422,11 +435,12 @@ breaking change 必须使用未来 /api/v2/*。
 
 ## 20. 验收标准
 
-- [ ] Public API v1 位于现有 Mu HTTP Server 中，仍只监听 127.0.0.1:3210；
+- [ ] Public API v1 位于现有 Usagi HTTP Server 中，只监听 `127.0.0.1`，端口按模式动态选择；
 - [ ] /api/* Internal API 行为保持兼容；
 - [ ] /api/v1/* 作为独立稳定契约存在；
 - [ ] Public API 不通过 HTTP 调用 Internal API；
-- [ ] GET /api/v1/info 返回服务、应用版本、API 版本与 capabilities；
+- [ ] 两模式分别发布运行时描述符，`base_url` 与端口相同且 `runtime_mode` 与服务构建模式一致；
+- [ ] GET /api/v1/info 返回服务、应用版本、API 版本、capabilities 与 `runtime_mode`；
 - [ ] GET /api/v1/revision 返回当前 data/status revision；
 - [ ] GET /api/v1/events 建立 SSE，并立即发送当前 revision；
 - [ ] SSE 只推 revision，不推完整 Usage/Quota；

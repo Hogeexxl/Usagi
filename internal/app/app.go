@@ -98,6 +98,7 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 
 	config := api.DefaultConfig()
 	config.ListenAddress = listener.Addr().String()
+	config.RuntimeMode = runtimeMode()
 	config.StaticFS = dependencies.StaticFS
 	server, err := api.NewServer(config, api.Dependencies{
 		Projection: projectionService, Query: queryService, Revisions: revisions,
@@ -127,7 +128,7 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 			runErr = fmt.Errorf("app: close Magpie supervisor: %w", err)
 		}
 		if descriptorWritten {
-			if err := RemoveRuntimeDescriptor(); err != nil {
+			if err := RemoveRuntimeDescriptor(os.Getpid()); err != nil {
 				slog.Error("remove runtime descriptor", "error", err)
 			}
 		}
@@ -143,17 +144,16 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 		return fmt.Errorf("app: HTTP server stopped before health became ready: %w", err)
 	}
 
-	if RuntimeDescriptorEnabled() {
-		if err := WriteRuntimeDescriptor(RuntimeDescriptor{
-			SchemaVersion: 1,
-			PID:           os.Getpid(),
-			Port:          int(port),
-			BaseURL:       baseURL,
-		}); err != nil {
-			return fmt.Errorf("app: write runtime descriptor: %w", err)
-		}
-		descriptorWritten = true
+	if err := WriteRuntimeDescriptor(RuntimeDescriptor{
+		SchemaVersion: 1,
+		PID:           os.Getpid(),
+		Port:          int(port),
+		BaseURL:       baseURL,
+		RuntimeMode:   runtimeMode(),
+	}); err != nil {
+		return fmt.Errorf("app: write runtime descriptor: %w", err)
 	}
+	descriptorWritten = true
 
 	openDashboard(dependencies.Browser, baseURL+"/")
 

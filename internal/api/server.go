@@ -19,6 +19,7 @@ import (
 type Config struct {
 	ListenAddress        string
 	AppVersion           string
+	RuntimeMode          string
 	StaticDir            string
 	StaticFS             fs.FS
 	UsageRefreshInterval time.Duration
@@ -29,6 +30,7 @@ func DefaultConfig() Config {
 	return Config{
 		ListenAddress:        "127.0.0.1:37991",
 		AppVersion:           "0.2.6",
+		RuntimeMode:          "development",
 		StaticDir:            "frontend/dist",
 		UsageRefreshInterval: 60 * time.Second,
 		QuotaRefreshInterval: 60 * time.Second,
@@ -90,6 +92,9 @@ func NewServer(config Config, dependencies Dependencies) (*Server, error) {
 	if err := validateListenAddress(config.ListenAddress); err != nil {
 		return nil, err
 	}
+	if err := validateRuntimeMode(config.RuntimeMode); err != nil {
+		return nil, err
+	}
 	if err := validateRefreshIntervals(config); err != nil {
 		return nil, err
 	}
@@ -114,6 +119,9 @@ func completeConfig(config Config) Config {
 	}
 	if config.AppVersion == "" {
 		config.AppVersion = defaults.AppVersion
+	}
+	if config.RuntimeMode == "" {
+		config.RuntimeMode = defaults.RuntimeMode
 	}
 	if config.StaticDir == "" && config.StaticFS == nil {
 		config.StaticDir = defaults.StaticDir
@@ -148,6 +156,13 @@ func validateListenAddress(address string) error {
 func validateRefreshIntervals(config Config) error {
 	if config.UsageRefreshInterval <= 0 || config.QuotaRefreshInterval <= 0 {
 		return errors.New("api: refresh intervals must be positive")
+	}
+	return nil
+}
+
+func validateRuntimeMode(mode string) error {
+	if mode != "production" && mode != "development" {
+		return errors.New("api: runtime mode must be production or development")
 	}
 	return nil
 }

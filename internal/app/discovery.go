@@ -13,6 +13,7 @@ type RuntimeDescriptor struct {
 	PID           int    `json:"pid"`
 	Port          int    `json:"port"`
 	BaseURL       string `json:"base_url"`
+	RuntimeMode   string `json:"runtime_mode"`
 }
 
 func RuntimeDescriptorPath() (string, error) {
@@ -24,12 +25,19 @@ func RuntimeDescriptorPath() (string, error) {
 }
 
 func runtimeDescriptorPath(home string) string {
-	return filepath.Join(home, "Library", "Application Support", "Usagi", "runtime.json")
+	return filepath.Join(home, "Library", "Application Support", "Usagi", runtimeDescriptorName(runtimeMode()))
+}
+
+func runtimeDescriptorName(mode string) string {
+	if mode == "production" {
+		return "runtime.json"
+	}
+	return "runtime-dev.json"
 }
 
 func WriteRuntimeDescriptor(descriptor RuntimeDescriptor) error {
-	if !RuntimeDescriptorEnabled() {
-		return nil
+	if descriptor.RuntimeMode != runtimeMode() {
+		return fmt.Errorf("runtime descriptor mode %q does not match build mode %q", descriptor.RuntimeMode, runtimeMode())
 	}
 	path, err := RuntimeDescriptorPath()
 	if err != nil {
@@ -39,10 +47,6 @@ func WriteRuntimeDescriptor(descriptor RuntimeDescriptor) error {
 }
 
 func writeRuntimeDescriptor(path string, descriptor RuntimeDescriptor) error {
-	if !RuntimeDescriptorEnabled() {
-		return nil
-	}
-
 	contents, err := json.Marshal(descriptor)
 	if err != nil {
 		return fmt.Errorf("encode runtime descriptor: %w", err)
@@ -87,19 +91,27 @@ func writeRuntimeDescriptor(path string, descriptor RuntimeDescriptor) error {
 	return nil
 }
 
-func RemoveRuntimeDescriptor() error {
-	if !RuntimeDescriptorEnabled() {
-		return nil
-	}
+func RemoveRuntimeDescriptor(pid int) error {
 	path, err := RuntimeDescriptorPath()
 	if err != nil {
 		return err
 	}
-	return removeRuntimeDescriptor(path)
+	return removeRuntimeDescriptor(path, pid, runtimeMode())
 }
 
-func removeRuntimeDescriptor(path string) error {
-	if !RuntimeDescriptorEnabled() {
+func removeRuntimeDescriptor(path string, pid int, mode string) error {
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read runtime descriptor before removal: %w", err)
+	}
+	var descriptor RuntimeDescriptor
+	if err := json.Unmarshal(contents, &descriptor); err != nil {
+		return nil
+	}
+	if descriptor.PID != pid || descriptor.RuntimeMode != mode {
 		return nil
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

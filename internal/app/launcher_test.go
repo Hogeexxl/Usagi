@@ -204,25 +204,39 @@ func TestBindLoopbackClosesReservedListenerOnOtherBindError(t *testing.T) {
 
 func TestProbeUsagiHealthRequiresSuccessAndExactMarkerWithoutProxy(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		status  int
-		markers []string
-		want    bool
+		name       string
+		status     int
+		infoStatus int
+		infoMode   string
+		markers    []string
+		want       bool
 	}{
-		{name: "exact marker", status: http.StatusOK, markers: []string{"Usagi"}, want: true},
-		{name: "case mismatch", status: http.StatusOK, markers: []string{"usagi"}},
-		{name: "unsuccessful status", status: http.StatusServiceUnavailable, markers: []string{"Usagi"}},
-		{name: "duplicate marker", status: http.StatusOK, markers: []string{"Usagi", "Usagi"}},
+		{name: "exact marker and matching mode", status: http.StatusOK, infoStatus: http.StatusOK, infoMode: runtimeMode(), markers: []string{"Usagi"}, want: true},
+		{name: "case mismatch", status: http.StatusOK, infoStatus: http.StatusOK, infoMode: runtimeMode(), markers: []string{"usagi"}},
+		{name: "unsuccessful health status", status: http.StatusServiceUnavailable, markers: []string{"Usagi"}},
+		{name: "duplicate health marker", status: http.StatusOK, infoStatus: http.StatusOK, infoMode: runtimeMode(), markers: []string{"Usagi", "Usagi"}},
+		{name: "different runtime mode", status: http.StatusOK, infoStatus: http.StatusOK, infoMode: "other", markers: []string{"Usagi"}},
+		{name: "info unavailable", status: http.StatusOK, infoStatus: http.StatusServiceUnavailable, infoMode: runtimeMode(), markers: []string{"Usagi"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/health" {
-					t.Errorf("health probe path = %q", r.URL.Path)
+				switch r.URL.Path {
+				case "/api/health":
+					for _, marker := range test.markers {
+						w.Header().Add("X-Usagi-App", marker)
+					}
+					w.WriteHeader(test.status)
+				case "/api/v1/info":
+					status := test.infoStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"runtime_mode":"` + test.infoMode + `"}`))
+				default:
+					t.Errorf("probe path = %q", r.URL.Path)
+					http.NotFound(w, r)
 				}
-				for _, marker := range test.markers {
-					w.Header().Add("X-Usagi-App", marker)
-				}
-				w.WriteHeader(test.status)
 			}))
 			defer server.Close()
 			_, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))

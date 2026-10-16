@@ -57,7 +57,7 @@ func request(server http.Handler, method, target string) *httptest.ResponseRecor
 
 func TestDefaultConfigAndServerAcceptsStartingRuntime(t *testing.T) {
 	config := DefaultConfig()
-	if config.ListenAddress != "127.0.0.1:37991" || config.UsageRefreshInterval != 60*time.Second ||
+	if config.ListenAddress != "127.0.0.1:37991" || config.RuntimeMode != "development" || config.UsageRefreshInterval != 60*time.Second ||
 		config.QuotaRefreshInterval != 60*time.Second {
 		t.Fatalf("DefaultConfig() = %+v", config)
 	}
@@ -94,6 +94,11 @@ func TestNewServerRejectsNonLoopbackAndNonpositiveIntervals(t *testing.T) {
 	config.QuotaRefreshInterval = -time.Second
 	if _, err := NewServer(config, dependencies); err == nil {
 		t.Fatal("NewServer accepted a nonpositive refresh interval")
+	}
+	config = DefaultConfig()
+	config.RuntimeMode = "unknown"
+	if _, err := NewServer(config, dependencies); err == nil {
+		t.Fatal("NewServer accepted an unknown runtime mode")
 	}
 }
 

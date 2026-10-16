@@ -14,7 +14,7 @@ Usagi 是一个纯本机运行的 Rust 服务 + React Dashboard，用来读取 O
 它有三个原则：
 
 - **只读**：只读取 Codex 数据目录，绝不修改、绝不删除 Codex 的任何文件；
-- **本地**：数据处理、SQLite 数据库、Dashboard 页面全部留在你的电脑上，服务只监听 `127.0.0.1` 回环地址，不监听外网；macOS 固定使用 `3210`，Windows 优先使用 `3210`，冲突时自动选择后续本机端口；
+- **本地**：数据处理、SQLite 数据库、Dashboard 页面全部留在你的电脑上，服务只监听 `127.0.0.1` 回环地址，不监听外网；端口按运行模式从专属回环端口段中动态选择。
 - **无上传**：不会把会话内容、用量数据或 OpenAI 凭据发送到任何服务器。唯一的网络请求是向 GitHub 公开接口查询新版本，且不携带任何本地数据。
 
 ## 功能一览
@@ -71,17 +71,20 @@ Usagi 是一个纯本机运行的 Rust 服务 + React Dashboard，用来读取 O
 - Windows x64：`Usagi-v0.2.6-windows-x64-setup.exe`，安装后的主程序为 `usagi.exe`
 - macOS Apple Silicon：`Usagi-v0.2.6-macos-arm64.dmg`
 
-启动后 Usagi 会在本机启动服务并自动打开默认浏览器；如果浏览器没有自动打开，手动访问：
+启动后 Usagi 会在本机启动服务并自动打开默认浏览器。macOS 正式版使用 `37891–37922` 端口段，开发版使用 `37991–38022`；如果浏览器没有自动打开，从对应模式的运行时描述符读取 `base_url` 并在其后加 `/`：
 
 ```text
-http://127.0.0.1:3210
+~/Library/Application Support/Usagi/runtime.json       # 正式版
+~/Library/Application Support/Usagi/runtime-dev.json   # 开发版
 ```
+
+开发版从仓库根目录运行 `/bin/zsh -lc 'exec go run ./cmd/usagi'`，并要求 `frontend/dist/index.html` 已存在。正式版使用已安装且与当前 schema v4 源码配套的 `Usagi.app`；旧版 app 不与新开发版共用数据库。
 
 ### 常见问题
 
 - **macOS 首次启动被拦截**：v0.1.0 的 macOS 应用未做 Developer ID 签名与 notarization。在 Finder 中按住 Control 点按应用并选择「打开」，或在「系统设置 → 隐私与安全性」中选择「仍要打开」。
 - **重复启动**：再次启动只会打开已在运行的实例，不会启动第二个。
-- **端口被占用**：Windows 会从 `3210` 开始自动选择后续可用的本机端口，不会结束或替换占用端口的程序；macOS 仍保持固定 `3210` 的原有行为。
+- **端口被占用**：服务只检查当前运行模式对应的 32 个回环端口；占用的端口会跳过，已有同模式 Usagi 则打开其 Dashboard。
 - **看不到数据**：确认本机 `~/.codex/sessions` 下存在 `rollout-*.jsonl` 文件；如果设置过 `CODEX_HOME` 环境变量，确认它指向 Codex 实际使用的数据目录。数据每 5 分钟自动扫描一次，也可以点「同步数据」立即扫描。
 
 ## 数据来源
@@ -108,7 +111,7 @@ Usagi 自身的数据全部落在本机：
 
 | 数据 | 位置 |
 | --- | --- |
-| SQLite 数据库 | macOS：`~/Library/Application Support/Usagi/mu.sqlite3`<br>Windows：`%LOCALAPPDATA%\Usagi\mu.sqlite3` |
+| SQLite 数据库 | macOS：`~/Library/Application Support/Usagi/usagi.sqlite`<br>Windows：`%LOCALAPPDATA%\Usagi\mu.sqlite3` |
 | Codex 数据目录（只读） | `$CODEX_HOME`，默认 `~/.codex`（Windows：`C:\Users\<user>\.codex`） |
 
 可用的环境变量：
@@ -118,7 +121,7 @@ Usagi 自身的数据全部落在本机：
 | `CODEX_HOME` | Codex 数据目录（非空时生效） | `~/.codex` |
 | `TZ` | 时间范围计算使用的时区 | 系统时区 |
 
-监听地址始终固定为 `127.0.0.1`，不会暴露到网络。macOS 继续固定使用 `3210`；Windows 优先使用 `3210`，若被其他程序占用则自动选择后续可用端口。
+监听地址始终固定为 `127.0.0.1`，不会暴露到网络。正式版从 `37891–37922` 端口段选择首个可用端口，开发版从 `37991–38022` 端口段选择；服务地址通过对应模式的运行时描述符发布。正式版文件为 `~/Library/Application Support/Usagi/runtime.json`，开发版文件为同目录下的 `runtime-dev.json`。两种模式使用同一 `usagi.sqlite` 数据库。
 
 ## Public API v1
 
@@ -127,10 +130,10 @@ Usagi 提供只读、版本化的本机 Public API，供 PeekFlow 等同机应�
 Public API 根路径：
 
 ~~~text
-http://127.0.0.1:3210/api/v1
+http://127.0.0.1:<port>/api/v1
 ~~~
 
-首版提供 info、revision、revision SSE、status、Codex quota 与 usage summary；Usage 时间范围支持 today、yesterday、7d、30d、year 和 custom。
+macOS 客户端从所选模式的运行时描述符取得 `base_url`，并连接其 `/api/v1`。首次自动发现优先使用正式版，已成功连接保持原模式。`GET /api/v1/info` 提供 `runtime_mode`，值为 `production` 或 `development`。首版提供 info、revision、revision SSE、status、Codex quota 与 usage summary；Usage 时间范围支持 today、yesterday、7d、30d、year 和 custom。
 
 完整架构、接口表、SSE/GET 协作方式与时间语义见 [Public API v1 产品需求文档](docs/Usagi_Public_API_v1_产品需求文档.md)。
 

@@ -5,6 +5,7 @@ type publicV1InfoDTO struct {
 	AppVersion   string   `json:"app_version"`
 	APIVersion   string   `json:"api_version"`
 	Capabilities []string `json:"capabilities"`
+	RuntimeMode  string   `json:"runtime_mode"`
 }
 
 type publicV1RevisionDTO struct {

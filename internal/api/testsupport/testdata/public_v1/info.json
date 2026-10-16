@@ -8,5 +8,6 @@
     "status",
     "codex-quota",
     "usage-summary"
-  ]
+  ],
+  "runtime_mode": "development"
 }

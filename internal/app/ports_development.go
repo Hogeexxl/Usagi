@@ -6,6 +6,6 @@ func RuntimePortRange() PortRange {
 	return PortRange{First: developmentPortFirst, Count: runtimePortCount}
 }
 
-func RuntimeDescriptorEnabled() bool {
-	return false
+func runtimeMode() string {
+	return "development"
 }

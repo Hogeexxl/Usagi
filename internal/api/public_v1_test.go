@@ -53,12 +53,12 @@ func TestPublicV1FrozenPathsAndInfoRevision(t *testing.T) {
 	if infoResponse.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d %s", publicV1InfoPath, infoResponse.Code, infoResponse.Body.String())
 	}
-	assertJSONKeys(t, infoResponse.Body.Bytes(), "service", "app_version", "api_version", "capabilities")
+	assertJSONKeys(t, infoResponse.Body.Bytes(), "service", "app_version", "api_version", "capabilities", "runtime_mode")
 	var info publicV1InfoDTO
 	if err := json.Unmarshal(infoResponse.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Service != "usagi" || info.AppVersion != "0.2.6" || info.APIVersion != "1" ||
+	if info.Service != "usagi" || info.AppVersion != "0.2.6" || info.APIVersion != "1" || info.RuntimeMode != "development" ||
 		!reflect.DeepEqual(info.Capabilities, []string{"revision", "revision-events", "status", "codex-quota", "usage-summary"}) {
 		t.Fatalf("Public info = %+v", info)
 	}

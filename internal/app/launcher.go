@@ -1,8 +1,10 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -88,8 +90,26 @@ func probeUsagiHealth(port uint16) bool {
 	if err != nil {
 		return false
 	}
-	defer response.Body.Close()
-
 	values := response.Header.Values("X-Usagi-App")
-	return response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices && len(values) == 1 && values[0] == "Usagi"
+	healthOK := response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices && len(values) == 1 && values[0] == "Usagi"
+	_ = response.Body.Close()
+	if !healthOK {
+		return false
+	}
+
+	response, err = client.Get("http://" + address + "/api/v1/info")
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false
+	}
+	var info struct {
+		RuntimeMode string `json:"runtime_mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&info); err != nil {
+		return false
+	}
+	return info.RuntimeMode == runtimeMode()
 }
