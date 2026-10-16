@@ -15,11 +15,11 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Verify macOS arm64 runner
         run: test "$(uname -m)" = 'arm64'
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
