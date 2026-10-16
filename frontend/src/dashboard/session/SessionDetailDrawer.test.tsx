@@ -115,6 +115,23 @@ function view(overrides: Partial<SessionDetailControllerViewModel> = {}): Sessio
 const timezone = "Asia/Shanghai";
 
 describe("SessionDetailDrawer Spec04 SessionListItemView", () => {
+  it("opens the unpriced CostValue prompt on pointer hover", () => {
+    const inclusiveUsage = usage(3_601, 1.2, 1);
+    render(
+      <SessionDetailDrawer
+        view={view({
+          detail: { ...detail, inclusive_usage: inclusiveUsage },
+          selected_row: { ...row, inclusive_usage: inclusiveUsage },
+        })}
+        timezone={timezone}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "未计价使用记录提示" });
+    fireEvent.pointerEnter(trigger, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("renders the existing receipt shell from the new inclusive DTO", () => {
     const rendered = render(<SessionDetailDrawer view={view()} timezone={timezone} />);
 

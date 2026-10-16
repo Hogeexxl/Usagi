@@ -265,13 +265,11 @@ describe("MetricGrid Spec05", () => {
     expect(Array.from(bar.children).reduce((sum, segment) => sum + Number.parseFloat((segment as HTMLElement).style.width), 0)).toBeCloseTo(100);
   });
 
-  it("shows cost per million from equivalent cost / total without an unpriced prompt", () => {
+  it("shows cost per million from equivalent cost / total", () => {
     render(<CostMetric usage={usage} glare={false} />);
     const card = cardByTitle("等价费用");
     expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
     expect(screen.getByTitle("$0.01")).toHaveTextContent("$0.01");
-    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
-    expect(within(card).queryByText(/未计价/)).not.toBeInTheDocument();
   });
 
   it("uses total for the equivalent cost ratio regardless of unpriced count", () => {
@@ -279,6 +277,28 @@ describe("MetricGrid Spec05", () => {
     const card = cardByTitle("等价费用");
     expect(within(card).getByText("$6.200 / MToken")).toBeInTheDocument();
     expect(within(card).queryByText(/未计价/)).not.toBeInTheDocument();
+  });
+
+  it("warns about unpriced usage and shows its count on hover", async () => {
+    render(<CostMetric usage={usage} glare={false} />);
+    const card = cardByTitle("等价费用");
+    const warning = within(card).getByRole("button", { name: "未计价使用记录提示" });
+    expect(warning).toHaveClass("text-warning");
+
+    fireEvent.pointerEnter(warning, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    const popover = await screen.findByRole("dialog");
+    expect(popover).toHaveTextContent("1 条使用记录未计价");
+    expect(popover).toHaveClass("text-primary-foreground");
+  });
+
+  it("shows the all-priced state when there is no unpriced usage", async () => {
+    render(<CostMetric usage={{ ...usage, unpriced: 0 }} glare={false} />);
+    const card = cardByTitle("等价费用");
+    const warning = within(card).getByRole("button", { name: "未计价使用记录提示" });
+    expect(warning).toHaveClass("text-foreground");
+
+    fireEvent.pointerEnter(warning, { pointerId: 1, pointerType: "mouse", buttons: 0 });
+    expect(await screen.findByText("所有使用记录均已计价")).toBeInTheDocument();
   });
 
   it("renders null session percentiles as em dashes", () => {

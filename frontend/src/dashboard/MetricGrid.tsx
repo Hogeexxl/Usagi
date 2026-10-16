@@ -1,4 +1,4 @@
-import { RefreshCw } from "lucide-react";
+import { CircleAlert, RefreshCw } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { memo, useRef, useState } from "react";
 
@@ -230,11 +230,30 @@ export function OutputSpeedMetric({ metrics, glare = false }: { metrics: Request
 }
 
 export function CostMetric({ usage, glare = true }: { usage: UsageDto; glare?: boolean }) {
+  const hasUnpriced = usage.unpriced > 0;
   const costPerMillionTokens = formatCostPerMillionTokens(usage.total > 0 ? (usage.cost / usage.total) * 1_000_000 : null);
 
   return (
     <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
-      <div className={TITLE}>等价费用</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className={TITLE}>等价费用</div>
+        <Popover trigger="hover" side="bottom" align="end">
+          <PopoverTrigger>
+            <button
+              type="button"
+              aria-label="未计价使用记录提示"
+              className={`inline-flex items-center justify-center ${hasUnpriced ? "text-warning" : "text-foreground"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
+            >
+              <CircleAlert className="h-4 w-4" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent inverseTheme className="w-max max-w-64 text-xs">
+            <div className="flex flex-col gap-1">
+              {hasUnpriced ? <div>{usage.unpriced} 条使用记录未计价</div> : <div>所有使用记录均已计价</div>}
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
       <CompactTicker value={usage.cost} tickerValue={Math.round(usage.cost * 100)} formatter={formatCostFull} tickerFormatter={(next) => formatCostFull(next / 100).text} />
       <div className={`${LEGEND} mt-auto`} title={costPerMillionTokens.title} aria-label={costPerMillionTokens.accessibleName}>
         {costPerMillionTokens.text}

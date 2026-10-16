@@ -15,6 +15,8 @@ export type ToolUsageControllerView = {
 };
 
 const RANGE_DAYS: Record<ToolUsageRange, 1 | 7 | 30> = { today: 1, "7d": 7, "30d": 30 };
+const TOOL_POLL_INTERVAL_MS = 60_000;
+const INITIAL_TOOL_RETRY_INTERVAL_MS = 5_000;
 const EMPTY_FILTERS: DashboardFilters = { agents: [], models: [], projects: [] };
 
 export function useToolUsageController(options: { client?: UsagiClient } = {}): ToolUsageControllerView {
@@ -32,31 +34,51 @@ export function useToolUsageController(options: { client?: UsagiClient } = {}): 
   const days = RANGE_DAYS[resolveDashboardScope(scopePolicy, { key: "today" }, EMPTY_FILTERS).range.key as ToolUsageRange];
 
   useEffect(() => {
+    let active = true;
     let request: AbortController | null = null;
+    let timer: number | null = null;
+    let hasLoaded = false;
+    let lastFailed = false;
+
     const load = () => {
-      request?.abort();
+      if (!active || request) return;
       const controller = new AbortController();
       request = controller;
       setView((current) => ({
         response: current.response?.days === days ? current.response : null,
-        loading: true,
-        error: false,
+        loading: !lastFailed,
+        error: lastFailed,
       }));
       void client.toolUsage(days, controller.signal).then(
         (response) => {
-          if (!controller.signal.aborted) setView({ response, loading: false, error: false });
+          if (!active || controller.signal.aborted) return;
+          hasLoaded = true;
+          lastFailed = false;
+          setView({ response, loading: false, error: false });
         },
         (error: unknown) => {
-          if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
+          if (!active || controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
+          lastFailed = true;
           setView((current) => ({ ...current, loading: false, error: true }));
         },
-      );
+      ).finally(() => {
+        if (request !== controller) return;
+        request = null;
+        if (!active) return;
+        timer = window.setTimeout(() => {
+          timer = null;
+          load();
+        }, hasLoaded ? TOOL_POLL_INTERVAL_MS : INITIAL_TOOL_RETRY_INTERVAL_MS);
+      });
     };
+
     load();
-    const timer = window.setInterval(load, 60_000);
     return () => {
-      window.clearInterval(timer);
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
       request?.abort();
+      request = null;
     };
   }, [client, days]);
 

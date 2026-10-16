@@ -25,8 +25,13 @@ function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+async function settle() {
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 }
 
 afterEach(() => vi.useRealTimers());
@@ -61,13 +66,13 @@ describe("useToolUsageController Spec05", () => {
     expect(result.current.loading).toBe(false);
     act(() => result.current.select_range("30d"));
     await waitFor(() => expect(api.toolUsage).toHaveBeenCalledTimes(3));
-    expect(sevenSignal?.aborted).toBe(true);
+    expect(sevenSignal?.aborted).toBe(false);
     expect(api.toolUsage).toHaveBeenNthCalledWith(3, 30, expect.any(AbortSignal));
     thirty.resolve({ days: 30, calls: 30, top: [{ name: "Monthly", calls: 30 }] });
     await waitFor(() => expect(result.current.response?.days).toBe(30));
   });
 
-  it("polls the selected days every 60 seconds", async () => {
+  it("polls selected days 60 seconds after a completed successful request", async () => {
     vi.useFakeTimers();
     const api = clientWith({ toolUsage: vi.fn(async (days) => ({ days, calls: 2, top: [{ name: "Read", calls: 2 }] })) });
     const { result, unmount } = renderHook(() => useToolUsageController({ client: api }));
@@ -83,11 +88,96 @@ describe("useToolUsageController Spec05", () => {
     unmount();
   });
 
-  it("keeps Tool upstream errors in the failed state", async () => {
-    const api = clientWith({ toolUsage: vi.fn().mockRejectedValue(new UsagiClientError("DATA_LOADING", 503)) });
-    const { result } = renderHook(() => useToolUsageController({ client: api }));
-    await waitFor(() => expect(result.current.error).toBe(true));
+  it("retries a first MAGPIE_UNAVAILABLE response after five seconds and polls every minute after recovery", async () => {
+    vi.useFakeTimers();
+    const retry = deferred<ToolUsageResponse>();
+    const api = clientWith({
+      toolUsage: vi.fn()
+        .mockRejectedValueOnce(new UsagiClientError("MAGPIE_UNAVAILABLE", 503))
+        .mockReturnValueOnce(retry.promise)
+        .mockResolvedValue({ days: 1, calls: 3, top: [{ name: "Read", calls: 3 }] }),
+    });
+    const { result, unmount } = renderHook(() => useToolUsageController({ client: api }));
+
+    await settle();
+    expect(result.current.error).toBe(true);
     expect(result.current.loading).toBe(false);
     expect(result.current.response).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBe(true);
+    expect(result.current.loading).toBe(false);
+    await act(async () => { retry.resolve({ days: 1, calls: 2, top: [{ name: "Read", calls: 2 }] }); await retry.promise; });
+    await settle();
+    expect(result.current.response).toEqual({ days: 1, calls: 2, top: [{ name: "Read", calls: 2 }] });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await settle();
+    expect(api.toolUsage).toHaveBeenCalledTimes(3);
+    expect(result.current.response?.calls).toBe(3);
+    unmount();
+  });
+
+  it("does not abort a slow request and schedules the next poll only after it completes", async () => {
+    vi.useFakeTimers();
+    const slow = deferred<ToolUsageResponse>();
+    const api = clientWith({
+      toolUsage: vi.fn()
+        .mockReturnValueOnce(slow.promise)
+        .mockResolvedValue({ days: 1, calls: 2, top: [] }),
+    });
+    const { unmount } = renderHook(() => useToolUsageController({ client: api }));
+    const signal = vi.mocked(api.toolUsage).mock.calls[0][1];
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(false);
+
+    await act(async () => { slow.resolve({ days: 1, calls: 1, top: [] }); await slow.promise; });
+    await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await settle();
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("clears retry timers on range changes and aborts pending requests on unmount", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<ToolUsageResponse>();
+    const signals: AbortSignal[] = [];
+    const api = clientWith({
+      toolUsage: vi.fn((days, signal?: AbortSignal) => {
+        if (signal) signals.push(signal);
+        return days === 1
+          ? Promise.reject(new UsagiClientError("MAGPIE_UNAVAILABLE", 503))
+          : pending.promise;
+      }),
+    });
+    const { result, unmount } = renderHook(() => useToolUsageController({ client: api }));
+
+    await settle();
+    expect(result.current.error).toBe(true);
+    act(() => result.current.select_range("7d"));
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+    expect(api.toolUsage).toHaveBeenLastCalledWith(7, expect.any(AbortSignal));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+
+    const pendingSignal = signals[1];
+    unmount();
+    expect(pendingSignal.aborted).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.toolUsage).toHaveBeenCalledTimes(2);
+    pending.reject(new DOMException("Aborted", "AbortError"));
+    await settle();
   });
 });

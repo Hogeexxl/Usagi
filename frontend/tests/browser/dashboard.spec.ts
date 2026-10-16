@@ -203,7 +203,7 @@ async function json(route: Route, body: unknown) {
   await route.fulfill({ status: 200, contentType: "application/json", json: body });
 }
 
-async function routeStableDashboardData(page: Page, toolCalls?: number[]) {
+async function routeStableDashboardData(page: Page, toolCalls?: number[], sessionUnpriced = 0) {
   await page.route("**/api/events*", (route) => route.abort());
   await page.route("**/api/health", (route) => route.fulfill({ status: 204, headers: { "X-Usagi-App": "Usagi" } }));
   await page.route("**/api/quota", (route) => json(route, quota()));
@@ -237,7 +237,11 @@ async function routeStableDashboardData(page: Page, toolCalls?: number[]) {
     });
   });
   await page.route(/\/api\/usage\/sessions\?/, (route) => json(route, sessionList(route.request().url())));
-  await page.route(/\/api\/usage\/session-detail\?/, (route) => json(route, sessionDetail(route.request().url())));
+  await page.route(/\/api\/usage\/session-detail\?/, (route) => {
+    const detail = sessionDetail(route.request().url());
+    detail.inclusive_usage.unpriced = sessionUnpriced;
+    return json(route, detail);
+  });
 }
 
 async function waitForDashboard(page: Page) {
@@ -622,6 +626,89 @@ test("C3 narrow viewport keeps chart and drawer within the screen while the tabl
   await dialog.getByRole("button", { name: "关闭 Session 详情" }).click();
   await expect(dialog).toBeHidden();
   expect(await illegalStorageWrites(page)).toBe(0);
+});
+
+test("CostValue unpriced popover opens on hover with inverse theme and stays within viewports", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => localStorage.setItem("usagi.theme", "light"));
+  await routeStableDashboardData(page, undefined, 1);
+  await page.goto("/");
+  await waitForDashboard(page);
+
+  const assertPopoverFitsViewport = async (width: number, theme: "light" | "dark") => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.locator("tr[data-session-thread-key-id]").first().click();
+    const drawer = page.getByRole("dialog", { name: "Session 详情" });
+    await expect(drawer).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains("dark"))).toBe(theme === "dark");
+    const trigger = drawer.getByRole("button", { name: "未计价使用记录提示" });
+    await expect(trigger).toHaveCount(1);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.hover();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const popover = page.locator("[data-popover-portal] [role='dialog']").filter({ hasText: "1 条使用记录未计价" });
+    await expect(popover).toBeVisible();
+    await expect(popover).toHaveText("1 条使用记录未计价");
+    await page.waitForTimeout(400);
+    const [triggerBox, popoverBox] = await Promise.all([trigger.boundingBox(), popover.boundingBox()]);
+    expect(triggerBox).not.toBeNull();
+    expect(popoverBox).not.toBeNull();
+    expect(popoverBox!.x).toBeGreaterThanOrEqual(0);
+    expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(width);
+    expect(popoverBox!.y).toBeGreaterThanOrEqual(0);
+    expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(844);
+    expect(popoverBox!.x + popoverBox!.width).toBeCloseTo(triggerBox!.x + triggerBox!.width, 0);
+
+    const colors = await page.evaluate(() => {
+      const content = document.querySelector<HTMLElement>("[data-popover-portal] [role='dialog']");
+      const portal = content?.closest<HTMLElement>("[data-popover-portal]");
+      const bubble = portal?.querySelector<HTMLElement>(".absolute.inset-0.bg-primary");
+      if (!content || !bubble) throw new Error("CostValue popover visual nodes were not found");
+
+      const probe = document.createElement("div");
+      probe.className = "bg-primary text-primary-foreground";
+      probe.style.cssText = "position:fixed;visibility:hidden;width:1px;height:1px";
+      document.body.append(probe);
+      const expected = getComputedStyle(probe);
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas color inspection is unavailable");
+      const brightness = (color: string) => {
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+        return (red + green + blue) / 3;
+      };
+      const result = {
+        background: getComputedStyle(bubble).backgroundColor,
+        foreground: getComputedStyle(content).color,
+        expectedBackground: expected.backgroundColor,
+        expectedForeground: expected.color,
+        backgroundBrightness: brightness(getComputedStyle(bubble).backgroundColor),
+        foregroundBrightness: brightness(getComputedStyle(content).color),
+      };
+      probe.remove();
+      return result;
+    });
+    expect(colors.background).toBe(colors.expectedBackground);
+    expect(colors.foreground).toBe(colors.expectedForeground);
+    if (theme === "light") {
+      expect(colors.backgroundBrightness).toBeLessThan(80);
+      expect(colors.foregroundBrightness).toBeGreaterThan(230);
+    } else {
+      expect(colors.backgroundBrightness).toBeGreaterThan(230);
+      expect(colors.foregroundBrightness).toBeLessThan(40);
+    }
+
+    await page.mouse.move(0, 0);
+    await expect(popover).toBeHidden();
+    await drawer.getByRole("button", { name: "关闭 Session 详情" }).click();
+    await expect(drawer).toBeHidden();
+  };
+
+  await assertPopoverFitsViewport(390, "light");
+  await page.getByRole("button", { name: "Switch to dark mode" }).click();
+  await assertPopoverFitsViewport(1280, "dark");
 });
 
 test("T-Q-008 Codex quota stays last, shows account details, and fits required viewports", async ({ page }) => {
