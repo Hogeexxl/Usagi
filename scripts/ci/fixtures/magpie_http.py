@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import pathlib
+import socketserver
 import sys
 import time
 from urllib.parse import parse_qs, urlparse
@@ -48,6 +49,15 @@ point = {
     "input": 10,
     "output": 5,
 }
+
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        print(f"fixture before bind: address={self.server_address!r}", file=sys.stderr, flush=True)
+        # This numeric loopback fixture does not need HTTPServer's reverse DNS lookup.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+        print(f"fixture after bind: address={self.server_address!r}", file=sys.stderr, flush=True)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -163,6 +173,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--addr", required=True)
 arguments, _ = parser.parse_known_args()
 host, port = arguments.addr.rsplit(":", 1)
-server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
+server = LoopbackHTTPServer((host, int(port)), Handler)
 (fixture_dir / "magpie.pid").write_text(str(os.getpid()), encoding="utf-8")
 server.serve_forever()
