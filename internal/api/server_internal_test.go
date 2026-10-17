@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -522,7 +525,9 @@ func TestStaticAssetsAndDashboardFallback(t *testing.T) {
 		{path: "/dashboard/sessions", body: "dashboard-index", mime: "text/html"},
 	} {
 		response := request(server, http.MethodGet, test.path)
-		if response.Code != http.StatusOK || response.Body.String() != test.body || !strings.HasPrefix(response.Header().Get("Content-Type"), test.mime) {
+		mediaType, _, err := mime.ParseMediaType(response.Header().Get("Content-Type"))
+		validMIME := mediaType == test.mime || (test.mime == "text/javascript" && mediaType == "application/javascript")
+		if response.Code != http.StatusOK || response.Body.String() != test.body || err != nil || !validMIME {
 			t.Fatalf("GET %s = %d %q %q", test.path, response.Code, response.Body.String(), response.Header().Get("Content-Type"))
 		}
 	}
@@ -711,9 +716,10 @@ func waitFor(t *testing.T, ready func() bool) {
 func TestInternalUsageEndpointsIncludeWorkspace(t *testing.T) {
 	server, projectionService, runtime, _ := newServerFixture(t)
 	runtime.SetStatus(magpie.RuntimeStatusReady)
+	projectPath := filepath.Join(t.TempDir(), "repo space")
 
 	// Valid include_workspace=1
-	response := request(server, http.MethodGet, "/api/usage/summary?range=today&include_workspace=1&project_path=%2Frepo")
+	response := request(server, http.MethodGet, "/api/usage/summary?range=today&include_workspace=1&project_path="+url.QueryEscape(projectPath))
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET summary with include_workspace=1 status = %d: %s", response.Code, response.Body.String())
 	}
@@ -729,7 +735,7 @@ func TestInternalUsageEndpointsIncludeWorkspace(t *testing.T) {
 		}
 	}
 	if !found || len(summaryQuery.Filter.Projects) != 2 ||
-		summaryQuery.Filter.Projects[0] != (query.ProjectSelection{Kind: query.ProjectKindProject, Path: "/repo"}) ||
+		summaryQuery.Filter.Projects[0] != (query.ProjectSelection{Kind: query.ProjectKindProject, Path: projectPath}) ||
 		summaryQuery.Filter.Projects[1] != (query.ProjectSelection{Kind: query.ProjectKindWorkspace}) {
 		t.Fatalf("include_workspace did not preserve project-selection union: %+v", summaryQuery.Filter.Projects)
 	}

@@ -1191,6 +1191,7 @@ func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *
 	if err != nil {
 		t.Fatalf("reopen pending migrated database: %v", err)
 	}
+	defer db.Close()
 	service = newSyncTestService(t, db, fixture, location, now)
 	if _, err := service.Sync(context.Background()); err != nil {
 		t.Fatalf("retry compaction backfill after reopen: %v", err)
@@ -1219,6 +1220,7 @@ func TestSyncBackfillsFrozenCompactionDayRetriesAcrossReopenAndCompletesOnce(t *
 	if err != nil {
 		t.Fatalf("reopen completed database: %v", err)
 	}
+	defer db.Close()
 	service = newSyncTestService(t, db, fixture, location, now)
 	if _, err := service.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync after completed backfill: %v", err)
