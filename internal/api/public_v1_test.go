@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/api/testsupport"
@@ -23,7 +24,8 @@ import (
 )
 
 func TestPublicV1FrozenPathsAndInfoRevision(t *testing.T) {
-	server, _, _, _ := newServerFixture(t)
+	const appVersion = "0.0.0-public-api-test"
+	server := newPublicV1InfoServer(t, appVersion)
 	paths := []string{
 		publicV1InfoPath, publicV1RevisionPath, publicV1EventsPath,
 		publicV1StatusPath, publicV1QuotaPath, publicV1SummaryPath,
@@ -58,7 +60,7 @@ func TestPublicV1FrozenPathsAndInfoRevision(t *testing.T) {
 	if err := json.Unmarshal(infoResponse.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Service != "usagi" || info.AppVersion != "0.2.6" || info.APIVersion != "1" || info.RuntimeMode != "development" ||
+	if info.Service != "usagi" || info.AppVersion != appVersion || info.APIVersion != "1" || info.RuntimeMode != "development" ||
 		!reflect.DeepEqual(info.Capabilities, []string{"revision", "revision-events", "status", "codex-quota", "usage-summary"}) {
 		t.Fatalf("Public info = %+v", info)
 	}
@@ -74,6 +76,27 @@ func TestPublicV1FrozenPathsAndInfoRevision(t *testing.T) {
 	if revision != (publicV1RevisionDTO{DataRevision: 41, StatusRevision: 9}) {
 		t.Fatalf("Public revision = %+v", revision)
 	}
+}
+
+func newPublicV1InfoServer(t *testing.T, appVersion string) *Server {
+	t.Helper()
+	config := DefaultConfig()
+	config.AppVersion = appVersion
+	config.StaticFS = fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("dashboard-index")},
+	}
+	server, err := NewServer(config, Dependencies{
+		Projection:        &testsupport.FakeProjectionService{},
+		Query:             &testsupport.FakeWatcherQuery{},
+		Revisions:         NewRevisionService(0),
+		RuntimeStatus:     testsupport.NewFakeRuntime(magpie.RuntimeStatusStarting),
+		QuotaSnapshot:     &QuotaSnapshot{},
+		ShutdownRequester: func() {},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	return server
 }
 
 func TestPublicV1DTOsAreIndependentFromInternalDTOs(t *testing.T) {

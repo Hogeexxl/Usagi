@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Hogeexxl/Usagi/internal/platform"
 )
 
 var (
@@ -47,12 +49,12 @@ type runtimeResolver struct {
 }
 
 func NewProductionRuntimeResolver() (RuntimeResolver, error) {
-	home, err := os.UserHomeDir()
+	dataRoot, err := platform.UsagiDataDir()
 	if err != nil {
-		return nil, fmt.Errorf("resolve user home directory: %w", err)
+		return nil, fmt.Errorf("resolve Usagi data directory: %w", err)
 	}
 	return &runtimeResolver{
-		descriptorPath: filepath.Join(home, "Library", "Application Support", "Usagi", "runtime.json"),
+		descriptorPath: filepath.Join(dataRoot, "runtime.json"),
 		client:         NewHTTPClient(),
 	}, nil
 }

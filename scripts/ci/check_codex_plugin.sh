@@ -2,7 +2,8 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-PLUGIN="$ROOT/plugins/usagi"
+PLUGIN="${1:-$ROOT/plugins/usagi}"
+EXPECTED_VERSION="${2:-}"
 PLUGIN_JSON="$PLUGIN/plugin.json"
 MCP_JSON="$PLUGIN/mcp.json"
 SIDEBAR_SVG="$PLUGIN/assets/sidebar.svg"
@@ -10,6 +11,11 @@ APP_HTML="$PLUGIN/app/usagi-dashboard.html"
 PLUGIN_BINARY="$PLUGIN/bin/usagi-codex-plugin"
 
 cd "$ROOT"
+
+if [ "$#" -gt 2 ]; then
+	printf 'FAIL: usage: %s [plugin-root [expected-version]]\n' "$0" >&2
+	exit 1
+fi
 
 fail() {
 	printf 'FAIL: %s\n' "$*" >&2
@@ -67,6 +73,19 @@ require_line "$MCP_JSON" '      "cwd": "${PLUGIN_ROOT}"'
 require_line "$PLUGIN_JSON" '  "description": "Local AI usage dashboard for Codex Desktop.",'
 require_line "$PLUGIN_JSON" '        "logo": "./assets/sidebar.svg"'
 
+if [ -n "$EXPECTED_VERSION" ]; then
+	if ! printf '%s\n' "$EXPECTED_VERSION" | grep -E -x -q '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+		fail "invalid expected plugin version: $EXPECTED_VERSION"
+	fi
+	plugin_version=$(
+		sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_JSON" |
+			head -n 1
+	)
+	if [ "$plugin_version" != "$EXPECTED_VERSION" ]; then
+		fail "plugin.json version is '$plugin_version', want '$EXPECTED_VERSION'"
+	fi
+fi
+
 if ! grep -F -q '@modelcontextprotocol/ext-apps' "$APP_HTML"; then
 	fail 'plugin Dashboard HTML does not contain the MCP App bundle'
 fi
@@ -95,4 +114,4 @@ expect_no_matches 'old hand-written ui/initialize protocol' 'ui/initialize' \
 expect_no_matches 'Codex EventSource (/api/events) path' 'EventSource|/api/events' \
 	frontend/src/codex frontend/src/data/mcpUsagiClient.ts frontend/src/data/mcpServiceClient.ts
 
-printf 'PASS: Codex plugin package, HTML, metadata, and active-source residue checks\n'
+printf 'PASS: Codex plugin package, HTML, metadata, and active-source residue checks for %s\n' "$PLUGIN"

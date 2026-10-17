@@ -2,10 +2,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BINARY="$REPO_ROOT/dist/usagi"
+BINARY="${1:-$REPO_ROOT/dist/usagi}"
+if [[ "$BINARY" != /* ]]; then
+	BINARY="$(pwd)/$BINARY"
+fi
+EXPECTED_VERSION="${2:-}"
 MAGPIE_FIXTURE="$REPO_ROOT/scripts/ci/fixtures/magpie_http.py"
 if [[ ! -x "$BINARY" ]]; then
 	printf 'missing executable runtime: %s\n' "$BINARY" >&2
+	exit 1
+fi
+if [[ $# -gt 2 ]]; then
+	printf 'usage: %s [binary_path] [expected_app_version]\n' "$(basename "$0")" >&2
 	exit 1
 fi
 
@@ -188,6 +196,25 @@ print(port, descriptor["base_url"], sep="\t")
 PY
 }
 
+assert_runtime_version() {
+	local base_url="$1"
+	[[ -n "$EXPECTED_VERSION" ]] || return 0
+	"$SMOKE_PYTHON" - "$base_url" "$EXPECTED_VERSION" <<'PY'
+import json
+import sys
+import urllib.request
+
+base_url, expected = sys.argv[1:]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(base_url + "/api/v1/info", timeout=3) as response:
+    info = json.load(response)
+if info.get("app_version") != expected:
+    raise SystemExit(
+        f"runtime app_version {info.get('app_version')!r} does not equal {expected!r}"
+    )
+PY
+}
+
 stop_and_wait() {
 	local log_file="$1"
 	local exit_status
@@ -236,6 +263,7 @@ start_runtime "$SMOKE_HOME" "$SMOKE_LOG"
 wait_for_descriptor "$DESCRIPTOR" "$SMOKE_LOG"
 DESCRIPTOR_DATA="$(read_descriptor "$DESCRIPTOR" "$RUNTIME_PID")"
 IFS=$'\t' read -r SMOKE_PORT SMOKE_BASE_URL <<< "$DESCRIPTOR_DATA"
+assert_runtime_version "$SMOKE_BASE_URL"
 
 "$SMOKE_PYTHON" - "$SMOKE_BASE_URL" "$FIXTURE_DIR" "$DATABASE_DIR/usagi.sqlite" <<'PY'
 import json

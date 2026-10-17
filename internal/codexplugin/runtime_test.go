@@ -11,12 +11,33 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/Hogeexxl/Usagi/internal/platform"
 )
 
 type resolverFunc func(context.Context) (RuntimeTarget, error)
 
 func (f resolverFunc) Resolve(ctx context.Context) (RuntimeTarget, error) {
 	return f(ctx)
+}
+
+func TestProductionRuntimeResolverUsesSharedDataRoot(t *testing.T) {
+	dataRoot, err := platform.UsagiDataDir()
+	if err != nil {
+		t.Fatalf("platform.UsagiDataDir(): %v", err)
+	}
+	resolver, err := NewProductionRuntimeResolver()
+	if err != nil {
+		t.Fatalf("NewProductionRuntimeResolver(): %v", err)
+	}
+	concrete, ok := resolver.(*runtimeResolver)
+	if !ok {
+		t.Fatalf("NewProductionRuntimeResolver() returned %T", resolver)
+	}
+	want := filepath.Join(dataRoot, "runtime.json")
+	if concrete.descriptorPath != want {
+		t.Fatalf("descriptor path = %q, want %q", concrete.descriptorPath, want)
+	}
 }
 
 func TestRuntimeResolverDescriptorErrorsNormalizeInBridge(t *testing.T) {

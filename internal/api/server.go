@@ -29,7 +29,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		ListenAddress:        "127.0.0.1:37991",
-		AppVersion:           "0.2.6",
+		AppVersion:           AppVersion,
 		RuntimeMode:          "development",
 		StaticDir:            "frontend/dist",
 		UsageRefreshInterval: 60 * time.Second,

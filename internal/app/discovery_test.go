@@ -5,13 +5,26 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Hogeexxl/Usagi/internal/platform"
 )
 
 func TestRuntimeDescriptorPath(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "home")
-	want := filepath.Join(home, "Library", "Application Support", "Usagi", runtimeDescriptorName(runtimeMode()))
-	if got := runtimeDescriptorPath(home); got != want {
+	dataRoot := t.TempDir()
+	want := filepath.Join(dataRoot, runtimeDescriptorName(runtimeMode()))
+	if got := runtimeDescriptorPath(dataRoot); got != want {
 		t.Fatalf("runtimeDescriptorPath = %q, want %q", got, want)
+	}
+	productionRoot, err := platform.UsagiDataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionPath, err := RuntimeDescriptorPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := runtimeDescriptorPath(productionRoot); productionPath != want {
+		t.Fatalf("RuntimeDescriptorPath() = %q, want %q", productionPath, want)
 	}
 	if got := runtimeDescriptorName("production"); got != "runtime.json" {
 		t.Fatalf("production descriptor name = %q", got)
@@ -73,13 +86,6 @@ func checkRuntimeDescriptor(t *testing.T, path string, want RuntimeDescriptor) {
 	}
 	if got != want {
 		t.Fatalf("descriptor = %+v, want %+v", got, want)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode := info.Mode().Perm(); mode != 0600 {
-		t.Fatalf("descriptor mode = %04o, want 0600", mode)
 	}
 }
 

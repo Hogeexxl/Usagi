@@ -1,148 +1,69 @@
-# 📊 Usagi
+# Usagi
 
-> 完全运行在本机的 Codex 用量仪表盘：Token、会话与预估费用，一屏看清。
+> 在本机查看 Codex 的 Token、会话与预估费用。
 
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
-![Backend](https://img.shields.io/badge/%E5%90%8E%E7%AB%AF-Rust-orange)
-![Frontend](https://img.shields.io/badge/%E5%89%8D%E7%AB%AF-React-61dafb)
+![Backend](https://img.shields.io/badge/backend-Go-00ADD8)
+![Data](https://img.shields.io/badge/data-Magpie-orange)
+![Frontend](https://img.shields.io/badge/frontend-React-61dafb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-## 什么是 Usagi
+Usagi 是一个本地 Codex 用量 Dashboard。Go runtime 通过 Magpie Web/Gateway 获取数据，将结果保存在本机 SQLite 中，并向浏览器 Dashboard 与 Codex Plugin 提供同一套本地 HTTP API。Dashboard 支持 Token、费用和会话概览，以及时间范围、模型和项目筛选。
 
-Usagi 是一个纯本机运行的 Rust 服务 + React Dashboard，用来读取 OpenAI Codex CLI / Codex Desktop 留在本机的会话记录（rollout JSONL），整理出 Token 用量、预估费用与Session详细数据。
+## 支持平台
 
-它有三个原则：
+- macOS Apple Silicon arm64
+- Windows 10/11 x64
 
-- **只读**：只读取 Codex 数据目录，绝不修改、绝不删除 Codex 的任何文件；
-- **本地**：数据处理、SQLite 数据库、Dashboard 页面全部留在你的电脑上，服务只监听 `127.0.0.1` 回环地址，不监听外网；端口按运行模式从专属回环端口段中动态选择。
-- **无上传**：不会把会话内容、用量数据或 OpenAI 凭据发送到任何服务器。唯一的网络请求是向 GitHub 公开接口查询新版本，且不携带任何本地数据。
+从 [GitHub Releases](https://github.com/Hogeexxl/Usagi/releases) 下载对应文件，实际可用版本以 Release 页面为准：
 
-## 功能一览
+| 平台 | Runtime | Codex Plugin |
+| --- | --- | --- |
+| macOS arm64 | `Usagi-v<VERSION>-macos-arm64.dmg` | `Usagi-Codex-Plugin-v<VERSION>-macos-arm64.zip` |
+| Windows x64 | `Usagi-v<VERSION>-windows-x64-setup.exe` | `Usagi-Codex-Plugin-v<VERSION>-windows-x64.zip` |
 
-### 🖥 数据面板
+macOS 安装包内包含 `Usagi.app`。Windows 使用 NSIS 安装器，按当前用户安装到 `%LOCALAPPDATA%\Programs\Usagi`，主程序为 `usagi.exe`，并创建 Start Menu 快捷方式和卸载程序。
 
-启动后自动打开浏览器进入 Dashboard，提供 8 张 KPI 卡：
+## 启动与数据目录
 
-| 指标 | 说明 |
-| --- | --- |
-| 预估费用 | 按内置价格表估算的美元费用，附数据完整性提示 |
-| 总 Token | 范围内所有会话的 Token 总量 |
-| 输入 / 输出 Token | 输入与输出分开统计，输出含推理（reasoning）部分 |
-| 会话数量 | 范围内的 Session 数 |
-| 缓存命中率 | 命中缓存的部分占输入的比例 |
-| 缓存读取 Token | 命中缓存的输入量 |
-| 推理 Token | 输出中用于推理的部分 |
+Usagi 只监听 `127.0.0.1` 回环地址，并在启动后自动打开系统默认浏览器中的 Dashboard。正式版使用 `37891–37922` 端口段，开发版使用 `37991–38022` 端口段；当端口被其他程序占用时会继续尝试后续端口，若已有同模式 Usagi 在运行，再次启动只会打开现有 Dashboard。
 
-### 📋 Session 列表与详情
+Windows 版启动后在后台持续运行，没有长期命令行窗口、原生主窗口或系统托盘常驻图标。关闭浏览器不会停止 runtime。
 
-- 会话表格支持按最后活动时间、项目、模型、Token 量、费用排序，分页浏览；
-- 点开任一会话进入详情抽屉：主会话用量按「模型 + reasoning effort」分块展示，包含输入、输出、缓存读写、命中率、费用等 8 项明细；
-- 自动识别 Subagent 会话，列表中可逐个展开其独立用量；表格中的「合计」列（Token、费用）为包含 Subagent 的口径，与主会话自身的「总计」列分开呈现。
+| 数据 | macOS | Windows |
+| --- | --- | --- |
+| SQLite | `~/Library/Application Support/Usagi/usagi.sqlite` | `%LOCALAPPDATA%\Usagi\usagi.sqlite` |
+| 正式版描述符 | `~/Library/Application Support/Usagi/runtime.json` | `%LOCALAPPDATA%\Usagi\runtime.json` |
+| 开发版描述符 | `~/Library/Application Support/Usagi/runtime-dev.json` | `%LOCALAPPDATA%\Usagi\runtime-dev.json` |
 
-### 🔍 筛选与时间范围
+描述符提供当前 Runtime 的 `base_url`。如果浏览器没有自动打开，可连接该地址访问 Dashboard。
 
-- 时间范围：今天 / 昨天 / 本周（周一起始）/ 本月 / 今年，按本机时区计算；
-- 模型筛选：多选，GPT 系模型自动分组；
-- 项目筛选：按项目多选，可单独包含或排除「无项目会话」「未识别项目」。
+## Magpie
 
-### 💰 费用估算
+Magpie Web/Gateway 是 Usagi 的实时同步数据源。进行实时同步时 Magpie 必须可用，但 Magpie 不是 Usagi process 的启动前置条件：
 
-- 内置各模型单价表（输入 / 缓存读取 / 缓存写入 / 输出，含长上下文阶梯价），逐事件计算后汇总；
-- 未知模型不会套用其他模型的价格，明确标记为「未知」；
-- 费用为估算值，仅供参考，不代表 OpenAI 账单。详见[数据口径与费用估算](#数据口径与费用估算)。
+- Usagi installer 不打包、安装或更新 Magpie。
+- Magpie 未运行或启动失败时，Usagi process、Dashboard 与 SQLite 仍会启动，已有数据仍可读取；Supervisor 会进入 unavailable 状态并在后台重试。
+- 新数据库在首次成功同步前保持 loading/unavailable 语义，Magpie 恢复后无需重启 Usagi。
 
-### ⚡ 增量扫描与实时更新
+## Codex Plugin
 
-- 启动时立即扫描一次，之后每 5 分钟增量扫描；也可以随时点「同步数据」手动触发；
-- 增量扫描只读取文件新增部分（按上次读取的断点续读），文件被改写时自动校验并重建，无需人工干预；
-- 服务端数据有变化时通过 SSE 推送修订号，Dashboard 自动刷新，不用手动刷新页面。
+Codex Plugin 是独立于 Runtime 的下载项，不包含、替代或启动 Usagi。使用时需要已有一个正在运行的 production Usagi；Plugin 从本机 `runtime.json` 发现动态 localhost endpoint，并在 descriptor 缺失或 identity 校验失败时返回 not-running/invalid 状态。
 
-## 快速开始
+Browser Dashboard 与 Codex Plugin 使用同一套 Dashboard 业务代码和 Usagi HTTP API。
 
-### 前置条件
+## 开发
 
-- 本机已安装并在使用 Codex CLI 或 Codex Desktop（Usagi 读取它们写下的 `~/.codex` 会话记录，自身不产生数据）；
-- 操作系统：Windows 10/11（x64）或 macOS（Apple Silicon）。
+开发需要 Go `1.27.1`、Node.js `22` 与 `npm`。在仓库根目录可用以下命令：
 
-### 安装
-
-从 [GitHub Releases](https://github.com/Hogeexxl/Usagi/releases) 下载对应平台的安装包（以 Releases 页面实际提供的文件为准）：
-
-- Windows x64：`Usagi-v0.2.6-windows-x64-setup.exe`，安装后的主程序为 `usagi.exe`
-- macOS Apple Silicon：`Usagi-v0.2.6-macos-arm64.dmg`
-
-启动后 Usagi 会在本机启动服务并自动打开默认浏览器。macOS 正式版使用 `37891–37922` 端口段，开发版使用 `37991–38022`；如果浏览器没有自动打开，从对应模式的运行时描述符读取 `base_url` 并在其后加 `/`：
-
-```text
-~/Library/Application Support/Usagi/runtime.json       # 正式版
-~/Library/Application Support/Usagi/runtime-dev.json   # 开发版
+```bash
+npm --prefix frontend ci
+npm --prefix frontend test
+npm --prefix frontend run check
+go test ./...
+go vet ./...
 ```
 
-开发版从仓库根目录运行 `/bin/zsh -lc 'exec go run ./cmd/usagi'`，并要求 `frontend/dist/index.html` 已存在。正式版使用已安装且与当前 schema v4 源码配套的 `Usagi.app`；旧版 app 不与新开发版共用数据库。
-
-### 常见问题
-
-- **macOS 首次启动被拦截**：v0.1.0 的 macOS 应用未做 Developer ID 签名与 notarization。在 Finder 中按住 Control 点按应用并选择「打开」，或在「系统设置 → 隐私与安全性」中选择「仍要打开」。
-- **重复启动**：再次启动只会打开已在运行的实例，不会启动第二个。
-- **端口被占用**：服务只检查当前运行模式对应的 32 个回环端口；占用的端口会跳过，已有同模式 Usagi 则打开其 Dashboard。
-- **看不到数据**：确认本机 `~/.codex/sessions` 下存在 `rollout-*.jsonl` 文件；如果设置过 `CODEX_HOME` 环境变量，确认它指向 Codex 实际使用的数据目录。数据每 5 分钟自动扫描一次，也可以点「同步数据」立即扫描。
-
-## 数据来源
-
-Usagi 只读取 Codex 的本地数据目录，不访问网络获取用量。目录按以下优先级解析：显式配置 > 环境变量 `CODEX_HOME`（非空时生效）> 默认 `~/.codex`。
-
-| 文件 | 读取方式 | 用途 |
-| --- | --- | --- |
-| `$CODEX_HOME/sessions/**/rollout-*.jsonl` | 逐行流式读取 | Token 用量、turn、模型、reasoning effort |
-| `$CODEX_HOME/archived_sessions/**/rollout-*.jsonl` | 同上 | 已归档会话的用量 |
-| `$CODEX_HOME/state_5.sqlite` | 只读打开 | 会话元数据：标题、项目、模型、Subagent 派生关系 |
-| `$CODEX_HOME/session_index.jsonl` | 逐行流式读取 | 会话标题等索引信息 |
-| `$CODEX_HOME/.codex-global-state.json` | 只读 | Codex Desktop 的项目归属信息 |
-
-扫描时的安全约束：
-
-- 跳过所有符号链接，只接受常规文件；
-- 以文件的物理身份（设备 + inode）跟踪文件，改名、移动不触发重扫，截断或改写自动重建；
-- 只消费以换行符结尾的完整行，写入一半的行留待下一轮扫描，不会解析到脏数据。
-
-## 本地数据与配置
-
-Usagi 自身的数据全部落在本机：
-
-| 数据 | 位置 |
-| --- | --- |
-| SQLite 数据库 | macOS：`~/Library/Application Support/Usagi/usagi.sqlite`<br>Windows：`%LOCALAPPDATA%\Usagi\mu.sqlite3` |
-| Codex 数据目录（只读） | `$CODEX_HOME`，默认 `~/.codex`（Windows：`C:\Users\<user>\.codex`） |
-
-可用的环境变量：
-
-| 变量 | 作用 | 默认 |
-| --- | --- | --- |
-| `CODEX_HOME` | Codex 数据目录（非空时生效） | `~/.codex` |
-| `TZ` | 时间范围计算使用的时区 | 系统时区 |
-
-监听地址始终固定为 `127.0.0.1`，不会暴露到网络。正式版从 `37891–37922` 端口段选择首个可用端口，开发版从 `37991–38022` 端口段选择；服务地址通过对应模式的运行时描述符发布。正式版文件为 `~/Library/Application Support/Usagi/runtime.json`，开发版文件为同目录下的 `runtime-dev.json`。两种模式使用同一 `usagi.sqlite` 数据库。
-
-## Public API v1
-
-Usagi 提供只读、版本化的本机 Public API，供 PeekFlow 等同机应用读取已经处理好的 Usage、Codex Quota 与状态数据。Public API 与 Dashboard 自用的 Internal API 共用底层 Query / Aggregate 能力，但拥有独立稳定契约。
-
-Public API 根路径：
-
-~~~text
-http://127.0.0.1:<port>/api/v1
-~~~
-
-macOS 客户端从所选模式的运行时描述符取得 `base_url`，并连接其 `/api/v1`。首次自动发现优先使用正式版，已成功连接保持原模式。`GET /api/v1/info` 提供 `runtime_mode`，值为 `production` 或 `development`。首版提供 info、revision、revision SSE、status、Codex quota 与 usage summary；Usage 时间范围支持 today、yesterday、7d、30d、year 和 custom。
-
-完整架构、接口表、SSE/GET 协作方式与时间语义见 [Public API v1 产品需求文档](docs/Usagi_Public_API_v1_产品需求文档.md)。
-
-## 平台、更新与开发
-
-- 正式发布支持：`Windows 10/11 x64` 与 `macOS Apple Silicon arm64`。
-- Usagi 会在后台`每 4 小时`查询一次 GitHub Releases；也可以在 Dashboard 点击`检查更新`。发现新版本时会提供`版本升级`入口。
-- 正式安装包是自包含应用；普通用户`不需要安装 Rust`，也不需要单独安装`Node.js`、`SQLite`或`Visual Studio`。
-- 只有从源码开发或执行仓库验收时才需要相应开发工具。前端测试使用 `npm run test`，Rust 全量测试使用 `cargo test --locked`。
+设置 `USAGI_DISABLE_BROWSER=1` 可禁止启动默认浏览器，适用于自动化测试和本地开发。
 
 ## License
 

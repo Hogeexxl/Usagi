@@ -10,7 +10,7 @@ permissions:
 jobs:
   macos:
     name: macOS arm64
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GOTOOLCHAIN: local
     steps:
@@ -43,7 +43,7 @@ jobs:
         working-directory: frontend
         run: npm run check
       - name: Build production runtime
-        run: bash scripts/build_macos_runtime.sh
+        run: bash scripts/build_macos_runtime.sh 0.0.0-ci
       - name: Build Codex plugin
         run: bash scripts/build_codex_plugin.sh
       - name: Check Codex plugin package
@@ -54,8 +54,96 @@ jobs:
       - name: Run Go vet
         run: go vet ./...
       - name: Residue gate
-        run: bash scripts/ci/check_spec05_residue.sh
+        run: bash scripts/ci/check_repository_residue.sh
       - name: Runtime smoke
-        run: bash scripts/ci/smoke_macos_runtime.sh
+        run: bash scripts/ci/smoke_macos_runtime.sh dist/usagi 0.0.0-ci
       - name: Browser gate
         run: npm --prefix frontend run test:browser:gate
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+      - name: Verify exact Go version
+        shell: powershell
+        run: |
+          $Version = (go env GOVERSION).Trim()
+          if ($Version -cne "go1.27.1") {
+              throw "Go version is '$Version', want 'go1.27.1'"
+          }
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+      - name: Type-check frontend
+        working-directory: frontend
+        run: npm run check
+      - name: Install and verify NSIS 3.13.0
+        shell: powershell
+        run: |
+          choco install nsis --version=3.13.0 --no-progress --yes --force --allow-downgrade
+          if ($LASTEXITCODE -ne 0) {
+              throw "Chocolatey failed to install NSIS 3.13.0 (exit $LASTEXITCODE)"
+          }
+
+          $NsisDirectory = Join-Path ${env:ProgramFiles(x86)} "NSIS"
+          $Makensis = Join-Path $NsisDirectory "makensis.exe"
+          if (-not (Test-Path -LiteralPath $Makensis -PathType Leaf)) {
+              throw "makensis.exe was not installed at $Makensis"
+          }
+
+          $env:PATH = "$NsisDirectory;$env:PATH"
+          [System.IO.File]::AppendAllText(
+              $env:GITHUB_PATH,
+              $NsisDirectory + [Environment]::NewLine
+          )
+
+          $ActualVersion = (& $Makensis /VERSION 2>&1 | Out-String).Trim()
+          $NsisExitCode = $LASTEXITCODE
+          if ($NsisExitCode -ne 0 -or $ActualVersion -cne "v3.13") {
+              throw "makensis version is '$ActualVersion' (exit $NsisExitCode), want 'v3.13'"
+          }
+      - name: Build Windows runtime
+        shell: powershell
+        run: powershell -File scripts/build_windows_runtime.ps1 -Version 0.0.0-ci
+      - name: Check Windows PE
+        shell: powershell
+        run: powershell -File scripts/ci/check_windows_pe.ps1
+      - name: Package Windows installer
+        shell: powershell
+        run: powershell -File scripts/package_windows_installer.ps1 -Version 0.0.0-ci
+      - name: Smoke-test installed Windows runtime
+        shell: powershell
+        run: powershell -File scripts/ci/smoke_windows_installer.ps1 -InstallerPath dist\Usagi-v0.0.0-ci-windows-x64-setup.exe -ExpectedVersion 0.0.0-ci
+      - name: Smoke-test Windows Magpie integration
+        shell: powershell
+        run: powershell -File scripts/ci/smoke_windows_magpie.ps1 -InstallerPath dist\Usagi-v0.0.0-ci-windows-x64-setup.exe -ExpectedVersion 0.0.0-ci
+      - name: Build Windows Codex plugin
+        shell: powershell
+        run: powershell -File scripts/build_codex_plugin_windows.ps1
+      - name: Check Windows Codex plugin package
+        shell: powershell
+        run: powershell -File scripts/ci/check_codex_plugin_windows.ps1 -PluginRoot dist/codex-plugin/windows-x64/usagi -ExpectedVersion 0.2.6
+      - name: Run Go tests
+        run: go test ./...
+      - name: Run Go vet
+        run: go vet ./...
+      - name: Residue gate
+        shell: bash
+        run: bash scripts/ci/check_repository_residue.sh

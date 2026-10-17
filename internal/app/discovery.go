@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Hogeexxl/Usagi/internal/platform"
 )
 
 type RuntimeDescriptor struct {
@@ -17,15 +19,15 @@ type RuntimeDescriptor struct {
 }
 
 func RuntimeDescriptorPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dataRoot, err := platform.UsagiDataDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve user home directory: %w", err)
+		return "", err
 	}
-	return runtimeDescriptorPath(home), nil
+	return runtimeDescriptorPath(dataRoot), nil
 }
 
-func runtimeDescriptorPath(home string) string {
-	return filepath.Join(home, "Library", "Application Support", "Usagi", runtimeDescriptorName(runtimeMode()))
+func runtimeDescriptorPath(dataRoot string) string {
+	return filepath.Join(dataRoot, runtimeDescriptorName(runtimeMode()))
 }
 
 func runtimeDescriptorName(mode string) string {

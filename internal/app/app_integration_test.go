@@ -32,9 +32,8 @@ func (b appTestBrowser) Open(target string) error {
 }
 
 func TestRunUnavailableRuntimeRecoversQueryAndStops(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	descriptorPath := runtimeDescriptorPath(home)
+	dataRoot := t.TempDir()
+	descriptorPath := runtimeDescriptorPath(dataRoot)
 
 	now := time.Now().Truncate(time.Second)
 	point := magpie.UsagePoint{Label: now.Format(time.DateOnly), Time: now, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 42, Output: 7}}
@@ -84,7 +83,14 @@ func TestRunUnavailableRuntimeRecoversQueryAndStops(t *testing.T) {
 	runComplete := make(chan struct{})
 	go func() {
 		defer close(runComplete)
-		finished <- run(runCtx, Dependencies{RuntimeFactory: factory, Browser: browser, StaticFS: assets}, PortRange{First: 0, Count: 1})
+		finished <- run(runCtx, Dependencies{
+			RuntimeFactory: factory,
+			Browser:        browser,
+			StaticFS:       assets,
+			dataRootResolver: func() (string, error) {
+				return dataRoot, nil
+			},
+		}, PortRange{First: 0, Count: 1})
 	}()
 	t.Cleanup(func() {
 		cancelRun()
@@ -199,9 +205,8 @@ func TestRunUnavailableRuntimeRecoversQueryAndStops(t *testing.T) {
 }
 
 func TestRunExistingInstanceDoesNotCreateRuntime(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	descriptorPath := runtimeDescriptorPath(home)
+	dataRoot := t.TempDir()
+	descriptorPath := runtimeDescriptorPath(dataRoot)
 	if err := os.MkdirAll(filepath.Dir(descriptorPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +245,9 @@ func TestRunExistingInstanceDoesNotCreateRuntime(t *testing.T) {
 		},
 		Browser:  browser,
 		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("unused")}},
+		dataRootResolver: func() (string, error) {
+			return dataRoot, nil
+		},
 	}, PortRange{First: uint16(port), Count: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -259,25 +267,20 @@ func TestRunExistingInstanceDoesNotCreateRuntime(t *testing.T) {
 }
 
 func TestRunMovesToNextFixturePortAndDescriptor(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	dataRoot := t.TempDir()
 	ports := reserveTestPortRange(t, 4)
-	descriptorPath := runtimeDescriptorPath(home)
+	descriptorPath := runtimeDescriptorPath(dataRoot)
 
-	first := startIsolatedRun(t, ports)
+	first := startIsolatedRun(t, dataRoot, ports)
 	firstDescriptor := readRuntimeDescriptor(t, descriptorPath)
 	if firstDescriptor.RuntimeMode != runtimeMode() || firstDescriptor.BaseURL != first.baseURL {
 		t.Fatalf("first descriptor = %+v, want mode %s and base URL %s", firstDescriptor, runtimeMode(), first.baseURL)
 	}
-	directoryInfo, err := os.Stat(filepath.Dir(descriptorPath))
-	if err != nil {
-		t.Fatal(err)
+	if got := filepath.Dir(descriptorPath); got != dataRoot {
+		t.Fatalf("descriptor directory = %q, want injected data root %q", got, dataRoot)
 	}
-	if mode := directoryInfo.Mode().Perm(); mode != 0700 {
-		t.Fatalf("descriptor directory mode = %04o, want 0700", mode)
-	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(descriptorPath), "usagi.sqlite")); err != nil {
-		t.Fatalf("isolated database was not created under HOME: %v", err)
+	if _, err := os.Stat(filepath.Join(dataRoot, "usagi.sqlite")); err != nil {
+		t.Fatalf("isolated database was not created under the injected data root: %v", err)
 	}
 	firstPort := uint16(firstDescriptor.Port)
 	first.stop()
@@ -291,7 +294,7 @@ func TestRunMovesToNextFixturePortAndDescriptor(t *testing.T) {
 	}
 	defer occupied.Close()
 
-	second := startIsolatedRun(t, ports)
+	second := startIsolatedRun(t, dataRoot, ports)
 	secondDescriptor := readRuntimeDescriptor(t, descriptorPath)
 	if secondDescriptor.RuntimeMode != runtimeMode() || secondDescriptor.BaseURL != second.baseURL || secondDescriptor.Port == int(firstPort) {
 		t.Fatalf("second descriptor = %+v, want mode %s, base URL %s, and a new fixture port", secondDescriptor, runtimeMode(), second.baseURL)
@@ -307,7 +310,7 @@ type runningIsolatedApp struct {
 	stop    func()
 }
 
-func startIsolatedRun(t *testing.T, ports PortRange) runningIsolatedApp {
+func startIsolatedRun(t *testing.T, dataRoot string, ports PortRange) runningIsolatedApp {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -321,6 +324,9 @@ func startIsolatedRun(t *testing.T, ports PortRange) runningIsolatedApp {
 			RuntimeFactory: func() MagpieRuntime { return runtime },
 			Browser:        browser,
 			StaticFS:       fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("test dashboard")}},
+			dataRootResolver: func() (string, error) {
+				return dataRoot, nil
+			},
 		}, ports)
 	}()
 

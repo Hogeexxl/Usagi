@@ -16,6 +16,7 @@ import (
 
 	"github.com/Hogeexxl/Usagi/internal/api"
 	"github.com/Hogeexxl/Usagi/internal/database"
+	"github.com/Hogeexxl/Usagi/internal/platform"
 	"github.com/Hogeexxl/Usagi/internal/projection"
 	"github.com/Hogeexxl/Usagi/internal/query"
 )
@@ -26,10 +27,14 @@ type BrowserOpener interface {
 	Open(string) error
 }
 
+type dataRootResolver func() (string, error)
+
 type Dependencies struct {
 	RuntimeFactory RuntimeFactory
 	Browser        BrowserOpener
 	StaticFS       fs.FS
+
+	dataRootResolver dataRootResolver
 }
 
 func Run(ctx context.Context, dependencies Dependencies) error {
@@ -40,6 +45,17 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 	if dependencies.RuntimeFactory == nil || dependencies.Browser == nil || dependencies.StaticFS == nil {
 		return errors.New("app: runtime factory, browser, and static filesystem must be provided")
 	}
+	var err error
+	dataRoot := ""
+	if dependencies.dataRootResolver != nil {
+		dataRoot, err = dependencies.dataRootResolver()
+	} else {
+		dataRoot, err = platform.UsagiDataDir()
+	}
+	if err != nil {
+		return fmt.Errorf("app: resolve data root: %w", err)
+	}
+	descriptorPath := runtimeDescriptorPath(dataRoot)
 
 	bound, err := BindLoopback(ports)
 	if err != nil {
@@ -60,18 +76,13 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 	if err != nil {
 		return fmt.Errorf("app: resolve local time zone: %w", err)
 	}
-	descriptorPath, err := RuntimeDescriptorPath()
-	if err != nil {
-		return fmt.Errorf("app: resolve database directory: %w", err)
-	}
-	databaseDirectory := filepath.Dir(descriptorPath)
-	if err := os.MkdirAll(databaseDirectory, 0700); err != nil {
+	if err := os.MkdirAll(dataRoot, 0700); err != nil {
 		return fmt.Errorf("app: create database directory: %w", err)
 	}
-	if err := os.Chmod(databaseDirectory, 0700); err != nil {
+	if err := os.Chmod(dataRoot, 0700); err != nil {
 		return fmt.Errorf("app: set database directory permissions: %w", err)
 	}
-	db, err := database.Open(filepath.Join(databaseDirectory, "usagi.sqlite"))
+	db, err := database.Open(filepath.Join(dataRoot, "usagi.sqlite"))
 	if err != nil {
 		return fmt.Errorf("app: open database: %w", err)
 	}
@@ -128,7 +139,7 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 			runErr = fmt.Errorf("app: close Magpie supervisor: %w", err)
 		}
 		if descriptorWritten {
-			if err := RemoveRuntimeDescriptor(os.Getpid()); err != nil {
+			if err := removeRuntimeDescriptor(descriptorPath, os.Getpid(), runtimeMode()); err != nil {
 				slog.Error("remove runtime descriptor", "error", err)
 			}
 		}
@@ -144,7 +155,7 @@ func run(ctx context.Context, dependencies Dependencies, ports PortRange) (runEr
 		return fmt.Errorf("app: HTTP server stopped before health became ready: %w", err)
 	}
 
-	if err := WriteRuntimeDescriptor(RuntimeDescriptor{
+	if err := writeRuntimeDescriptor(descriptorPath, RuntimeDescriptor{
 		SchemaVersion: 1,
 		PID:           os.Getpid(),
 		Port:          int(port),

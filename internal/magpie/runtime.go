@@ -194,6 +194,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 
 	healthcheck := exec.CommandContext(ctx, binaryPath, "healthcheck")
+	configureCommand(healthcheck)
 	healthcheck.Env = os.Environ()
 	healthcheck.Stdout = io.Discard
 	healthcheck.Stderr = io.Discard
@@ -230,6 +231,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		"--addr",
 		baseAddr,
 	)
+	configureCommand(cmd)
 	cmd.Env = append(
 		os.Environ(),
 		"MAGPIE_WEB_KEY="+key,

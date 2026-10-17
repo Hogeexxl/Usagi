@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -37,6 +38,24 @@ func TestRuntimeClientUnavailableUntilReady(t *testing.T) {
 	}
 	if client, ok := r.Client(); ok || client != nil {
 		t.Fatalf("initial Client() = (%v, %t), want (nil, false)", client, ok)
+	}
+}
+
+func TestConfigureCommandPreservesProcessContract(t *testing.T) {
+	cmd := exec.Command("magpie", "healthcheck")
+	wantArgs := append([]string(nil), cmd.Args...)
+	cmd.Env = []string{"MAGPIE_ADDR=127.0.0.1:3425"}
+
+	configureCommand(cmd)
+
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("configureCommand() changed args to %v, want %v", cmd.Args, wantArgs)
+	}
+	if !reflect.DeepEqual(cmd.Env, []string{"MAGPIE_ADDR=127.0.0.1:3425"}) {
+		t.Fatalf("configureCommand() changed env to %v", cmd.Env)
+	}
+	if cmd.Stdout != nil || cmd.Stderr != nil {
+		t.Fatal("configureCommand() changed output streams")
 	}
 }
 
