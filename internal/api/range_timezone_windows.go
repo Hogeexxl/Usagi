@@ -14,6 +14,10 @@ import (
 
 var winRT = windows.NewLazySystemDLL("combase.dll")
 
+type winRTInterface struct {
+	vtable *[7]uintptr
+}
+
 func systemTimezoneFromOS() (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -89,9 +93,9 @@ func createHString(value string) (uintptr, error) {
 	return result, nil
 }
 
-func activationFactory(className uintptr) (uintptr, error) {
+func activationFactory(className uintptr) (*winRTInterface, error) {
 	classID := windows.GUID{Data1: 0x00000035, Data4: [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
-	var factory uintptr
+	var factory *winRTInterface
 	hr, _, _ := syscall.SyscallN(
 		winRT.NewProc("RoGetActivationFactory").Addr(),
 		className,
@@ -99,55 +103,58 @@ func activationFactory(className uintptr) (uintptr, error) {
 		uintptr(unsafe.Pointer(&factory)),
 	)
 	if err := checkHRESULT("RoGetActivationFactory", hr); err != nil {
-		return 0, err
+		return nil, err
 	}
 	return factory, nil
 }
 
-func activate(factory uintptr) (uintptr, error) {
-	var instance uintptr
+func activate(factory *winRTInterface) (*winRTInterface, error) {
+	var instance *winRTInterface
 	method := comMethod(factory, 6)
-	hr, _, _ := syscall.SyscallN(method, factory, uintptr(unsafe.Pointer(&instance)))
+	hr, _, _ := syscall.SyscallN(method, uintptr(unsafe.Pointer(factory)), uintptr(unsafe.Pointer(&instance)))
 	if err := checkHRESULT("IActivationFactory.ActivateInstance", hr); err != nil {
-		return 0, err
+		return nil, err
 	}
 	return instance, nil
 }
 
-func queryTimeZoneCalendar(instance uintptr) (uintptr, error) {
+func queryTimeZoneCalendar(instance *winRTInterface) (*winRTInterface, error) {
 	iid := windows.GUID{
 		Data1: 0xbb3c25e5,
 		Data2: 0x46cf,
 		Data3: 0x4317,
 		Data4: [8]byte{0xa3, 0xf5, 0x02, 0x62, 0x1a, 0xd5, 0x44, 0x78},
 	}
-	var result uintptr
+	var result *winRTInterface
 	method := comMethod(instance, 0)
-	hr, _, _ := syscall.SyscallN(method, instance, uintptr(unsafe.Pointer(&iid)), uintptr(unsafe.Pointer(&result)))
+	hr, _, _ := syscall.SyscallN(method, uintptr(unsafe.Pointer(instance)), uintptr(unsafe.Pointer(&iid)), uintptr(unsafe.Pointer(&result)))
 	if err := checkHRESULT("IUnknown.QueryInterface", hr); err != nil {
-		return 0, err
+		return nil, err
 	}
 	return result, nil
 }
 
-func calendarTimeZone(calendar uintptr) (string, error) {
+func calendarTimeZone(calendar *winRTInterface) (string, error) {
 	var value uintptr
 	method := comMethod(calendar, 6)
-	hr, _, _ := syscall.SyscallN(method, calendar, uintptr(unsafe.Pointer(&value)))
+	hr, _, _ := syscall.SyscallN(method, uintptr(unsafe.Pointer(calendar)), uintptr(unsafe.Pointer(&value)))
 	if err := checkHRESULT("ITimeZoneOnCalendar.GetTimeZone", hr); err != nil {
 		return "", err
 	}
 	defer deleteHString(value)
 	var length uint32
-	buffer, _, _ := syscall.SyscallN(
+	bufferAddress, _, _ := syscall.SyscallN(
 		winRT.NewProc("WindowsGetStringRawBuffer").Addr(),
 		value,
 		uintptr(unsafe.Pointer(&length)),
 	)
-	if buffer == 0 || length == 0 {
+	// SyscallN exposes native pointer returns as uintptr. Recover the pointer
+	// at this boundary; the deferred HSTRING deletion keeps its buffer alive.
+	buffer := *(**uint16)(unsafe.Pointer(&bufferAddress))
+	if buffer == nil || length == 0 {
 		return "", ErrLocalTimeUnavailable
 	}
-	return syscall.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(buffer)), int(length))), nil
+	return syscall.UTF16ToString(unsafe.Slice(buffer, int(length))), nil
 }
 
 func deleteHString(value uintptr) {
@@ -156,15 +163,14 @@ func deleteHString(value uintptr) {
 	}
 }
 
-func releaseCOM(value uintptr) {
-	if value != 0 {
-		syscall.SyscallN(comMethod(value, 2), value)
+func releaseCOM(value *winRTInterface) {
+	if value != nil {
+		syscall.SyscallN(comMethod(value, 2), uintptr(unsafe.Pointer(value)))
 	}
 }
 
-func comMethod(value uintptr, index int) uintptr {
-	vtable := *(*uintptr)(unsafe.Pointer(value))
-	return (*(*[7]uintptr)(unsafe.Pointer(vtable)))[index]
+func comMethod(value *winRTInterface, index int) uintptr {
+	return value.vtable[index]
 }
 
 func checkHRESULT(operation string, result uintptr) error {
