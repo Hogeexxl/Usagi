@@ -226,7 +226,12 @@ function Assert-SQLiteDatabase {
     $DatabasePath = Join-Path $DataRoot "usagi.sqlite"
     Assert-SmokeCondition (Test-Path -LiteralPath $DatabasePath -PathType Leaf) "SQLite database is missing from the user data root"
     $Bytes = New-Object byte[] 16
-    $Stream = [System.IO.File]::OpenRead($DatabasePath)
+    $Stream = [System.IO.File]::Open(
+        $DatabasePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite
+    )
     try {
         Assert-SmokeCondition ($Stream.Read($Bytes, 0, $Bytes.Length) -eq $Bytes.Length) "SQLite database header is incomplete"
     }
