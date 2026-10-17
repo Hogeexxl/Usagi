@@ -300,6 +300,9 @@ function Invoke-TemporaryUserWorker {
 
     $ResultPath = Join-Path $User.Root "worker-result.json"
     $LogPath = Join-Path $User.Root "worker.log"
+    $LaunchLogPath = Join-Path $User.Root "worker-launch.log"
+    $OutputPath = Join-Path $User.Root "worker-output.log"
+    $LauncherPath = Join-Path $User.Root "worker-launch.ps1"
     $ConfigPath = Join-Path $User.Root "worker-config.json"
     $Config = [ordered]@{
         scenario = $Scenario
@@ -311,10 +314,27 @@ function Invoke-TemporaryUserWorker {
         $Config[$Name] = $Parameters[$Name]
     }
     $Config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    @'
+$ErrorActionPreference = "Stop"
+$LaunchLog = Join-Path $PSScriptRoot "worker-launch.log"
+try {
+    "worker launcher started: $([DateTime]::UtcNow.ToString('o')) user=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) profile=$env:USERPROFILE" |
+        Set-Content -LiteralPath $LaunchLog -Encoding UTF8
+    $LASTEXITCODE = 0
+    & (Join-Path $PSScriptRoot "windows_smoke_worker.ps1") -ConfigPath (Join-Path $PSScriptRoot "worker-config.json") *> (Join-Path $PSScriptRoot "worker-output.log")
+    $WorkerExitCode = $LASTEXITCODE
+    "worker exit code: $WorkerExitCode" | Add-Content -LiteralPath $LaunchLog
+    exit $WorkerExitCode
+}
+catch {
+    $_.Exception.ToString() | Add-Content -LiteralPath $LaunchLog
+    exit 1
+}
+'@ | Set-Content -LiteralPath $LauncherPath -Encoding UTF8
 
     $TaskName = "UsagiSmoke-" + [Guid]::NewGuid().ToString("N")
     $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $WorkerPath, $ConfigPath
+    $Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $LauncherPath
     $Action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $Arguments -WorkingDirectory $User.Root
     $TaskUser = "$env:COMPUTERNAME\$($User.UserName)"
     $Settings = New-ScheduledTaskSettingsSet `
@@ -331,9 +351,12 @@ function Invoke-TemporaryUserWorker {
             -Password $User.PasswordText `
             -RunLevel Limited `
             -Force | Out-Null
+        $InitialTaskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
+        Write-Host "starting task $TaskName as $TaskUser (RunLevel Limited)"
         Start-ScheduledTask -TaskName $TaskName
 
         $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $StartDeadline = [DateTime]::UtcNow.AddSeconds(30)
         $SeenRunning = $false
         while ([DateTime]::UtcNow -lt $Deadline) {
             if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
@@ -352,19 +375,50 @@ function Invoke-TemporaryUserWorker {
             }
             $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
             if ($null -eq $Task) {
-                break
+                throw "temporary-user scheduled task disappeared: $TaskName"
             }
+            $TaskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
+            $TaskResult = [long]$TaskInfo.LastTaskResult
             if ($Task.State -eq "Running") {
                 $SeenRunning = $true
             }
-            elseif ($Task.State -eq "Ready" -and $SeenRunning) {
-                break
+            elseif ($Task.State -ne "Queued") {
+                # Scheduler status codes: running, not yet run, and queued are not failures.
+                if ($TaskResult -ne 0 -and $TaskResult -notin @(0x41301, 0x41303, 0x41325)) {
+                    throw ("temporary-user task failed to run or exited: State={0}, LastTaskResult=0x{1:X8} ({1}), LastRunTime={2:o}" -f $Task.State, $TaskResult, $TaskInfo.LastRunTime)
+                }
+                if ($SeenRunning -or $TaskInfo.LastRunTime -gt $InitialTaskInfo.LastRunTime) {
+                    if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
+                        continue
+                    }
+                    throw "temporary-user task finished without a worker result"
+                }
+            }
+            if (-not $SeenRunning -and [DateTime]::UtcNow -ge $StartDeadline) {
+                throw "temporary-user task did not start within 30 seconds"
             }
             Start-Sleep -Milliseconds 250
         }
 
         $Log = if (Test-Path -LiteralPath $LogPath) { Get-Content -LiteralPath $LogPath -Raw } else { "" }
         throw "temporary-user worker did not complete within $TimeoutSeconds seconds`n$Log"
+    }
+    catch {
+        $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $TaskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($null -ne $Task -and $null -ne $TaskInfo) {
+            Write-Host ("Scheduler diagnostic: Task={0}, State={1}, LastTaskResult=0x{2:X8} ({2}), LastRunTime={3:o}, MissedRuns={4}" -f $TaskName, $Task.State, [long]$TaskInfo.LastTaskResult, $TaskInfo.LastRunTime, $TaskInfo.NumberOfMissedRuns)
+        }
+        foreach ($DiagnosticPath in @($LaunchLogPath, $OutputPath, $LogPath, $ResultPath)) {
+            if (Test-Path -LiteralPath $DiagnosticPath -PathType Leaf) {
+                Write-Host "worker diagnostic: $DiagnosticPath"
+                Get-Content -LiteralPath $DiagnosticPath | Out-Host
+            }
+            else {
+                Write-Host "worker diagnostic missing: $DiagnosticPath"
+            }
+        }
+        throw
     }
     finally {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
