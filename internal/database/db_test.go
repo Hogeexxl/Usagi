@@ -4,19 +4,25 @@ import (
 	"context"
 	"database/sql"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestSchemaCreatesAndReopens(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "usagi.sqlite")
+	path := filepath.Join(t.TempDir(), "usagi #100%.sqlite")
 	wantTables := []string{"app_meta", "price_versions", "prices", "requests", "session_links", "sessions", "sync_days"}
 
 	for openNumber := range 2 {
 		db, err := Open(path)
 		if err != nil {
 			t.Fatalf("Open() error = %v", err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			_ = db.Close()
+			t.Fatalf("database was not created at the requested path: %v", err)
 		}
 
 		var version, revision, initialSync string
@@ -88,7 +94,7 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 
 func TestMigrationV1ToV4PreservesData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
-	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
 	if err != nil {
 		t.Fatalf("open legacy database: %v", err)
@@ -171,7 +177,7 @@ func TestMigrationV1ToV4PreservesData(t *testing.T) {
 
 func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi-v3.sqlite")
-	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
 	if err != nil {
 		t.Fatalf("open v3 fixture: %v", err)
@@ -248,7 +254,7 @@ func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 
 func TestMigrationV2ToV4QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
-	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
 	if err != nil {
 		t.Fatalf("open legacy database: %v", err)
@@ -377,7 +383,7 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 		t.Fatal("Open() error = nil, want schema migration failure")
 	}
 
-	fileURL := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	checkDB, err := sql.Open("sqlite", fileURL.String())
 	if err != nil {
 		t.Fatalf("open database after failed migration: %v", err)

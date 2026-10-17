@@ -22,7 +22,7 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("database: resolve path: %w", err)
 	}
 
-	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(absolutePath)}
+	dsn := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(absolutePath), "/")}
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "synchronous(FULL)")
