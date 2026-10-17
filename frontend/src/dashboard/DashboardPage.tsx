@@ -114,8 +114,23 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
           </header>
 
           <section className="dashboard-controls" aria-label="Dashboard 控制">
-            <div className="dashboard-controls-row">
-              <RangeSelector value={view.range} onChange={view.select_range} />
+            <div className="dashboard-controls-main">
+              <div className="dashboard-controls-row">
+                <div className="dashboard-range-scroll scrollbar-hide">
+                  <RangeSelector value={view.range} onChange={view.select_range} />
+                </div>
+                <Tabs
+                  className="dashboard-controls-toggle"
+                  value={metricView}
+                  onValueChange={(value) => setMetricView(value as "session" | "request")}
+                  variant="pill"
+                >
+                  <TabsList>
+                    <TabsTrigger value="session">会话</TabsTrigger>
+                    <TabsTrigger value="request">请求</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </div>
               <FilterControls
                 filters={view.filters}
                 options={view.filter_options}
@@ -126,14 +141,6 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 onClear={view.clear_filters}
                 onRetryOptions={view.retry_filter_options}
               />
-              <div className="ml-auto shrink-0">
-                <Tabs value={metricView} onValueChange={(value) => setMetricView(value as "session" | "request")} variant="pill">
-                  <TabsList>
-                    <TabsTrigger value="session">会话</TabsTrigger>
-                    <TabsTrigger value="request">请求</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              </div>
             </div>
             {loadError ? (
               <div className="mt-3 flex items-center gap-2 text-xs text-destructive" role="alert" aria-live="polite">

@@ -57,7 +57,7 @@ describe("ChartSection Spec05", () => {
       (child): child is HTMLElement => child instanceof HTMLElement && child.classList.contains("grid"),
     );
     expect(grids).toHaveLength(1);
-    expect(grids[0]).toHaveClass("grid", "grid-cols-2", "gap-4", "max-[1279px]:grid-cols-1");
+    expect(grids[0]).toHaveClass("grid", "grid-cols-2", "gap-4", "max-[1024px]:grid-cols-1");
     expect(grids[0].children).toHaveLength(2);
     expect(screen.getByRole("heading", { name: "Tool 使用分布" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "模型分布" })).not.toBeInTheDocument();

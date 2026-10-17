@@ -318,7 +318,7 @@ describe("MetricGrid Spec05", () => {
     render(<MetricGridFixture usage={usage} quota={quota} />);
     const card = cardByTitle("账户额度");
     const windowCard = within(screen.getByRole("group", { name: "账户额度卡片" })).getByText("Codex·Weekly").closest(".absolute") as HTMLElement;
-    expect(card).toHaveClass("h-[144px]", "w-[236px]");
+    expect(card).toHaveClass("h-[144px]", "w-full");
     expect(within(windowCard).getByLabelText("45%")).toBeInTheDocument();
     expect(within(windowCard).getByText(`下次重置：${formatQuotaResetTime(resetAt)}`)).toBeInTheDocument();
     const remainingBar = within(windowCard).getByLabelText("剩余与已使用配额");

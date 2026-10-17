@@ -29,10 +29,10 @@ type MetricGridProps = {
 type Focus = "input" | "cache_read" | "cache_write" | "output" | null;
 type CacheFocus = "cached" | "input" | "cache_write" | null;
 
-const CARD = "h-36 min-w-0 border border-border bg-card p-4 text-foreground";
+const CARD = "dashboard-metric-card h-36 min-w-0 border border-border bg-card p-4 text-foreground";
 const TITLE = "text-xs font-medium leading-4 text-foreground";
-const VALUE = "mt-2 text-[28px] font-semibold leading-8 tracking-tight text-foreground";
-const LEGEND = "h-4 text-xs leading-4 text-muted-foreground";
+const VALUE = "dashboard-metric-value mt-2 text-[28px] font-semibold leading-8 tracking-tight text-foreground";
+const LEGEND = "dashboard-metric-legend h-4 text-xs leading-4 text-muted-foreground";
 
 function CompactTicker({
   value,
@@ -85,7 +85,7 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
   const transition = reduce ? { duration: 0 } : { ease: EASE_OUT };
 
   return (
-    <TiltCard className={`${CARD} flex flex-col min-w-0 max-[1439px]:col-span-2 max-[767px]:col-span-1`}>
+    <TiltCard className={`${CARD} flex flex-col max-[1440px]:col-span-4 max-[1024px]:col-span-2`}>
       <div className={TITLE}>总 Token</div>
       <CompactTicker value={total} formatter={formatIntegerFull} />
       <div className="relative mt-1 h-[5px] overflow-hidden rounded-full bg-muted" aria-label="Token 分布：输入、缓存读、缓存写和输出">
@@ -114,7 +114,7 @@ export function TotalTokenMetric({ usage }: { usage: UsageDto }) {
           transition={transition}
         />
       </div>
-      <div className="mt-auto flex min-w-0 items-center gap-1 whitespace-nowrap">
+      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         {input !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("input")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("input")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#68c0e8]" /><span className="inline-flex h-4 items-center">输入</span><CompactTicker value={input} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button> : null}
@@ -145,7 +145,7 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
   const cacheWritePct = visibleTotal > 0 ? (cacheWrite / visibleTotal) * 100 : 0;
 
   return (
-    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+    <TiltCard glare={glare} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className={TITLE}>缓存命中</div>
       {rate === null ? (
         <div className={VALUE}>—</div>
@@ -157,7 +157,7 @@ export function CacheHitMetric({ usage, glare = true }: { usage: UsageDto; glare
         <motion.div className="absolute inset-y-0 bg-[#4057a5]" style={{ left: `${cachedPct}%`, width: `${inputPct}%` }} animate={{ opacity: focus === null || focus === "input" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
         <motion.div className="absolute inset-y-0" style={{ left: `${cachedPct + inputPct}%`, width: `${cacheWritePct}%`, backgroundColor: chartSeriesColor(3) }} animate={{ opacity: focus === null || focus === "cache_write" ? 1 : 0.3 }} transition={reduce ? { duration: 0 } : { ease: EASE_OUT }} />
       </motion.div>
-      <div className="mt-auto flex items-center gap-2 whitespace-nowrap">
+      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         {cached !== 0 ? <button type="button" className={`${LEGEND} flex items-center gap-1`} onPointerEnter={() => setFocus("cached")} onPointerLeave={() => setFocus(null)} onFocus={() => setFocus("cached")} onBlur={() => setFocus(null)}>
           <Dot className="bg-[#be506e]" /><span className="inline-flex h-4 items-center">缓存读</span><CompactTicker value={cached} formatter={formatIntegerFull} className="h-4 text-foreground" wrapperClassName="inline-flex h-4 items-center" />
         </button> : null}
@@ -178,7 +178,7 @@ export function RequestMetric({ metrics, glare = false }: { metrics: RequestMetr
   const retries = formatRequestCount(metrics.retried);
 
   return (
-    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+    <TiltCard glare={glare} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className={TITLE}>请求数</div>
       <CompactTicker value={metrics.calls} formatter={formatRequestCount} />
       <div className="mt-auto flex flex-col text-xs leading-4">
@@ -201,19 +201,19 @@ export function OutputSpeedMetric({ metrics, glare = false }: { metrics: Request
   const meanTtft = metrics.mean_ttft_seconds === null ? "—" : `${metrics.mean_ttft_seconds.toFixed(1)}s`;
 
   return (
-    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+    <TiltCard glare={glare} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className={TITLE}>输出速度</div>
       {hasSpeedSample ? (
         <>
-          <div className="mt-2 flex min-w-0 items-center gap-1">
+          <div className="dashboard-metric-value-row mt-2 flex min-w-0 items-center gap-1">
             <CompactTicker
               value={Math.round(metrics.output_speed!)}
               formatter={formatIntegerFull}
               tickerFormatter={(next) => formatIntegerFull(next).title}
-              className="text-[28px] font-semibold leading-8 tracking-tight text-foreground"
+              className="dashboard-metric-value text-[28px] font-semibold leading-8 tracking-tight text-foreground"
               wrapperClassName="inline-flex items-center"
             />
-            <span className="inline-flex h-[1.1em] items-center truncate text-[28px] font-normal leading-none tracking-tight text-muted-foreground">token/s</span>
+            <span className="dashboard-metric-value inline-flex h-[1.1em] items-center truncate text-[28px] font-normal leading-none tracking-tight text-muted-foreground">token/s</span>
           </div>
           <div className={`${LEGEND} mt-1`} title={`${speedSamples.title} 次计时`} aria-label={`${speedSamples.accessibleName} 次计时`}>
             {speedSamples.text} 次计时
@@ -234,7 +234,7 @@ export function CostMetric({ usage, glare = true }: { usage: UsageDto; glare?: b
   const costPerMillionTokens = formatCostPerMillionTokens(usage.total > 0 ? (usage.cost / usage.total) * 1_000_000 : null);
 
   return (
-    <TiltCard glare={glare} className={`${CARD} flex flex-col`}>
+    <TiltCard glare={glare} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className="flex items-center justify-between gap-2">
         <div className={TITLE}>等价费用</div>
         <Popover trigger="hover" side="bottom" align="end">
@@ -265,7 +265,7 @@ export function CostMetric({ usage, glare = true }: { usage: UsageDto; glare?: b
 export function SessionMetric({ count, median, p90 }: { count: number; median: number | null; p90: number | null }) {
   const percentileText = (value: number | null) => value === null ? "—" : formatIntegerFull(value).text;
   return (
-    <TiltCard glare={false} className={`${CARD} flex flex-col`}>
+    <TiltCard glare={false} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className={TITLE}>会话数</div>
       <CompactTicker value={count} formatter={formatIntegerFull} />
       <div className={`${LEGEND} mt-auto`} aria-label={`会话 Token 中位 ${percentileText(median)}，P90 ${percentileText(p90)}`}>
@@ -346,14 +346,12 @@ export function AccountQuotaCard({
   refreshing,
   refreshError,
   refreshAvailable,
-  wide = false,
 }: {
   quota: QuotaResponse;
   onRefresh: () => void;
   refreshing: boolean;
   refreshError: boolean;
   refreshAvailable: boolean;
-  wide?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -376,7 +374,7 @@ export function AccountQuotaCard({
       ref={shellRef}
       role="group"
       aria-labelledby="account-quota-title"
-      className={`relative h-[144px] ${wide ? "w-[304px]" : "w-[236px]"} overflow-visible text-foreground ${expanded ? "z-50" : "z-0"}`}
+      className={`dashboard-quota-shell relative h-[144px] w-full overflow-visible text-foreground max-[1440px]:col-span-2 max-[1024px]:col-span-1 ${expanded ? "z-50" : "z-0"}`}
       onPointerEnter={(event) => {
         if (hover.enter(event)) setExpanded(true);
       }}
@@ -393,7 +391,7 @@ export function AccountQuotaCard({
         setExpanded(false);
       }}
     >
-      <div className="absolute left-0 top-0 min-h-[144px] w-full overflow-visible rounded-3xl p-[10px] text-foreground">
+      <div className="dashboard-quota-inner absolute left-0 top-0 min-h-[144px] w-full overflow-visible rounded-3xl p-[10px] text-foreground">
         <motion.div
           aria-hidden
           layout="size"
@@ -416,17 +414,17 @@ export function AccountQuotaCard({
               <RefreshCw aria-hidden className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
             </Button>
           </div>
-          <div className={`mt-1 ${wide ? "w-[284px]" : "w-[216px]"}`}>
+          <div className="dashboard-quota-stack-wrap mt-1 w-full">
             {items.length > 0 ? (
               <NotificationStack
                 items={items}
                 expanded={expanded}
                 dismissRef={shellRef}
                 onExpandedChange={setExpanded}
-                className={`relative h-[100px] ${wide ? "w-[284px]" : "w-[216px]"} outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background`}
+                className="dashboard-quota-stack relative h-[100px] w-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               />
             ) : (
-              <div className="flex h-[100px] items-start pt-3 text-xs text-muted-foreground" aria-live="polite">{emptyMessage}</div>
+              <div className="dashboard-quota-empty flex h-[100px] items-start pt-3 text-xs text-muted-foreground" aria-live="polite">{emptyMessage}</div>
             )}
           </div>
         </div>
@@ -437,7 +435,7 @@ export function AccountQuotaCard({
 
 export function SkeletonCard({ wide = false, bar = false }: { wide?: boolean; bar?: boolean }) {
   return (
-    <div aria-hidden className={`h-36 animate-pulse rounded-2xl border border-border bg-card p-4 ${wide ? "min-w-0 max-[1439px]:col-span-2 max-[767px]:col-span-1" : ""}`}>
+    <div aria-hidden className={`dashboard-metric-card dashboard-metric-skeleton h-36 min-w-0 animate-pulse rounded-2xl border border-border bg-card p-4 ${wide ? "max-[1440px]:col-span-4 max-[1024px]:col-span-2" : "max-[1440px]:col-span-2 max-[1024px]:col-span-1"}`}>
       <div className="h-3 w-20 rounded bg-muted" />
       <div className="mt-2 h-8 w-28 rounded bg-muted" />
       {bar ? <div className="mt-1 h-[5px] rounded-full bg-muted" /> : null}
@@ -459,7 +457,7 @@ export const MetricGrid = memo(function MetricGrid({
   quotaRefreshAvailable,
 }: MetricGridProps) {
   return (
-    <div className={`grid gap-4 [grid-template-columns:minmax(0,1fr)_repeat(4,236px)] max-[1439px]:[grid-template-columns:minmax(0,1fr)_236px] max-[767px]:grid-cols-1`} aria-label={usage ? "KPI 指标" : "KPI 加载中"}>
+    <div className={`dashboard-metric-grid grid gap-4 [grid-template-columns:minmax(0,1fr)_repeat(4,236px)] max-[1440px]:[grid-template-columns:repeat(6,minmax(0,1fr))] max-[1024px]:grid-cols-2`} aria-label={usage ? "KPI 指标" : "KPI 加载中"}>
       {!usage ? (
         <>
           <SkeletonCard wide bar />

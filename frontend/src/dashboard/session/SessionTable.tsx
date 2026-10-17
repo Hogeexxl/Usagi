@@ -164,6 +164,11 @@ export function SessionTable({
       className={cn(
         "rounded-2xl [&>div:first-child]:overflow-x-auto [&>div:first-child]:overflow-y-hidden",
         (rows.length > 0 || loading) && "[&>div:first-child]:!h-auto",
+        // Mobile: bleed the card into the 16px page gutter (cell px-4 keeps text aligned) and
+        // fade both edges as a horizontal-scroll hint. Desktop keeps the inset card.
+        "max-md:relative max-md:-mx-4 max-md:w-[calc(100%+2rem)]",
+        "max-md:before:pointer-events-none max-md:before:absolute max-md:before:inset-y-0 max-md:before:left-0 max-md:before:z-20 max-md:before:w-6 max-md:before:bg-linear-to-r max-md:before:from-background max-md:before:to-background/0 max-md:before:content-['']",
+        "max-md:after:pointer-events-none max-md:after:absolute max-md:after:inset-y-0 max-md:after:right-0 max-md:after:z-20 max-md:after:w-6 max-md:after:bg-linear-to-l max-md:after:from-background max-md:after:to-background/0 max-md:after:content-['']",
       )}
       getRowProps={(item) => {
         const keyId = threadKeyId(item.thread.key);

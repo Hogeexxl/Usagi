@@ -601,8 +601,11 @@ test("C3 narrow viewport keeps chart and drawer within the screen while the tabl
 
   const kpiCards = page.getByLabel("KPI 指标").locator(":scope > *");
   await expect(kpiCards).toHaveCount(5);
-  const kpiColumns = await kpiCards.evaluateAll((nodes) => new Set(nodes.map((node) => Math.round(node.getBoundingClientRect().x))).size);
-  expect(kpiColumns).toBe(1);
+  const kpiLayout = await kpiCards.evaluateAll((nodes) => ({
+    columns: new Set(nodes.map((node) => Math.round(node.getBoundingClientRect().x))).size,
+    firstColumn: getComputedStyle(nodes[0]).gridColumn,
+  }));
+  expect(kpiLayout).toEqual({ columns: 2, firstColumn: "span 2 / span 2" });
   const chartCards = page.getByLabel("使用分布图表").locator("article");
   const chartBoxes = await chartCards.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect()));
   expect(chartBoxes[0].x).toBeCloseTo(chartBoxes[1].x, 0);

@@ -38,7 +38,7 @@ export const ChartSection = memo(function ChartSection({ view, tools }: { view: 
       className="[content-visibility:auto] [contain-intrinsic-size:520px]"
     >
       {view.error ? <div className="mb-3 text-xs text-destructive" role="status">图表数据加载失败</div> : null}
-      <div className="grid grid-cols-2 gap-4 max-[1279px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-4 max-[1024px]:grid-cols-1">
         <DistributionDonutCard modelItems={modelItems} projectItems={projectItems} />
         <ToolUsageCard view={tools} />
       </div>

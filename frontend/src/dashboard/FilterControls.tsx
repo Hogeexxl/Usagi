@@ -165,7 +165,7 @@ export function FilterControls({ filters, options, optionsLoading, optionsErrorC
   const rowClass = "flex min-h-9 w-full min-w-0 items-center gap-2 px-2 py-1.5";
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="scrollbar-hide flex flex-wrap items-center gap-2 max-[1440px]:min-w-0 max-[1440px]:flex-nowrap max-[1440px]:overflow-x-auto max-[1440px]:[&>*]:shrink-0">
       <MorphPopover>
           <MorphPopoverTrigger>
             <FilterTrigger label="Agent" count={filters.agents.length} icon={<SquareTerminal className="h-4 w-4" />} />

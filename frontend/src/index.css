@@ -63,6 +63,8 @@ input {
 
 .dashboard-content {
   min-height: 100vh;
+  max-width: 1440px;
+  margin-inline: auto;
   padding: 32px 16px 64px;
 }
 
@@ -90,11 +92,28 @@ input {
   min-width: 0;
 }
 
+.dashboard-controls-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .dashboard-controls-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.dashboard-range-scroll {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+}
+
+.dashboard-controls-toggle {
+  flex: 0 0 auto;
 }
 
 @media (min-width: 1280px) {
@@ -103,14 +122,77 @@ input {
   }
 }
 
-@media (max-width: 900px) {
-  .dashboard-header {
-    align-items: flex-start;
-    flex-direction: column;
+@media (min-width: 1024px) {
+  .dashboard-controls-main {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
   }
 
-  .dashboard-sync-group {
-    flex-wrap: wrap;
+  .dashboard-controls-row {
+    display: contents;
+  }
+
+  .dashboard-range-scroll {
+    flex: 0 1 auto;
+  }
+
+  .dashboard-controls-toggle {
+    order: 1;
+    margin-left: auto;
+  }
+}
+
+@media (width < 768px) {
+  .dashboard-metric-grid {
+    gap: 12px;
+  }
+
+  .dashboard-metric-grid > .dashboard-metric-card {
+    height: auto;
+    padding: 10px;
+  }
+
+  .dashboard-metric-grid > .dashboard-metric-skeleton {
+    min-height: 109px;
+  }
+
+  .dashboard-metric-grid .dashboard-metric-value.mt-2,
+  .dashboard-metric-grid .dashboard-metric-value-row {
+    margin-top: 4px;
+  }
+
+  .dashboard-metric-grid .dashboard-metric-value {
+    font-size: 24px;
+    line-height: 28px;
+  }
+
+  .dashboard-metric-grid .dashboard-metric-legend {
+    height: auto;
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .dashboard-metric-grid .dashboard-metric-legend .h-4 {
+    height: 14px;
+  }
+
+  .dashboard-metric-grid .dashboard-quota-shell {
+    height: 116px;
+  }
+
+  .dashboard-metric-grid .dashboard-quota-inner {
+    min-height: 116px;
+    padding: 2px 4px;
+  }
+
+  .dashboard-metric-grid .dashboard-quota-stack-wrap {
+    margin-top: 0;
+  }
+
+  .dashboard-metric-grid .dashboard-quota-stack,
+  .dashboard-metric-grid .dashboard-quota-empty {
+    height: 92px;
   }
 }
 

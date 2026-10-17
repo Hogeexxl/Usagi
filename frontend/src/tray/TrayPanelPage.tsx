@@ -131,7 +131,6 @@ export function TrayPanelView({ view, quota, stopping, onOpenDashboard, onStop }
           refreshing={quota.refreshing}
           refreshError={quota.refresh_error}
           refreshAvailable={quota.refresh_available}
-          wide
         />
         {view.metrics === null ? (
           <>

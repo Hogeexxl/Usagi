@@ -75,13 +75,14 @@ function ModelReceipt({ item, showCompaction }: { item: SessionModelEffortDto; s
 
 function ChildReceipt({ item, timezone }: { item: SessionThreadDto; timezone: string }) {
   const time = formatSessionTimeWithSeconds(item.last_usage_ms === 0 ? null : item.last_usage_ms, timezone);
+  const title = formatSessionTitle(item.title);
   return (
     <div>
       <dl className="grid grid-cols-[72px_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2 text-sm">
         <dt className="whitespace-nowrap text-muted-foreground">id</dt>
         <dd className="min-w-0 break-all text-right tabular-nums text-foreground">{formatSessionIdForDisplay(item.key.agent, item.key.thread_id)}</dd>
         <dt className="whitespace-nowrap text-muted-foreground">Title</dt>
-        <dd className="min-w-0 break-words text-right text-foreground">{formatSessionTitle(item.title)}</dd>
+        <dd className="min-w-0 truncate text-right text-foreground" title={title}>{title}</dd>
         <div className="col-span-2 flex min-w-0 items-baseline justify-between gap-4">
           <dt className="shrink-0 whitespace-nowrap text-muted-foreground">Last Active</dt>
           <dd className="min-w-0 text-right tabular-nums text-foreground" title={time.title}>{time.text}</dd>
