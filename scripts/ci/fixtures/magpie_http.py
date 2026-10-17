@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import pathlib
+import sys
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,13 @@ now = dt.datetime.now().astimezone().replace(microsecond=0)
 now_text = now.isoformat()
 day = now.date().isoformat()
 key = os.environ["MAGPIE_WEB_KEY"]
+print(
+    f"fixture startup: python={sys.version!r} executable={sys.executable!r} "
+    f"now={now_text} TZ={os.environ.get('TZ')!r} "
+    f"block_daily={os.environ.get('USAGI_MAGPIE_BLOCK_DAILY')!r}",
+    file=sys.stderr,
+    flush=True,
+)
 
 row = {
     "t": now_text,
@@ -47,6 +55,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
     def reply(self, status, value=None, headers=None):
+        parsed = urlparse(self.path)
+        print(
+            f"fixture response: path={parsed.path} status={status}",
+            file=sys.stderr,
+            flush=True,
+        )
         body = b"" if value is None else json.dumps(value).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
@@ -61,6 +75,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        print(
+            f"fixture request: path={parsed.path} "
+            f"period={params.get('period')} limit={params.get('limit')} "
+            f"cookie_matches={self.headers.get('Cookie') == f'magpie-web={key}'}",
+            file=sys.stderr,
+            flush=True,
+        )
         if parsed.path == "/" and params.get("k") == [key]:
             self.reply(200, {}, {"Set-Cookie": f"magpie-web={key}; Path=/; HttpOnly"})
             return

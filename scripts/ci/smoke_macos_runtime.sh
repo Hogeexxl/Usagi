@@ -39,6 +39,29 @@ runtime_running() {
 
 cleanup() {
 	local status=$?
+	if [[ "$status" -ne 0 ]]; then
+		local diagnostic_log
+		for diagnostic_log in "$TMP_ROOT"/*.log "$FIXTURE_DIR"/*.log; do
+			if [[ -f "$diagnostic_log" ]]; then
+				printf '\n--- smoke diagnostic: %s ---\n' "$diagnostic_log" >&2
+				cat "$diagnostic_log" >&2 || true
+			fi
+		done
+		if [[ -s "$ACTIVE_DESCRIPTOR" ]]; then
+			"$SMOKE_PYTHON" - "$ACTIVE_DESCRIPTOR" <<'PY' >&2 || true
+import json
+import sys
+import urllib.request
+
+with open(sys.argv[1], encoding="utf-8") as descriptor_file:
+    descriptor = json.load(descriptor_file)
+print("smoke descriptor:", descriptor, flush=True)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(descriptor["base_url"] + "/api/status", timeout=3) as response:
+    print("smoke runtime status:", response.read().decode("utf-8"), flush=True)
+PY
+		fi
+	fi
 	if [[ -n "$RUNTIME_PID" ]]; then
 		if runtime_running "$RUNTIME_PID" && [[ -s "$ACTIVE_DESCRIPTOR" ]]; then
 			"$SMOKE_PYTHON" - "$ACTIVE_DESCRIPTOR" <<'PY' >/dev/null 2>&1 || true
@@ -112,7 +135,7 @@ case "$1" in
 		;;
 	web)
 		shift
-		exec "$USAGI_MAGPIE_PYTHON" "$USAGI_MAGPIE_FIXTURE_SCRIPT" "$@"
+		exec "$USAGI_MAGPIE_PYTHON" "$USAGI_MAGPIE_FIXTURE_SCRIPT" "$@" 2>>"$USAGI_MAGPIE_FIXTURE_DIR/fixture-stderr.log"
 		;;
 	*)
 		exit 2
