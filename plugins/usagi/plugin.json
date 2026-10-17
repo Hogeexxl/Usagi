@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "usagi",
+  "version": "0.2.6",
+  "description": "Local AI usage dashboard for Codex Desktop.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Usagi",
+        "logo": "./assets/sidebar.svg"
+      }
+    }
+  }
+}

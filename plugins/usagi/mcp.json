@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "usagi": {
+      "type": "stdio",
+      "command": "./bin/usagi-codex-plugin",
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

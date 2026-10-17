@@ -1,7 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { App } from "@modelcontextprotocol/ext-apps";
 import { describe, expect, it, vi } from "vitest";
 
-import type { UsagiClient } from "../data/usagiClient";
+import { usagiClient, type UsagiClient } from "../data/usagiClient";
+import * as revisionFeedModule from "../data/revisionFeed";
+import { serviceClient } from "../data/serviceClient";
 import type {
   DashboardFilters,
   ModelDistributionResponse,
@@ -132,15 +135,17 @@ function clientWith(overrides: Partial<UsagiClient> = {}): UsagiClient {
   };
 }
 
-function renderDashboard(client: UsagiClient) {
-  return render(
+function renderDashboard(client?: UsagiClient) {
+  const eventSourceFactory = vi.fn(() => ({ onerror: null, onmessage: null, close: vi.fn() }));
+  const rendered = render(
     <ThemeProvider>
       <DashboardPage options={{
         client,
-        eventSourceFactory: () => ({ onerror: null, onmessage: null, close: vi.fn() }),
+        eventSourceFactory,
       }} />
     </ThemeProvider>,
   );
+  return { ...rendered, eventSourceFactory };
 }
 
 function deferred<T>() {
@@ -150,6 +155,108 @@ function deferred<T>() {
 }
 
 describe("DashboardPage Spec05 shared sessions snapshot", () => {
+  it("keeps the default Browser theme control working through ThemeProvider", () => {
+    renderDashboard(clientWith());
+    const initiallyDark = document.documentElement.classList.contains("dark");
+    const toggle = screen.getByRole("button", {
+      name: initiallyDark ? "Switch to light mode" : "Switch to dark mode",
+    });
+    expect(toggle).toBeVisible();
+
+    fireEvent.click(toggle);
+    expect(document.documentElement.classList.contains("dark")).toBe(!initiallyDark);
+    fireEvent.click(screen.getByRole("button", {
+      name: initiallyDark ? "Switch to dark mode" : "Switch to light mode",
+    }));
+    expect(document.documentElement.classList.contains("dark")).toBe(initiallyDark);
+    expect(toggle).toHaveAccessibleName(initiallyDark ? "Switch to light mode" : "Switch to dark mode");
+  });
+
+  it("defaults to HTTP clients and SSE without calling the MCP App bridge", async () => {
+    const responses: Record<string, unknown> = {
+      "/api/quota": { reading: false, items: [] },
+      "/api/usage/filter-options": { data_revision: 1, agents: [], models: [], projects: [] },
+      "/api/usage/sessions": sessions,
+      "/api/usage/model-distribution": models,
+      "/api/usage/projects": projects,
+      "/api/usage/tools": { days: 1, calls: 0, top: [] },
+      "/api/status": status,
+      "/api/revision": { data_revision: 1, status_revision: 1 },
+      "/api/service": { state: "running" },
+      "/api/service/stop": { state: "stopped" },
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input), "http://usagi.test").pathname;
+      if (!(path in responses)) throw new Error(`Unexpected Browser request: ${path}`);
+      return new Response(JSON.stringify(responses[path]), {
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const getSessions = vi.spyOn(usagiClient, "getSessions");
+    const getRevision = vi.spyOn(usagiClient, "getRevision");
+    const getState = vi.spyOn(serviceClient, "getState");
+    const stop = vi.spyOn(serviceClient, "stop");
+    const createFeed = vi.spyOn(revisionFeedModule, "createRevisionFeed");
+    const callServerTool = vi.spyOn(App.prototype, "callServerTool")
+      .mockRejectedValue(new Error("Browser must not call the MCP App bridge"));
+    const rendered = renderDashboard();
+
+    expect(await screen.findByText("Session Alpha")).toBeInTheDocument();
+    expect(getSessions).toHaveBeenCalled();
+    expect(getRevision).toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^\/api\/usage\/sessions\?/),
+      expect.objectContaining({ method: "GET", credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith("/api/revision", expect.objectContaining({ method: "GET" }));
+    expect(createFeed).toHaveBeenCalledTimes(1);
+    expect(createFeed).toHaveBeenCalledWith(expect.objectContaining({ client: undefined, mode: "sse" }));
+    expect(rendered.eventSourceFactory).toHaveBeenCalledTimes(1);
+    expect(rendered.eventSourceFactory).toHaveBeenCalledWith("/api/events");
+
+    const stopButton = screen.getByRole("button", { name: "停止服务" });
+    await waitFor(() => expect(stopButton).toBeEnabled());
+    expect(getState).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("/api/service", expect.objectContaining({ method: "GET" }));
+    fireEvent.click(stopButton);
+    expect(await screen.findByText("服务已停止")).toBeInTheDocument();
+    expect(stopButton).toBeDisabled();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("/api/service/stop", expect.objectContaining({
+      method: "POST",
+      headers: { Accept: "application/json", "X-Usagi-Request": "1" },
+    }));
+    expect(callServerTool).not.toHaveBeenCalled();
+    rendered.unmount();
+  });
+
+  it("renders without ThemeProvider when the toggle is hidden and owns its poll feed", async () => {
+    const createFeed = vi.spyOn(revisionFeedModule, "createRevisionFeed");
+    const disposeFeed = vi.spyOn(revisionFeedModule.RevisionFeed.prototype, "dispose");
+    const client = clientWith();
+    const rendered = render(
+      <DashboardPage options={{
+        client,
+        revisionMode: "poll",
+        pollIntervalMs: 5000,
+        showThemeToggle: false,
+      }} />,
+    );
+
+    expect(await screen.findByText("Session Alpha")).toBeInTheDocument();
+    expect(rendered.container.querySelector(".dashboard-shell")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Switch to (dark|light) mode$/ })).not.toBeInTheDocument();
+    expect(createFeed).toHaveBeenCalledTimes(1);
+    expect(createFeed).toHaveBeenCalledWith(expect.objectContaining({
+      client,
+      mode: "poll",
+      pollIntervalMs: 5000,
+    }));
+
+    rendered.unmount();
+    expect(disposeFeed).toHaveBeenCalledTimes(1);
+  });
+
   it("defaults to sessions and preserves date, filters, and dashboard content when toggled", async () => {
     const client = clientWith({
       filterOptions: vi.fn(async () => ({

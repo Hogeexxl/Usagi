@@ -1,12 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Moon, RefreshCw, Sun } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 
 import { createRevisionFeed, type RevisionFeed } from "../data/revisionFeed";
 import type { ServiceClient } from "../data/serviceClient";
-import { ActionSwapIcon } from "../ui/beui/action-swap";
 import { Button } from "../ui/beui/button";
 import { Tabs, TabsList, TabsTrigger } from "../ui/beui/tabs";
-import { useThemeToggle } from "../ui/beui/theme-toggle";
 import { ChartSection } from "./charts/ChartSection";
 import { useDashboardChartsController } from "./charts/useDashboardChartsController";
 import { useToolUsageController } from "./charts/useToolUsageController";
@@ -16,6 +14,7 @@ import { RangeSelector } from "./RangeSelector";
 import { DASHBOARD_SCOPE_POLICIES, resolveDashboardScope } from "./scope";
 import { ServiceButton } from "./ServiceButton";
 import { SessionSection } from "./session/SessionSection";
+import { DashboardThemeToggle } from "./DashboardThemeToggle";
 import { createAgentDisplayLookup } from "./shared/agentDisplay";
 import { useSessionDetailController } from "./session/useSessionDetailController";
 import { useSessionTableController } from "./session/useSessionTableController";
@@ -30,7 +29,11 @@ function loadErrorMessage(loadState: string): string | null {
   return loadState === "error" ? "数据加载失败" : null;
 }
 
-type DashboardPageOptions = DashboardControllerOptions & { serviceClient?: ServiceClient };
+type DashboardPageOptions = DashboardControllerOptions & {
+  revisionMode?: "sse" | "poll";
+  serviceClient?: ServiceClient;
+  showThemeToggle?: boolean;
+};
 
 export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
   const [metricView, setMetricView] = useState<"session" | "request">("session");
@@ -40,11 +43,11 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
       client: options?.client,
       eventSourceFactory: options?.eventSourceFactory,
       pollIntervalMs: options?.pollIntervalMs,
+      mode: options?.revisionMode ?? "sse",
     });
   }
   const view = useDashboardController({ ...options, revisionFeed: feedRef.current });
   const quota = useDashboardQuotaController({ client: options?.client });
-  const themeToggle = useThemeToggle({ variant: "circle-blur", start: "bottom-up" });
   const sessionScope = resolveDashboardScope(DASHBOARD_SCOPE_POLICIES.sessions, view.range, view.filters);
   const sessions = useSessionTableController(
     sessionScope.range,
@@ -105,20 +108,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
               >
                 <RefreshCw className={`h-4 w-4${refreshAnimating ? " animate-spin" : ""}`} />
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={themeToggle.mounted && themeToggle.isDark ? "Switch to light mode" : "Switch to dark mode"}
-                onClick={themeToggle.toggle}
-              >
-                {themeToggle.mounted ? (
-                  <ActionSwapIcon value={themeToggle.isDark ? "dark" : "light"} animation="blur" className="h-4 w-4">
-                    {themeToggle.isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                  </ActionSwapIcon>
-                ) : (
-                  <span className="h-4 w-4" aria-hidden="true" />
-                )}
-              </Button>
+              {options?.showThemeToggle !== false ? <DashboardThemeToggle /> : null}
               <ServiceButton client={options?.serviceClient} />
             </div>
           </header>

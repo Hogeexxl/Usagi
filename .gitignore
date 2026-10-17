@@ -17,3 +17,7 @@ frontend/dist/
 *.saved
 .DS_Store
 /RTK.md
+/frontend/dist-codex/
+/plugins/usagi/app/
+/plugins/usagi/bin/
+/frontend/test-results/

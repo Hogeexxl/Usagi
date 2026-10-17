@@ -44,6 +44,10 @@ jobs:
         run: npm run check
       - name: Build production runtime
         run: bash scripts/build_macos_runtime.sh
+      - name: Build Codex plugin
+        run: bash scripts/build_codex_plugin.sh
+      - name: Check Codex plugin package
+        run: bash scripts/ci/check_codex_plugin.sh
       # The Go suite serves the production Vite assets, so it runs after the build.
       - name: Run Go tests
         run: go test ./...

@@ -122,4 +122,94 @@ describe("RevisionFeed", () => {
     feed.dispose();
     resolveFallback({ data_revision: 80, status_revision: 12 });
   });
+
+  it("poll mode fetches immediately on subscribe and never creates an EventSource", async () => {
+    vi.useFakeTimers();
+    const sourceFactory = vi.fn(() => eventSource());
+    const client = clientWith({ getRevision: vi.fn(async () => ({ data_revision: 3, status_revision: 4 })) });
+    const feed = createRevisionFeed({ client, eventSourceFactory: sourceFactory, mode: "poll", pollIntervalMs: 5_000 });
+    const listener = vi.fn();
+
+    const unsubscribe = feed.subscribe(listener);
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+    expect(sourceFactory).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(feed.get_snapshot()).toEqual({ data_revision: 3, status_revision: 4 }));
+    expect(listener).toHaveBeenCalledWith({ kind: "revision", tuple: { data_revision: 3, status_revision: 4 } });
+
+    unsubscribe();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+  });
+
+  it("poll mode repeats at the interval and accepts a lower authoritative tuple as an epoch reset", async () => {
+    vi.useFakeTimers();
+    const sourceFactory = vi.fn(() => eventSource());
+    const client = clientWith({
+      getRevision: vi.fn()
+        .mockResolvedValueOnce({ data_revision: 80, status_revision: 12 })
+        .mockResolvedValueOnce({ data_revision: 0, status_revision: 0 }),
+    });
+    const feed = createRevisionFeed({ client, eventSourceFactory: sourceFactory, mode: "poll", pollIntervalMs: 5_000 });
+    const listener = vi.fn();
+    feed.subscribe(listener);
+    await vi.waitFor(() => expect(feed.get_snapshot()).toEqual({ data_revision: 80, status_revision: 12 }));
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(feed.get_snapshot()).toEqual({ data_revision: 0, status_revision: 0 }));
+    expect(listener).toHaveBeenLastCalledWith({ kind: "epoch_reset", tuple: { data_revision: 0, status_revision: 0 } });
+    expect(client.getRevision).toHaveBeenCalledTimes(2);
+    expect(sourceFactory).not.toHaveBeenCalled();
+    feed.dispose();
+  });
+
+  it("dispose clears the poll timer and prevents later client calls", async () => {
+    vi.useFakeTimers();
+    const client = clientWith({ getRevision: vi.fn(async () => ({ data_revision: 1, status_revision: 1 })) });
+    const feed = createRevisionFeed({ client, mode: "poll", pollIntervalMs: 5_000 });
+    feed.subscribe(vi.fn());
+    await vi.waitFor(() => expect(feed.get_snapshot()).toEqual({ data_revision: 1, status_revision: 1 }));
+
+    feed.dispose();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts polling only after the first successful read and retries through retry_now after failure", async () => {
+    vi.useFakeTimers();
+    const client = clientWith({
+      getRevision: vi.fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValue({ data_revision: 3, status_revision: 4 }),
+    });
+    const feed = createRevisionFeed({ client, mode: "poll", pollIntervalMs: 5_000 });
+    const onError = vi.fn();
+    feed.subscribe(vi.fn(), onError);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+
+    feed.retry_now();
+    await vi.waitFor(() => expect(feed.get_snapshot()).toEqual({ data_revision: 3, status_revision: 4 }));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.getRevision).toHaveBeenCalledTimes(3);
+    feed.dispose();
+  });
+
+  it("does not start a poll timer when the first read resolves after dispose", async () => {
+    vi.useFakeTimers();
+    let resolveFirst!: (value: RevisionTuple) => void;
+    const client = clientWith({
+      getRevision: vi.fn(() => new Promise<RevisionTuple>((resolve) => { resolveFirst = resolve; })),
+    });
+    const feed = createRevisionFeed({ client, mode: "poll", pollIntervalMs: 5_000 });
+    feed.subscribe(vi.fn());
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+
+    feed.dispose();
+    resolveFirst({ data_revision: 3, status_revision: 4 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(feed.get_snapshot()).toBeNull();
+    expect(client.getRevision).toHaveBeenCalledTimes(1);
+  });
 });

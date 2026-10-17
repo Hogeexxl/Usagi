@@ -13,6 +13,7 @@ export type RevisionFeedOptions = {
   client?: UsagiClient;
   eventSourceFactory?: (url: string) => RevisionEventSource;
   pollIntervalMs?: number;
+  mode?: "sse" | "poll";
 };
 
 export type RevisionFeedEvent =
@@ -49,6 +50,7 @@ export class RevisionFeed {
   private readonly client: UsagiClient;
   private readonly eventSourceFactory: (url: string) => RevisionEventSource;
   private readonly pollIntervalMs: number;
+  private readonly mode: "sse" | "poll";
   private readonly listeners = new Map<RevisionListener, RevisionErrorListener | undefined>();
   private eventSource: RevisionEventSource | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -60,6 +62,7 @@ export class RevisionFeed {
     this.client = options.client ?? usagiClient;
     this.eventSourceFactory = options.eventSourceFactory ?? defaultEventSourceFactory;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL;
+    this.mode = options.mode ?? "sse";
   }
 
   get_snapshot(): RevisionTuple | null {
@@ -85,6 +88,10 @@ export class RevisionFeed {
   }
 
   private startTransport(): void {
+    if (this.mode === "poll") {
+      void this.fetchRevision(false);
+      return;
+    }
     if (this.eventSource) return;
     const onRevision = (event: Event | MessageEvent<string>) => {
       const raw = "data" in event ? event.data : undefined;
@@ -142,6 +149,7 @@ export class RevisionFeed {
       const tuple = await this.client.getRevision(controller.signal);
       if (controller.signal.aborted || generation !== this.revisionGeneration) return;
       this.accept(tuple, false);
+      if (this.mode === "poll") this.startPolling();
     } catch (error: unknown) {
       if (controller.signal.aborted || generation !== this.revisionGeneration) return;
       for (const onError of this.listeners.values()) onError?.(error);

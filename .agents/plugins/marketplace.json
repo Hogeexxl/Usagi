@@ -1,0 +1,20 @@
+{
+  "name": "usagi-local",
+  "interface": {
+    "displayName": "Usagi Local"
+  },
+  "plugins": [
+    {
+      "name": "usagi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/usagi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
