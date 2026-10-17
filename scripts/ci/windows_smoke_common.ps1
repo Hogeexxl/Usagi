@@ -157,7 +157,13 @@ function Start-UsagiRuntime {
     }
     try {
         Write-Host "starting runtime: executable=$ExecutablePath cwd=$WorkingDirectory"
-        $Process = Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory -PassThru
+        $LogPrefix = Join-Path $PSScriptRoot ("runtime-" + [Guid]::NewGuid().ToString("N"))
+        $StdoutPath = "$LogPrefix.stdout.log"
+        $StderrPath = "$LogPrefix.stderr.log"
+        Write-Host "runtime stdout: $StdoutPath"
+        Write-Host "runtime stderr: $StderrPath"
+        $Process = Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory `
+            -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
         $ProcessHandle = $Process.Handle
         return $Process
     }
@@ -372,7 +378,11 @@ function Invoke-TemporaryUserWorker {
         }
     }
     catch {
-        foreach ($DiagnosticPath in @($OutputPath, $ErrorPath, $LogPath, $ResultPath)) {
+        $DiagnosticPaths = @($OutputPath, $ErrorPath, $LogPath, $ResultPath) + @(
+            Get-ChildItem -LiteralPath $User.Root -Filter "runtime-*.log" -File |
+                Select-Object -ExpandProperty FullName
+        )
+        foreach ($DiagnosticPath in $DiagnosticPaths) {
             if (Test-Path -LiteralPath $DiagnosticPath -PathType Leaf) {
                 Write-Host "worker diagnostic: $DiagnosticPath"
                 Get-Content -LiteralPath $DiagnosticPath | Out-Host
