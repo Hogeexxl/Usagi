@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -59,6 +58,17 @@ func TestBindLoopbackUsesProductionDefaultPortWhenAvailable(t *testing.T) {
 }
 
 func TestBindLoopbackFallsBackTo37892WhenProductionDefaultIsOccupied(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	duplicate, bindErr := net.Listen("tcp", occupied.Addr().String())
+	if bindErr == nil {
+		_ = duplicate.Close()
+		t.Fatal("binding an occupied address succeeded")
+	}
+
 	fallback := &fakeListener{addr: fakeAddr("127.0.0.1:37892")}
 	var scanned []uint16
 	var extraListeners []*fakeListener
@@ -73,7 +83,7 @@ func TestBindLoopbackFallsBackTo37892WhenProductionDefaultIsOccupied(t *testing.
 		}
 		scanned = append(scanned, uint16(port))
 		if port == 37891 {
-			return nil, syscall.EADDRINUSE
+			return nil, bindErr
 		}
 		if port == 37892 {
 			return fallback, nil
@@ -113,7 +123,7 @@ func TestBindLoopbackScansFullRangeAndKeepsFirstListener(t *testing.T) {
 		case 40001:
 			return first, nil
 		case 40002:
-			return nil, syscall.EADDRINUSE
+			return nil, addressInUseError
 		case 40003:
 			if first.closeCalls != 0 {
 				t.Fatal("first listener was closed before the scan completed")
@@ -153,7 +163,7 @@ func TestBindLoopbackFindsExistingAfterFreeDefault(t *testing.T) {
 		if port == 40101 {
 			return first, nil
 		}
-		return nil, syscall.EADDRINUSE
+		return nil, addressInUseError
 	}, func(port uint16) bool { return port == 40102 })
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +183,7 @@ func TestBindLoopbackReportsNoAvailablePort(t *testing.T) {
 	var scanned int
 	result, err := bindLoopback(PortRange{First: 40201, Count: 32}, func(_, _ string) (net.Listener, error) {
 		scanned++
-		return nil, syscall.EADDRINUSE
+		return nil, addressInUseError
 	}, func(uint16) bool { return false })
 	if !errors.Is(err, ErrNoAvailablePort) {
 		t.Fatalf("BindLoopback error = %v, want ErrNoAvailablePort", err)

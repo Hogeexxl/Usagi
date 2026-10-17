@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -49,7 +48,7 @@ func bindLoopback(
 			continue
 		}
 
-		if errors.Is(err, syscall.EADDRINUSE) {
+		if errors.Is(err, addressInUseError) {
 			if probe(port) {
 				if firstAvailable != nil {
 					if closeErr := firstAvailable.Close(); closeErr != nil {
