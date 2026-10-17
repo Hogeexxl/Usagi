@@ -95,7 +95,7 @@ function Restore-InstallDirectoryAcl {
 }
 
 function Deny-InstallDirectoryWrites {
-    & icacls.exe $Script:InstallDir /deny "$($env:USERNAME):(OI)(CI)(W)" /T /C | Out-Null
+    & icacls.exe $Script:InstallDir /deny "$($env:USERNAME):(OI)(CI)(WD,AD,WEA,WA)" /T /C | Out-Null
     Assert-SmokeCondition ($LASTEXITCODE -eq 0) "failed to make install directory read-only"
 
     $ProbePath = Join-Path $Script:InstallDir "write-probe.txt"

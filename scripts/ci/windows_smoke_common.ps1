@@ -156,7 +156,22 @@ function Start-UsagiRuntime {
         [Environment]::SetEnvironmentVariable($Name, [string]$Environment[$Name], "Process")
     }
     try {
-        return Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory -PassThru
+        Write-Host "starting runtime: executable=$ExecutablePath cwd=$WorkingDirectory"
+        $Process = Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory -PassThru
+        $ProcessHandle = $Process.Handle
+        return $Process
+    }
+    catch {
+        Write-Host "runtime launch failed: executable=$ExecutablePath cwd=$WorkingDirectory"
+        $LaunchException = $_.Exception
+        while ($null -ne $LaunchException) {
+            Write-Host "$($LaunchException.GetType().FullName): $($LaunchException.Message)"
+            if ($LaunchException -is [System.ComponentModel.Win32Exception]) {
+                Write-Host "Win32 NativeErrorCode: $($LaunchException.NativeErrorCode)"
+            }
+            $LaunchException = $LaunchException.InnerException
+        }
+        throw
     }
     finally {
         foreach ($Name in $Environment.Keys) {
@@ -327,6 +342,7 @@ function Invoke-TemporaryUserWorker {
         $Worker = Start-Process -FilePath $PowerShellPath -ArgumentList $Arguments `
             -Credential $Credential -LoadUserProfile -WorkingDirectory $User.Root `
             -RedirectStandardOutput $OutputPath -RedirectStandardError $ErrorPath -PassThru
+        $WorkerHandle = $Worker.Handle
         Write-Host "worker PID: $($Worker.Id)"
 
         $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -338,16 +354,21 @@ function Invoke-TemporaryUserWorker {
             throw "temporary-user worker PID $($Worker.Id) did not complete within $TimeoutSeconds seconds"
         }
         $Worker.WaitForExit()
-        Write-Host "worker exit code: $($Worker.ExitCode)"
-        if ($Worker.ExitCode -ne 0) {
-            throw "temporary-user worker exited with code $($Worker.ExitCode)"
-        }
+        $WorkerExitCode = $Worker.ExitCode
+        $ExitCodeText = if ($null -eq $WorkerExitCode) { "<null>" } else { [string]$WorkerExitCode }
+        Write-Host "worker exit code: $ExitCodeText"
         if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-            throw "temporary-user worker exited without a result"
+            throw "temporary-user worker exited without a result (exit code $ExitCodeText)"
         }
         $Result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
         if (-not $Result.success) {
-            throw "temporary-user worker failed: $($Result.error)"
+            throw "temporary-user worker failed (exit code $ExitCodeText): $($Result.error)"
+        }
+        if ($null -eq $WorkerExitCode) {
+            throw "temporary-user worker exit code is unavailable despite retaining its process handle"
+        }
+        if ($WorkerExitCode -ne 0) {
+            throw "temporary-user worker exited with code $WorkerExitCode"
         }
     }
     catch {
