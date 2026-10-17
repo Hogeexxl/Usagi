@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Write-Host "worker started: PID=$PID user=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) inherited profile=$env:USERPROFILE"
 . (Join-Path $PSScriptRoot "windows_smoke_common.ps1")
 
 $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -16,6 +17,7 @@ $Script:ActiveBaseUrl = ""
 $Script:InstallDir = ""
 $Script:UninstallerPath = ""
 $Script:PortBlocker = $null
+$Script:ProfileVerified = $false
 
 function Assert-TemporaryUserIdentity {
     $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -23,16 +25,41 @@ function Assert-TemporaryUserIdentity {
     Assert-SmokeCondition ($Identity.Name -ieq "$env:COMPUTERNAME\$($Config.username)") "worker is not running as $($Config.username)"
     Assert-SmokeCondition (-not $Principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) "temporary user unexpectedly has administrator rights"
 
-    $ExpectedProfile = Join-Path $env:SystemDrive "Users\$($Config.username)"
-    Assert-SmokeCondition ($env:USERPROFILE -ieq $ExpectedProfile) "worker did not load the temporary user's real profile"
-    $KnownLocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    Assert-SmokeCondition (-not [string]::IsNullOrWhiteSpace($KnownLocalAppData)) "LocalApplicationData Known Folder is empty"
-    Assert-SmokeCondition ($KnownLocalAppData.StartsWith($ExpectedProfile, [StringComparison]::OrdinalIgnoreCase)) "LocalApplicationData is outside the temporary user's profile"
-    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        Assert-SmokeCondition ($env:LOCALAPPDATA -ieq $KnownLocalAppData) "LOCALAPPDATA does not match the Known Folder"
+    # PowerShell 5.1 compiles Add-Type through the process temp directory.
+    $env:TEMP = $PSScriptRoot
+    $env:TMP = $PSScriptRoot
+    # Resolve with the worker's token, independently of inherited runner environment variables.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SmokeKnownFolders {
+    [DllImport("shell32.dll")]
+    private static extern int SHGetKnownFolderPath(ref Guid folder, uint flags, IntPtr token, out IntPtr path);
+    public static string GetPath(string folderId) {
+        Guid folder = new Guid(folderId);
+        IntPtr path;
+        Marshal.ThrowExceptionForHR(SHGetKnownFolderPath(ref folder, 0, IntPtr.Zero, out path));
+        try { return Marshal.PtrToStringUni(path); }
+        finally { Marshal.FreeCoTaskMem(path); }
     }
+}
+'@
+    $KnownProfile = [SmokeKnownFolders]::GetPath("5E6C858F-0E22-4760-9AFE-EA3317B67173")
+    $KnownLocalAppData = [SmokeKnownFolders]::GetPath("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
+    $KnownRoamingAppData = [SmokeKnownFolders]::GetPath("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
+    $ExpectedProfile = Join-Path $env:SystemDrive "Users\$($Config.username)"
+    Assert-SmokeCondition ($KnownProfile -ieq $ExpectedProfile) "Known Folder profile is not the temporary user's real profile"
+    Assert-SmokeCondition ($KnownLocalAppData.StartsWith($KnownProfile + "\", [StringComparison]::OrdinalIgnoreCase)) "LocalApplicationData is outside the temporary user's profile"
+    Assert-SmokeCondition ($KnownRoamingAppData.StartsWith($KnownProfile + "\", [StringComparison]::OrdinalIgnoreCase)) "RoamingApplicationData is outside the temporary user's profile"
+    $env:USERPROFILE = $KnownProfile
+    $env:LOCALAPPDATA = $KnownLocalAppData
+    $env:APPDATA = $KnownRoamingAppData
+    Assert-SmokeCondition ($env:USERPROFILE -ieq $ExpectedProfile) "worker did not load the temporary user's real profile"
+    Assert-SmokeCondition ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData) -ieq $KnownLocalAppData) "LocalApplicationData does not match the worker token's Known Folder"
+    Assert-SmokeCondition ($env:LOCALAPPDATA -ieq $KnownLocalAppData) "LOCALAPPDATA does not match the Known Folder"
     Write-Host "profile: $env:USERPROFILE"
     Write-Host "LocalApplicationData: $KnownLocalAppData"
+    $Script:ProfileVerified = $true
 }
 
 function Get-SmokeDataRoot {
@@ -404,6 +431,9 @@ function Invoke-MagpieScenario {
 }
 
 function Invoke-WorkerCleanup {
+    if (-not $Script:ProfileVerified) {
+        return
+    }
     try {
         if ($null -ne $Script:ActiveRuntime) {
             Stop-UsagiRuntime -RuntimeProcess $Script:ActiveRuntime -BaseUrl $Script:ActiveBaseUrl -AllowForce
