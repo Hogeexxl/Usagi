@@ -201,6 +201,23 @@ export function TableHeader<T>({
           const active = sort?.key === column.key;
           const isDragging = dragKey === column.key;
           const isActive = activeColumn === column.key;
+          const sortIndicator = (
+            <motion.span
+              aria-hidden
+              className="inline-flex shrink-0"
+              animate={{
+                rotate: active && sort?.direction === "desc" ? 180 : 0,
+                opacity: active ? 1 : 0.35,
+              }}
+              transition={
+                reduce
+                  ? { duration: 0 }
+                  : { duration: 0.18, ease: EASE_OUT }
+              }
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+            </motion.span>
+          );
           return (
             <th
               key={column.key}
@@ -224,7 +241,7 @@ export function TableHeader<T>({
                   : undefined
               }
               className={cn(
-                "group sticky top-0 z-10 border-border border-b bg-muted p-0 font-medium text-muted-foreground",
+                "group sticky top-0 z-10 border-border border-b bg-muted p-0 text-xs font-medium text-muted-foreground",
                 "data-[drop=true]:before:absolute data-[drop=true]:before:inset-y-0 data-[drop=true]:before:left-0 data-[drop=true]:before:w-0.5 data-[drop=true]:before:bg-primary",
                 "data-[dropend=true]:after:absolute data-[dropend=true]:after:inset-y-0 data-[dropend=true]:after:right-0 data-[dropend=true]:after:w-0.5 data-[dropend=true]:after:bg-primary",
               )}
@@ -267,27 +284,14 @@ export function TableHeader<T>({
                     type="button"
                     onClick={() => onToggleSort(column.key)}
                     className={cn(
-                      "flex h-full min-w-0 flex-1 select-none items-center gap-1 px-4 transition-colors hover:text-foreground",
+                      "flex h-full min-w-0 flex-1 select-none items-center gap-0.5 px-4 transition-colors hover:text-foreground",
                       alignFlex(column.align),
                       active && "text-foreground",
                     )}
                   >
-                    <span className="truncate">{column.header}</span>
-                    <motion.span
-                      aria-hidden
-                      className="inline-flex shrink-0"
-                      animate={{
-                        rotate: active && sort?.direction === "desc" ? 180 : 0,
-                        opacity: active ? 1 : 0.35,
-                      }}
-                      transition={
-                        reduce
-                          ? { duration: 0 }
-                          : { duration: 0.18, ease: EASE_OUT }
-                      }
-                    >
-                      <ChevronUp className="h-3.5 w-3.5" />
-                    </motion.span>
+                    {column.align === "right" ? sortIndicator : null}
+                    <span className="min-w-0 truncate">{column.header}</span>
+                    {column.align === "right" ? null : sortIndicator}
                   </button>
                 ) : onColumnRename ? (
                   <input

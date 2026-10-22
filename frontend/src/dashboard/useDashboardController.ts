@@ -18,6 +18,14 @@ import {
   type FilterOptionsResponse,
   UsagiClientError,
 } from "../data/types";
+import {
+  EMPTY_DASHBOARD_FILTERS,
+  hasActiveDashboardFilters,
+  readDashboardFilterPersistence,
+  selectedFilterOptions,
+  writeDashboardFilterPersistence,
+  type PersistedFilterOptions,
+} from "./filterPersistence";
 
 export type LoadState = "initial" | "loading" | "ready" | "refreshing" | "error";
 
@@ -36,6 +44,7 @@ export type DashboardViewModel = {
   filter_options: FilterOptionsResponse | null;
   filter_options_loading: boolean;
   filter_options_error_code?: string;
+  persisted_filter_options: PersistedFilterOptions;
   agentFilterActive: boolean;
   modelFilterActive: boolean;
   projectFilterActive: boolean;
@@ -81,10 +90,10 @@ function clientErrorCode(error: unknown): string {
   return error instanceof UsagiClientError ? error.code : "HTTP_ERROR";
 }
 
-const EMPTY_FILTERS: DashboardFilters = { agents: [], models: [], projects: [] };
-
 export function useDashboardController(options: DashboardControllerOptions = {}): DashboardViewModel {
   const client = options.client ?? usagiClient;
+  const [initialPersistence] = useState(readDashboardFilterPersistence);
+  const filterLabelSeedRef = useRef(initialPersistence.options);
   const ownedRevisionFeedRef = useRef<RevisionFeed | null>(null);
   const revisionFeedRef = useRef<RevisionFeed | null>(null);
   if (!revisionFeedRef.current) {
@@ -98,7 +107,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
 
   const [state, setState] = useState<InternalState>({
     range: { key: "today" },
-    filters: { agents: [], models: [], projects: [] },
+    filters: initialPersistence.filters,
     snapshot: null,
     load_state: "initial",
     refreshing: false,
@@ -124,6 +133,12 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     const value = typeof next === "function" ? next(stateRef.current) : next;
     stateRef.current = value;
     setState(value);
+  }, []);
+
+  const persistFilters = useCallback((filters: DashboardFilters) => {
+    const options = selectedFilterOptions(filters, stateRef.current.filter_options, filterLabelSeedRef.current);
+    filterLabelSeedRef.current = options;
+    writeDashboardFilterPersistence({ filters, options });
   }, []);
 
   const loadSessions = useCallback((range: DashboardRange, filters: DashboardFilters): Promise<void> => {
@@ -177,7 +192,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
   // on screen stay until the new ones arrive, so menus never flash or nag.
   const loadFilterOptions = useCallback((): Promise<void> => {
     const range = stateRef.current.range;
-    const key = dashboardQueryKey(range, EMPTY_FILTERS);
+    const key = dashboardQueryKey(range, EMPTY_DASHBOARD_FILTERS);
     filterOptionsAbortRef.current?.abort();
     const controller = new AbortController();
     filterOptionsAbortRef.current = controller;
@@ -200,6 +215,12 @@ export function useDashboardController(options: DashboardControllerOptions = {})
           return;
         }
         filterOptionsCacheRef.current.set(key, response);
+        const filters = stateRef.current.filters;
+        const options = selectedFilterOptions(filters, response, filterLabelSeedRef.current);
+        filterLabelSeedRef.current = options;
+        if (hasActiveDashboardFilters(filters)) {
+          writeDashboardFilterPersistence({ filters, options });
+        }
         commit((current) => ({
           ...current,
           filter_options: response,
@@ -316,6 +337,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
 
   const selectFilters = useCallback((filters: DashboardFilters) => {
     const canonical = canonicalDashboardFilters(filters);
+    persistFilters(canonical);
     const range = stateRef.current.range;
     const key = dashboardQueryKey(range, canonical);
     if (key === dashboardQueryKey(range, stateRef.current.filters)) {
@@ -332,7 +354,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
       error_code: undefined,
     }));
     void loadSessions(range, canonical);
-  }, [commit, loadSessions]);
+  }, [commit, loadSessions, persistFilters]);
 
   const clearFilters = useCallback(() => {
     selectFilters({ agents: [], models: [], projects: [] });
@@ -398,6 +420,7 @@ export function useDashboardController(options: DashboardControllerOptions = {})
     filter_options: state.filter_options,
     filter_options_loading: state.filter_options_loading,
     filter_options_error_code: state.filter_options_error_code,
+    persisted_filter_options: initialPersistence.options,
     agentFilterActive,
     modelFilterActive,
     projectFilterActive,

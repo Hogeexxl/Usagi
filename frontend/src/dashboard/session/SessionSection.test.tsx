@@ -222,7 +222,7 @@ describe("SessionSection v0.2.0", () => {
       "最后活动",
       "会话",
       "项目",
-      "合计 Token",
+      "Token",
       "缓存率",
       "合计费用",
     ]);
@@ -234,8 +234,9 @@ describe("SessionSection v0.2.0", () => {
       expect(label).toHaveClass("px-4");
     }
 
-    for (const label of ["合计 Token", "缓存率", "合计费用"]) {
+    for (const label of ["Token", "缓存率", "合计费用"]) {
       expect(screen.getByRole("button", { name: label })).toHaveClass("justify-end");
+      expect(screen.getByRole("button", { name: label }).lastElementChild).toHaveTextContent(label);
     }
 
     const cells = rendered.container.querySelectorAll(
@@ -260,12 +261,12 @@ describe("SessionSection v0.2.0", () => {
     expect(table.querySelector("thead tr")).toHaveStyle({ height: "48px" });
     expect(table.querySelector("tbody tr")).toHaveStyle({ height: "64px" });
     expect(Array.from(table.querySelectorAll("col"), (column) => column.style.width)).toEqual([
-      "128px",
+      "100px",
       "",
       "150px",
-      "150px",
-      "127px",
-      "120px",
+      "100px",
+      "100px",
+      "100px",
       "0px",
     ]);
   });
@@ -321,7 +322,7 @@ describe("SessionSection v0.2.0", () => {
       "最后活动",
       "会话",
       "项目",
-      "合计 Token",
+      "Token",
       "缓存率",
       "合计费用",
     ]);
@@ -329,12 +330,12 @@ describe("SessionSection v0.2.0", () => {
     const table = rendered.container.querySelector("table");
     if (!table) throw new Error("Session table not found");
     expect(Array.from(table.querySelectorAll("col"), (col) => col.style.width)).toEqual([
-      "128px",
+      "100px",
       "",
       "150px",
-      "150px",
-      "127px",
-      "120px",
+      "100px",
+      "100px",
+      "100px",
       "0px",
     ]);
 
@@ -527,6 +528,17 @@ describe("SessionSection v0.2.0", () => {
 
     render(<SessionSection view={view({ rows: [], total_items: 0, total_pages: 0 })} />);
     expect(screen.getByText("当前时间范围暂无 Session 记录")).toBeInTheDocument();
+  });
+
+  it("explains when active filters leave the current range empty", () => {
+    render(<SessionSection view={view({
+      rows: [],
+      total_items: 0,
+      total_pages: 0,
+      filters: { agents: ["codex"], models: [], projects: [] },
+    })} />);
+
+    expect(screen.getByText("当前筛选在当前时间范围暂无 Session 记录")).toBeInTheDocument();
   });
 
   it("keeps bounded refresh and page errors with retry controls", () => {

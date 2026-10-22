@@ -3,6 +3,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const REVISION = 100;
 const FIXTURE_NOW_MS = 1_800_000_000_000;
+const DASHBOARD_FILTERS_STORAGE_KEY = "usagi.dashboard.filters.v1";
 
 type RangeKey = "today" | "yesterday" | "7d" | "30d" | "year" | "custom";
 type UsageKind = "base" | "model" | "filtered" | "main" | "sub" | "empty";
@@ -256,11 +257,11 @@ async function illegalStorageWrites(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
+  await page.addInitScript((filterStorageKey) => {
     const originalSetItem = Storage.prototype.setItem;
     Object.defineProperty(window, "__miniIllegalStorageWrites", { value: 0, writable: true, configurable: true });
     Storage.prototype.setItem = function patchedSetItem(key: string, value: string) {
-      if (key === "usagi.theme") {
+      if (key === "usagi.theme" || key === filterStorageKey) {
         originalSetItem.call(this, key, value);
         return;
       }
@@ -268,7 +269,7 @@ test.beforeEach(async ({ page }) => {
       target.__miniIllegalStorageWrites += 1;
       throw new Error(`unexpected persistent browser state: ${key}`);
     };
-  });
+  }, DASHBOARD_FILTERS_STORAGE_KEY);
 });
 
 test("runtime database returns DATA_LOADING, then complete offline session data", async ({ page }) => {
@@ -444,6 +445,29 @@ test("C1 desktop layout keeps the five KPIs, session table, and two chart cards 
   const paginationBox = await sessionSection.getByText("1 / 1", { exact: true }).boundingBox();
   expect((paginationBox?.x ?? 0)).toBeGreaterThan((sessionHeadingBox?.x ?? 0));
   expect(paginationBox?.y).toBeCloseTo(sessionHeadingBox?.y ?? 0, 0);
+  const sessionTable = sessionSection.getByRole("table");
+  expect(await sessionTable.locator("col").evaluateAll((columns) => columns.map((column) => column.style.width))).toEqual([
+    "100px",
+    "",
+    "150px",
+    "100px",
+    "100px",
+    "100px",
+    "0px",
+  ]);
+  const numericRightEdges = await sessionTable.evaluate((table) => {
+    const headers = [...table.querySelectorAll("thead th")];
+    const cells = [...(table.querySelector("tbody tr[data-session-thread-key-id]")?.querySelectorAll("td") ?? [])];
+    return [3, 4, 5].map((index) => ({
+      header: headers[index]?.querySelector("button")?.lastElementChild?.getBoundingClientRect().right,
+      value: cells[index]?.querySelector(".tabular-nums")?.getBoundingClientRect().right,
+    }));
+  });
+  for (const edge of numericRightEdges) {
+    expect(edge.header).toBeDefined();
+    expect(edge.value).toBeDefined();
+    expect(Math.abs(edge.header! - edge.value!)).toBeLessThan(0.5);
+  }
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1512);
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(1512);
   expect(await illegalStorageWrites(page)).toBe(0);
@@ -494,6 +518,49 @@ test("KPI view toggle replaces the trailing cards and preserves date, filters, a
   await expect(page.getByRole("group", { name: "账户额度", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "7d" })).toHaveAttribute("aria-selected", "true");
   expect(sessionRequests).toHaveLength(sessionRequestCount);
+});
+
+test("dashboard filters survive reload and clear removes the saved selection", async ({ page }) => {
+  await routeStableDashboardData(page);
+  await page.unroute("**/api/usage/filter-options*");
+  await page.route("**/api/usage/filter-options*", (route) => {
+    const range = rangeFrom(route.request().url());
+    return json(route, {
+      data_revision: REVISION,
+      agents: range === "7d"
+        ? [{ agent: "claude", display_name: "Claude Code" }]
+        : [{ agent: "codex", display_name: "Codex" }],
+      models: [],
+      projects: [],
+    });
+  });
+  await page.goto("/");
+  await waitForDashboard(page);
+
+  await page.getByRole("button", { name: "Agent筛选，全部" }).click();
+  await page.getByRole("checkbox", { name: "Codex" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Agent筛选，已选1项" })).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), DASHBOARD_FILTERS_STORAGE_KEY)).toContain('"codex"');
+
+  await page.getByRole("tab", { name: "7d" }).click();
+  await page.getByRole("button", { name: "Agent筛选，已选1项" }).click();
+  await expect(page.getByRole("checkbox", { name: "Codex" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText("当前范围无数据")).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "Claude Code" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.reload();
+  await waitForDashboard(page);
+  await expect(page.getByRole("button", { name: "Agent筛选，已选1项" })).toBeVisible();
+  await page.getByRole("button", { name: "Agent筛选，已选1项" }).click();
+  await expect(page.getByRole("checkbox", { name: "Codex" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "清除筛选" }).click();
+  await expect(page.getByRole("button", { name: "Agent筛选，全部" })).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), DASHBOARD_FILTERS_STORAGE_KEY)).toBeNull();
+  expect(await illegalStorageWrites(page)).toBe(0);
 });
 
 test("C2 filters, merged charts, independent Tool range, sorting, and details remain interactive", async ({ page }) => {
@@ -621,6 +688,10 @@ test("C3 narrow viewport keeps chart and drawer within the screen while the tabl
   expect(scrollState.scrollWidth).toBeGreaterThan(scrollState.clientWidth);
   expect(["auto", "scroll"]).toContain(scrollState.overflowX);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  await page.getByRole("tab", { name: "请求" }).click();
+  expect(await page.getByText("token/s", { exact: true }).evaluate((node) => getComputedStyle(node).fontSize)).toBe("12px");
+  await page.getByRole("tab", { name: "会话" }).click();
 
   await page.locator("tr[data-session-thread-key-id]").first().click();
   const dialog = page.getByRole("dialog", { name: "Session 详情" });

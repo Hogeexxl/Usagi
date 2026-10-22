@@ -136,6 +136,7 @@ export function DashboardPage({ options }: { options?: DashboardPageOptions }) {
                 options={view.filter_options}
                 optionsLoading={view.filter_options_loading}
                 optionsErrorCode={view.filter_options_error_code}
+                savedOptions={view.persisted_filter_options}
                 anyFilterActive={view.anyFilterActive}
                 onChange={view.select_filters}
                 onClear={view.clear_filters}

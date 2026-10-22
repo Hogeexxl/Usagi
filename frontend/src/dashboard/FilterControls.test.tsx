@@ -6,6 +6,7 @@ import type {
   FilterOptionsResponse,
 } from "../data/types";
 import { FilterControls } from "./FilterControls";
+import type { PersistedFilterOptions } from "./filterPersistence";
 
 const modelOptions: FilterOptionsResponse = {
   data_revision: 1,
@@ -47,6 +48,7 @@ type RenderOverrides = {
   options?: FilterOptionsResponse | null;
   optionsLoading?: boolean;
   optionsErrorCode?: string;
+  savedOptions?: PersistedFilterOptions;
   anyFilterActive?: boolean;
   onChange?: (filters: DashboardFilters) => void;
   onClear?: () => void;
@@ -60,6 +62,7 @@ function renderControls(overrides: RenderOverrides = {}) {
     optionsLoading: false,
 
     optionsErrorCode: undefined,
+    savedOptions: undefined,
     anyFilterActive: false,
     onChange: vi.fn(),
     onClear: vi.fn(),
@@ -238,6 +241,32 @@ describe("FilterControls", () => {
     const agents = await openPopover("Agent筛选，已选1项");
     expect(within(agents).getByRole("checkbox", { name: "Codex" })).toHaveAttribute("aria-checked", "true");
     expect(within(agents).getByText("当前范围暂无 Agent")).toBeInTheDocument();
+  });
+
+  it("uses persisted labels before the current range options arrive", async () => {
+    renderControls({
+      options: null,
+      optionsLoading: true,
+      anyFilterActive: true,
+      filters: {
+        agents: ["codex"],
+        models: [{ provider_id: "openai", model: "gpt-5" }],
+        projects: [{ kind: "project", path: "/work/Usagi" }],
+      },
+      savedOptions: {
+        agents: [{ agent: "codex", display_name: "Codex" }],
+        models: [{ provider_id: "openai", model: "gpt-5", provider_name: "OpenAI" }],
+        projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+      },
+    });
+
+    expect(within(await openPopover("Agent筛选，已选1项")).getByRole("checkbox", { name: "Codex" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(within(await openPopover("模型筛选，已选1项")).getByRole("checkbox", { name: "gpt-5 · OpenAI" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(within(await openPopover("项目筛选，已选1项")).getByRole("checkbox", { name: "Usagi" })).toBeInTheDocument();
   });
 
 

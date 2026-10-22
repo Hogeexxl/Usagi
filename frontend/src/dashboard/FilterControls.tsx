@@ -16,6 +16,7 @@ import { Checkbox } from "../ui/beui/checkbox";
 import { MorphPopover, MorphPopoverContent, MorphPopoverTrigger } from "../ui/beui/morph-popover";
 import { cn } from "../ui/lib/cn";
 import { SPRING_LAYOUT } from "../ui/lib/ease";
+import type { PersistedFilterOptions } from "./filterPersistence";
 import { projectDisplay, projectKey, projectTitle, type ProjectLike } from "./shared/projectDisplay";
 
 type FilterControlsProps = {
@@ -23,6 +24,7 @@ type FilterControlsProps = {
   options: FilterOptionsResponse | null;
   optionsLoading: boolean;
   optionsErrorCode?: string;
+  savedOptions?: PersistedFilterOptions;
   anyFilterActive: boolean;
   onChange: (filters: DashboardFilters) => void;
   onClear: () => void;
@@ -61,12 +63,19 @@ function modelGroups(models: readonly ModelFilterOption[]): ModelGroup[] {
 
 // Remembers labels of options seen in earlier ranges, for selections the
 // current range no longer lists.
-function useSeenLabels(options: FilterOptionsResponse | null) {
-  const seen = useRef({
-    agents: new Map<string, AgentFilterOption>(),
-    models: new Map<string, ModelFilterOption>(),
-    projects: new Map<string, ProjectFilterOption>(),
-  });
+function useSeenLabels(options: FilterOptionsResponse | null, savedOptions?: PersistedFilterOptions) {
+  const seen = useRef<{
+    agents: Map<string, AgentFilterOption>;
+    models: Map<string, ModelFilterOption>;
+    projects: Map<string, ProjectFilterOption>;
+  } | null>(null);
+  if (!seen.current) {
+    seen.current = {
+      agents: new Map((savedOptions?.agents ?? []).map((option) => [option.agent, option])),
+      models: new Map((savedOptions?.models ?? []).map((option) => [modelSelectionKey(option), option])),
+      projects: new Map((savedOptions?.projects ?? []).map((option) => [projectKey(option), option])),
+    };
+  }
   if (options) {
     for (const agent of options.agents) seen.current.agents.set(agent.agent, agent);
     for (const model of options.models) seen.current.models.set(modelSelectionKey(model), model);
@@ -98,11 +107,11 @@ const FilterTrigger = forwardRef<HTMLButtonElement, FilterTriggerProps>(function
   return <Button ref={ref} {...buttonProps} variant={active ? "primary" : "secondary"} size="sm" aria-label={`${label}筛选${active ? `，已选${count}项` : "，全部"}`}><span className="inline-flex h-4 w-4 items-center justify-center">{icon}</span><span>{label} · {active ? `${count} 项` : "全部"}</span></Button>;
 });
 
-export function FilterControls({ filters, options, optionsLoading, optionsErrorCode, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
+export function FilterControls({ filters, options, optionsLoading, optionsErrorCode, savedOptions, anyFilterActive, onChange, onClear, onRetryOptions }: FilterControlsProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const modelGroupsInitialized = useRef(false);
   const reduce = useReducedMotion();
-  const seen = useSeenLabels(options);
+  const seen = useSeenLabels(options, savedOptions);
   const agents = useMemo(() => splitSelected<AgentFilterOption, string>(
     options?.agents ?? [], filters.agents,
     (value) => typeof value === "string" ? value : value.agent,

@@ -181,13 +181,24 @@ export function RequestMetric({ metrics, glare = false }: { metrics: RequestMetr
     <TiltCard glare={glare} className={`${CARD} flex flex-col max-[1440px]:col-span-2 max-[1024px]:col-span-1`}>
       <div className={TITLE}>请求数</div>
       <CompactTicker value={metrics.calls} formatter={formatRequestCount} />
-      <div className="mt-auto flex flex-col text-xs leading-4">
+      <div className="mt-auto flex flex-col text-xs leading-4 text-muted-foreground">
         <div>
-          <span className="text-destructive" title={failures.title}>{failures.text} 次失败</span>
-          <span className="text-muted-foreground"> · 成功 {successRate}</span>
+          <span
+            className={metrics.errors > 0 ? "tabular-nums text-destructive" : "tabular-nums"}
+            title={failures.title}
+          >
+            {failures.text} 次
+          </span>
+          <span>失败 · 成功 {successRate}</span>
         </div>
         <div>
-          <span className="text-warning" title={retries.title}>{retries.text} 次重试后成功</span>
+          <span
+            className={metrics.retried > 0 ? "tabular-nums text-warning" : "tabular-nums"}
+            title={retries.title}
+          >
+            {retries.text} 次
+          </span>
+          <span>重试后成功</span>
         </div>
       </div>
     </TiltCard>
@@ -205,7 +216,7 @@ export function OutputSpeedMetric({ metrics, glare = false }: { metrics: Request
       <div className={TITLE}>输出速度</div>
       {hasSpeedSample ? (
         <>
-          <div className="dashboard-metric-value-row mt-2 flex min-w-0 items-center gap-1">
+          <div className="dashboard-metric-value-row mt-2 flex min-w-0 items-baseline gap-1">
             <CompactTicker
               value={Math.round(metrics.output_speed!)}
               formatter={formatIntegerFull}
@@ -213,7 +224,7 @@ export function OutputSpeedMetric({ metrics, glare = false }: { metrics: Request
               className="dashboard-metric-value text-[28px] font-semibold leading-8 tracking-tight text-foreground"
               wrapperClassName="inline-flex items-center"
             />
-            <span className="dashboard-metric-value inline-flex h-[1.1em] items-center truncate text-[28px] font-normal leading-none tracking-tight text-muted-foreground">token/s</span>
+            <span className="truncate text-[12px] font-normal leading-none tracking-tight text-muted-foreground">token/s</span>
           </div>
           <div className={`${LEGEND} mt-1`} title={`${speedSamples.title} 次计时`} aria-label={`${speedSamples.accessibleName} 次计时`}>
             {speedSamples.text} 次计时

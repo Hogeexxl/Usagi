@@ -410,39 +410,44 @@ describe("MetricGrid Spec05", () => {
     expect(within(card).getByTitle("10,091")).toHaveTextContent("10091");
     expect(within(card).queryByText(/输出速度/)).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "请求失败与重试提示" })).not.toBeInTheDocument();
-    const failures = within(card).getByText("277 次失败");
-    expect(failures).toHaveClass("text-destructive");
+    const failures = within(card).getByText("277 次");
+    expect(failures).toHaveClass("text-destructive", "tabular-nums");
     expect(failures.parentElement).toHaveTextContent("277 次失败 · 成功 97.3%");
-    expect(failures.parentElement?.lastElementChild).toHaveClass("text-muted-foreground");
+    expect(failures.nextElementSibling).toHaveTextContent("失败 · 成功 97.3%");
     expect(failures.parentElement?.parentElement?.children).toHaveLength(2);
-    const retries = within(card).getByText("36 次重试后成功");
-    expect(retries).toHaveClass("text-warning");
+    const retries = within(card).getByText("36 次");
+    expect(retries).toHaveClass("text-warning", "tabular-nums");
     expect(retries.parentElement).toHaveTextContent("36 次重试后成功");
+    expect(retries.nextElementSibling).toHaveTextContent("重试后成功");
   });
 
   it("shows success and retry details when there are no failures", () => {
     render(<RequestMetric metrics={{ ...requestMetrics, calls: 0, errors: 0, retried: 0 }} />);
     const card = cardByTitle("请求数");
-    const failures = within(card).getByText("0 次失败", { selector: ".text-destructive" });
-    expect(failures.parentElement).toHaveTextContent("0 次失败 · 成功 —");
-    const retries = within(card).getByText("0 次重试后成功", { selector: ".text-warning" });
-    expect(retries.parentElement).toHaveTextContent("0 次重试后成功");
+    const zeros = within(card).getAllByText("0 次");
+    expect(zeros).toHaveLength(2);
+    expect(zeros[0]).not.toHaveClass("text-destructive");
+    expect(zeros[0].parentElement).toHaveTextContent("0 次失败 · 成功 —");
+    expect(zeros[1]).not.toHaveClass("text-warning");
+    expect(zeros[1].parentElement).toHaveTextContent("0 次重试后成功");
   });
 
   it("uses compact request counts for the headline, failures, and retries", () => {
     render(<RequestMetric metrics={{ ...requestMetrics, calls: 141_100, errors: 100_000, retried: 141_101 }} />);
     const card = cardByTitle("请求数");
     expect(within(card).getByTitle("141,100")).toHaveTextContent("141.1K");
-    expect(within(card).getByText("100K 次失败")).toHaveClass("text-destructive");
-    expect(within(card).getByText("100K 次失败")).toHaveAttribute("title", "100,000");
-    expect(within(card).getByText("141.1K 次重试后成功")).toHaveClass("text-warning");
-    expect(within(card).getByText("141.1K 次重试后成功")).toHaveAttribute("title", "141,101");
+    expect(within(card).getByText("100K 次")).toHaveClass("text-destructive");
+    expect(within(card).getByText("100K 次")).toHaveAttribute("title", "100,000");
+    expect(within(card).getByText("141.1K 次")).toHaveClass("text-warning");
+    expect(within(card).getByText("141.1K 次")).toHaveAttribute("title", "141,101");
   });
 
   it("shows integer output speed and keeps speed and TTFT sample counts distinct", () => {
     render(<OutputSpeedMetric metrics={{ ...requestMetrics, output_speed: 61.988, speed_samples: 2_999, mean_ttft_seconds: 7.6, ttft_samples: 36 }} />);
     const card = cardByTitle("输出速度");
-    expect(within(card).getByText("token/s")).toHaveClass("text-[28px]", "font-normal", "leading-none", "tracking-tight", "text-muted-foreground");
+    expect(within(card).getByText("token/s")).toHaveClass("text-[12px]", "font-normal", "leading-none", "tracking-tight", "text-muted-foreground");
+    expect(within(card).getByText("token/s")).not.toHaveClass("dashboard-metric-value");
+    expect(within(card).getByText("token/s").parentElement).toHaveClass("items-baseline");
     expect(within(card).getByTitle("62")).toHaveTextContent("62");
     expect(within(card).getByText("2999 次计时")).toHaveAttribute("title", "2,999 次计时");
     expect(within(card).getByText("首字平均 7.6s · 36 次计时")).toBeInTheDocument();

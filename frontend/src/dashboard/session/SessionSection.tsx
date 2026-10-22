@@ -44,6 +44,7 @@ export function SessionSection({
         sortOrder={view.sort_order}
         onSort={view.select_sort}
         agentDisplay={agentDisplay}
+        filtersActive={view.filters.agents.length > 0 || view.filters.models.length > 0 || view.filters.projects.length > 0}
       />
       {view.load_state === "error" ? <div className="mt-2 flex items-center gap-2 text-xs text-destructive" role="alert" aria-live="polite"><span>{view.error_code === "UPDATE_FAILED" || view.error_code === "REVISION_FAILED" ? "Session 记录更新失败" : "Session 记录加载失败"}</span><Button variant="ghost" size="sm" onClick={view.retry_load}>重试</Button></div> : null}
     </section>

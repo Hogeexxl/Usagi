@@ -23,6 +23,7 @@ type SessionTableProps = {
   sortOrder: SessionSortOrder;
   onSort: (sortBy: SessionSortField) => void;
   agentDisplay?: (agent: string) => string;
+  filtersActive?: boolean;
 };
 
 const TABLE_ROW_HEIGHT = 64;
@@ -34,7 +35,7 @@ const TABLE_INITIAL_LOADING_SKELETON_HEIGHT = TABLE_ROW_HEIGHT * TABLE_PAGE_SIZE
 export const sortableColumns: Array<{ field: SessionSortField; label: string }> = [
   { field: "last_activity", label: "最后活动" },
   { field: "project", label: "项目" },
-  { field: "total_tokens", label: "合计 Token" },
+  { field: "total_tokens", label: "Token" },
   { field: "cache_hit_rate", label: "缓存率" },
   { field: "cost", label: "合计费用" },
 ];
@@ -54,6 +55,7 @@ export function SessionTable({
   sortOrder,
   onSort,
   agentDisplay,
+  filtersActive = false,
 }: SessionTableProps) {
   const loading =
     loadState === "initial" ||
@@ -66,7 +68,7 @@ export function SessionTable({
     {
       key: "last_activity",
       header: "最后活动",
-      width: "128px",
+      width: "100px",
       sortable: true,
       cell: (item) => {
         const value = formatSessionTime(item.last_activity_ms, timezone);
@@ -110,8 +112,8 @@ export function SessionTable({
     },
     {
       key: "total_tokens",
-      header: "合计 Token",
-      width: "150px",
+      header: "Token",
+      width: "100px",
       sortable: true,
       align: "right",
       cell: (item) => {
@@ -123,7 +125,7 @@ export function SessionTable({
     {
       key: "cache_hit_rate",
       header: "缓存率",
-      width: "127px",
+      width: "100px",
       sortable: true,
       align: "right",
       cell: (item) => item.has_usage_rows
@@ -133,7 +135,7 @@ export function SessionTable({
     {
       key: "cost",
       header: "合计费用",
-      width: "120px",
+      width: "100px",
       sortable: true,
       align: "right",
       cell: (item) => item.has_usage_rows
@@ -154,7 +156,7 @@ export function SessionTable({
       height={tableHeight}
       loading={loading}
       skeletonRows={TABLE_PAGE_SIZE}
-      emptyState="当前时间范围暂无 Session 记录"
+      emptyState={filtersActive ? "当前筛选在当前时间范围暂无 Session 记录" : "当前时间范围暂无 Session 记录"}
       sort={controlledSort}
       onSortChange={(next) => onSort((next?.key ?? sortBy) as SessionSortField)}
       manualSort

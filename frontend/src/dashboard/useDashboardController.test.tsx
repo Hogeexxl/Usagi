@@ -5,6 +5,7 @@ import type { UsagiClient } from "../data/usagiClient";
 import { createRevisionFeed } from "../data/revisionFeed";
 import type { DashboardFilters, DashboardRange, FilterOptionsResponse, RequestMetricsDto, RuntimeStatusResponse, SessionListItemDto, SessionListResponse, UsageDto } from "../data/types";
 import { UsagiClientError } from "../data/types";
+import { DASHBOARD_FILTERS_STORAGE_KEY } from "./filterPersistence";
 import { useDashboardController } from "./useDashboardController";
 
 const emptyFilters: DashboardFilters = { agents: [], models: [], projects: [] };
@@ -136,7 +137,47 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-afterEach(() => vi.useRealTimers());
+const localStorageDescriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    key(index) {
+      return [...values.keys()][index] ?? null;
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    },
+  };
+}
+
+function installLocalStorage(storage: Storage) {
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  if (localStorageDescriptor) {
+    Object.defineProperty(window, "localStorage", localStorageDescriptor);
+  } else {
+    Reflect.deleteProperty(window, "localStorage");
+  }
+});
 
 describe("useDashboardController sessions snapshot", () => {
   it("derives metrics and session count from the same initial sessions response", async () => {
@@ -187,6 +228,70 @@ describe("useDashboardController sessions snapshot", () => {
     await waitFor(() => expect(result.current.metrics?.input).toBe(50));
     expect(result.current.anyFilterActive).toBe(false);
     expect(client.getSessions).toHaveBeenLastCalledWith(expect.objectContaining({ range: { key: "yesterday" }, filters: emptyFilters }));
+  });
+
+  it("restores persisted filters before the first sessions request", async () => {
+    const storage = memoryStorage();
+    storage.setItem(DASHBOARD_FILTERS_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      filters: {
+        agents: ["claude"],
+        models: [{ provider_id: "openai", model: "gpt-x" }],
+        projects: [{ kind: "project", path: "/work/Usagi" }],
+      },
+      options: {
+        agents: [{ agent: "claude", display_name: "Claude Code" }],
+        models: [{ provider_id: "openai", model: "gpt-x", provider_name: "OpenAI" }],
+        projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+      },
+    }));
+    installLocalStorage(storage);
+    const client = clientWith();
+    const { result, unmount } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
+
+    await waitFor(() => expect(result.current.load_state).toBe("ready"));
+    expect(client.getSessions).toHaveBeenCalledWith({
+      range: { key: "today" },
+      filters: {
+        agents: ["claude"],
+        models: [{ provider_id: "openai", model: "gpt-x" }],
+        projects: [{ kind: "project", path: "/work/Usagi" }],
+      },
+      signal: expect.any(AbortSignal),
+    });
+    expect(result.current.persisted_filter_options).toEqual({
+      agents: [{ agent: "claude", display_name: "Claude Code" }],
+      models: [{ provider_id: "openai", model: "gpt-x", provider_name: "OpenAI" }],
+      projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+    });
+    unmount();
+  });
+
+  it("persists filter selections and removes them when filters are cleared", async () => {
+    const storage = memoryStorage();
+    installLocalStorage(storage);
+    const client = clientWith();
+    const { result } = renderHook(() => useDashboardController({ client, eventSourceFactory: fakeEvents }));
+    await waitFor(() => expect(result.current.filter_options).toEqual(options()));
+
+    const filters: DashboardFilters = {
+      agents: ["claude"],
+      models: [{ provider_id: "openai", model: "gpt-x" }],
+      projects: [{ kind: "project", path: "/work/Usagi" }],
+    };
+    act(() => result.current.select_filters(filters));
+    expect(JSON.parse(storage.getItem(DASHBOARD_FILTERS_STORAGE_KEY) ?? "null")).toEqual({
+      version: 1,
+      filters,
+      options: {
+        agents: [{ agent: "claude", display_name: "Claude Code" }],
+        models: [{ provider_id: "openai", model: "gpt-x", provider_name: "OpenAI" }],
+        projects: [{ kind: "project", path: "/work/Usagi", name: "Usagi" }],
+      },
+    });
+
+    act(() => result.current.clear_filters());
+    expect(storage.getItem(DASHBOARD_FILTERS_STORAGE_KEY)).toBeNull();
   });
 
   it("does not let a late response for an old range replace the current snapshot", async () => {
