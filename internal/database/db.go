@@ -104,13 +104,33 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := migrateV3ToV4(ctx, tx); err != nil {
 			return err
 		}
+		fallthrough
 	case "4":
+		if err := migrateV4ToV5(ctx, tx); err != nil {
+			return err
+		}
+		fallthrough
+	case "5":
 	default:
 		return fmt.Errorf("database: unsupported schema version %q", version)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrateV4ToV5(ctx context.Context, tx *sql.Tx) error {
+	for _, statement := range []string{
+		"DROP TABLE prices",
+		"DROP TABLE price_versions",
+		"UPDATE sync_days SET fingerprint = NULL",
+		"UPDATE app_meta SET value = '5' WHERE key = 'schema_version'",
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("database: migrate schema version 4 to 5: %w", err)
+		}
 	}
 	return nil
 }

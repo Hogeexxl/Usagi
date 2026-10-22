@@ -365,7 +365,7 @@ function Invoke-MagpieScenario {
 
     Invoke-SeedHelper -Command "seed" -DatabasePath $DatabasePath | Out-Null
     $Seeded = Invoke-SeedHelper -Command "verify" -DatabasePath $DatabasePath
-    Assert-SmokeCondition ($Seeded.schema_version -eq "4" -and $Seeded.initial_sync_complete -eq "1") "SQLite seed did not produce schema 4 with initial sync complete"
+    Assert-SmokeCondition ($Seeded.schema_version -eq "5" -and $Seeded.initial_sync_complete -eq "1") "SQLite seed did not produce schema 5 with initial sync complete"
     Assert-SmokeCondition ($Seeded.request_count -eq 1 -and $Seeded.input -eq 10 -and $Seeded.output -eq 5) "SQLite seed data does not match expected values"
 
     $Runtime = Start-InstalledRuntime -WorkingDirectory $WorkingDirectory -Environment $RuntimeEnvironment
@@ -416,7 +416,7 @@ function Invoke-MagpieScenario {
             return $false
         }
         $RequestLog = Get-Content -LiteralPath $RequestLogPath -Raw
-        foreach ($Path in @("/api/sessions/progress", "/api/usage", "/api/usage/requests", "/api/providers", "/api/usage/quotas")) {
+        foreach ($Path in @("/api/sessions/progress", "/api/usage", "/api/usage/requests", "/api/usage/quotas")) {
             if ($RequestLog -notmatch [regex]::Escape($Path)) {
                 return $false
             }
@@ -430,7 +430,7 @@ function Invoke-MagpieScenario {
     Assert-SmokeCondition ($FixtureRuntime.HasExited) "Magpie fixture remained after runtime shutdown"
 
     $RecoveredDatabase = Invoke-SeedHelper -Command "verify" -DatabasePath $DatabasePath
-    Assert-SmokeCondition ($RecoveredDatabase.schema_version -eq "4" -and $RecoveredDatabase.initial_sync_complete -eq "1") "recovered SQLite database is not schema 4 with initial sync complete"
+    Assert-SmokeCondition ($RecoveredDatabase.schema_version -eq "5" -and $RecoveredDatabase.initial_sync_complete -eq "1") "recovered SQLite database is not schema 5 with initial sync complete"
     Assert-SmokeCondition ($RecoveredDatabase.fixture_count -eq 1 -and $RecoveredDatabase.fixture_input -eq 110 -and $RecoveredDatabase.fixture_output -eq 55) "recovered Magpie data was not persisted to SQLite"
     Write-Host "Magpie smoke passed: unavailable retention, background retry, authenticated upstream endpoints, recovery, Dashboard API, and SQLite persistence"
 }

@@ -7,13 +7,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,9 +22,11 @@ import (
 )
 
 type syncDigestPoint struct {
-	Time  time.Time `json:"time"`
-	Calls int       `json:"calls"`
-	Input int       `json:"input"`
+	Time     time.Time `json:"time"`
+	Calls    int       `json:"calls"`
+	Input    int       `json:"input"`
+	Cost     float64   `json:"cost"`
+	Unpriced int       `json:"unpriced"`
 }
 
 type syncRequestCall struct {
@@ -49,10 +48,7 @@ type syncHTTPFixture struct {
 	sessions           []magpie.Session
 	sessionLimits      []string
 	sessionError       bool
-	providersError     bool
-	providers          magpie.ProviderCatalogsResponse
-	providerCalls      int
-	providerQueries    []url.Values
+	digestsUnavailable bool
 	requestCalls       []syncRequestCall
 }
 
@@ -86,18 +82,6 @@ func (f *syncHTTPFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		value := append([]magpie.Session(nil), f.sessions...)
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(magpie.SessionsResponse{Sessions: value})
-	case "/api/providers":
-		f.mu.Lock()
-		f.providerCalls++
-		f.providerQueries = append(f.providerQueries, r.URL.Query().Clone())
-		if f.providersError {
-			f.mu.Unlock()
-			http.Error(w, "temporary provider read error", http.StatusServiceUnavailable)
-			return
-		}
-		value := f.providers
-		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(value)
 	default:
 		http.NotFound(w, r)
 	}
@@ -124,6 +108,10 @@ func (f *syncHTTPFixture) serveUsageRequests(w http.ResponseWriter, r *http.Requ
 		if current >= parts[0] && current <= parts[1] {
 			points = append(points, point)
 		}
+	}
+	digestBucket := "day"
+	if f.digestsUnavailable {
+		digestBucket = "hour"
 	}
 	pageFailure := f.pageFailures[day][offset] && limit == syncPageLimit
 	total := len(rows) + f.totalDeltas[day][offset]
@@ -154,7 +142,7 @@ func (f *syncHTTPFixture) serveUsageRequests(w http.ResponseWriter, r *http.Requ
 			Series []json.RawMessage     `json:"series"`
 			Rows   []magpie.UsageRequest `json:"rows"`
 			Total  int                   `json:"total"`
-		}{Bucket: "day", Series: series, Rows: pageRows, Total: total})
+		}{Bucket: digestBucket, Series: series, Rows: pageRows, Total: total})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(magpie.UsageRequestsPage{
@@ -228,6 +216,12 @@ func (f *syncHTTPFixture) setSessionError(value bool) {
 	f.mu.Unlock()
 }
 
+func (f *syncHTTPFixture) setDigestsUnavailable(value bool) {
+	f.mu.Lock()
+	f.digestsUnavailable = value
+	f.mu.Unlock()
+}
+
 func openSyncTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
@@ -251,271 +245,7 @@ func newSyncTestService(t *testing.T, db *sql.DB, fixture *syncHTTPFixture, loca
 	t.Cleanup(server.Close)
 	service := newService(db, magpie.NewClient(server.URL, server.Client()), location)
 	service.now = func() time.Time { return now }
-	service.pricingHTTPClient = &http.Client{Transport: priceBootstrapFailureTransport{}}
 	return service
-}
-
-type priceBootstrapFailureTransport struct{}
-
-func (priceBootstrapFailureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	return &http.Response{
-		StatusCode: http.StatusServiceUnavailable,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader("")),
-		Request:    request,
-	}, nil
-}
-
-type priceBootstrapFixtureTransport struct {
-	body   []byte
-	status int
-	calls  int
-}
-
-func (t *priceBootstrapFixtureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	t.calls++
-	status := t.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	body := t.body
-	if status != http.StatusOK {
-		body = nil
-	}
-	return &http.Response{
-		StatusCode: status,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(bytes.NewReader(body)),
-		Request:    request,
-	}, nil
-}
-
-func TestPriceBootstrapUsesHTTPProviderCatalogSnapshot(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	fixture.providers = magpie.ProviderCatalogsResponse{Providers: []magpie.ProviderCatalog{
-		{ID: "provider-a", Catalog: " OPENAI, DEEPSEEK openai "},
-		{ID: "provider-a", Catalog: "google, deepseek"},
-		{ID: "provider-empty", Catalog: "   "},
-	}}
-	service := newSyncTestService(t, db, fixture, location, now)
-	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"canonical_model_id":"openai/gpt-6-luna","cost":{"input":0.1,"output":0.5,"cache_read":0.01,"cache_write":0.125,"cache_write_1h":0.125}}}}}`)}
-	service.pricingHTTPClient = &http.Client{Transport: transport}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	var providerJSON string
-	if err := db.QueryRow("SELECT provider_catalogs_json FROM price_versions").Scan(&providerJSON); err != nil {
-		t.Fatal(err)
-	}
-	var got map[string][]string
-	if err := json.Unmarshal([]byte(providerJSON), &got); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string][]string{
-		"provider-a":     {"openai", "deepseek", "google"},
-		"provider-empty": {},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("provider snapshot = %v, want %v", got, want)
-	}
-	if transport.calls != 1 || fixture.providerCalls != 1 || len(fixture.providerQueries) != 1 || len(fixture.providerQueries[0]) != 0 {
-		t.Fatalf("bootstrap calls models.dev=%d providers=%d query=%v, want one each and no query", transport.calls, fixture.providerCalls, fixture.providerQueries)
-	}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("second Sync: %v", err)
-	}
-	if transport.calls != 1 || fixture.providerCalls != 1 {
-		t.Fatalf("existing version retried bootstrap: models.dev=%d providers=%d", transport.calls, fixture.providerCalls)
-	}
-}
-
-func TestPriceBootstrapFailureDoesNotBlockInitialSync(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	service := newSyncTestService(t, db, fixture, location, now)
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync after price bootstrap failure: %v", err)
-	}
-	complete, err := service.InitialSyncComplete(context.Background())
-	if err != nil || !complete {
-		t.Fatalf("initial sync complete = (%t, %v), want true", complete, err)
-	}
-	var versions int
-	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
-		t.Fatal(err)
-	}
-	if versions != 0 {
-		t.Fatalf("price versions = %d after failed download, want 0", versions)
-	}
-
-	day := now.Format(time.DateOnly)
-	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,session,input,magpie_cost,magpie_priced)
-		VALUES (? ,?,'codex','provider-a','unlisted-model','session',7,12,1)`, now.UnixNano(), day); err != nil {
-		t.Fatalf("insert unavailable-price request: %v", err)
-	}
-	dataset, err := service.SessionDataset(context.Background(), SessionQuery{Range: DateRange{From: day, To: day}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dataset.Sessions) != 1 || dataset.Sessions[0].Totals.Cost != 0 || dataset.Sessions[0].Totals.Unpriced != 1 ||
-		len(dataset.Rows) != 1 || dataset.Rows[0].Priced || dataset.Rows[0].Cost != 0 {
-		t.Fatalf("unpriced SessionDataset = %+v, want zero cost and one unpriced token row", dataset)
-	}
-}
-
-func TestPriceBootstrapProviderFileErrorLeavesNoVersion(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	fixture.providers.FileError = "providers file unreadable"
-	service := newSyncTestService(t, db, fixture, location, now)
-	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`)}
-	service.pricingHTTPClient = &http.Client{Transport: transport}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync after providers file error: %v", err)
-	}
-	var versions int
-	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
-		t.Fatal(err)
-	}
-	if versions != 0 || transport.calls != 0 {
-		t.Fatalf("provider file error created %d versions and called models.dev %d times", versions, transport.calls)
-	}
-}
-
-func TestPriceBootstrapProviderRequestFailureLeavesNoVersion(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	fixture.providersError = true
-	service := newSyncTestService(t, db, fixture, location, now)
-	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`)}
-	service.pricingHTTPClient = &http.Client{Transport: transport}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync after providers request failure: %v", err)
-	}
-	complete, err := service.InitialSyncComplete(context.Background())
-	if err != nil || !complete {
-		t.Fatalf("initial sync complete = (%t, %v), want true", complete, err)
-	}
-	var versions int
-	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
-		t.Fatal(err)
-	}
-	if versions != 0 || transport.calls != 0 {
-		t.Fatalf("providers request failure created %d versions and called models.dev %d times", versions, transport.calls)
-	}
-}
-
-func TestPriceBootstrapRetriesAfterModelsDevFailure(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	service := newSyncTestService(t, db, fixture, location, now)
-	transport := &priceBootstrapFixtureTransport{
-		status: http.StatusServiceUnavailable,
-		body:   []byte(`{"openai":{"models":{"gpt-6-luna":{"cost":{"input":0.1}}}}}`),
-	}
-	service.pricingHTTPClient = &http.Client{Transport: transport}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("first Sync after models.dev failure: %v", err)
-	}
-	complete, err := service.InitialSyncComplete(context.Background())
-	if err != nil || !complete {
-		t.Fatalf("initial sync complete after price failure = (%t, %v), want true", complete, err)
-	}
-	var versions int
-	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
-		t.Fatal(err)
-	}
-	if versions != 0 || transport.calls != 1 {
-		t.Fatalf("after first Sync versions=%d downloads=%d, want 0/1", versions, transport.calls)
-	}
-	transport.status = http.StatusOK
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("second Sync after models.dev recovers: %v", err)
-	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
-		t.Fatal(err)
-	}
-	if versions != 1 || transport.calls != 2 || fixture.providerCalls != 2 {
-		t.Fatalf("after retry versions=%d downloads=%d provider calls=%d, want 1/2/2", versions, transport.calls, fixture.providerCalls)
-	}
-}
-
-func TestPriceBootstrapCostGateAndRequestedModelIgnored(t *testing.T) {
-	db := queryTestDB(t)
-	location := time.UTC
-	now := time.Date(2026, 10, 14, 8, 0, 0, 0, location)
-	fixture := newSyncHTTPFixture(magpie.UsageSummary{})
-	fixture.providers = magpie.ProviderCatalogsResponse{Providers: []magpie.ProviderCatalog{{ID: "provider-a", Catalog: "openai"}}}
-	service := newSyncTestService(t, db, fixture, location, now)
-	transport := &priceBootstrapFixtureTransport{body: []byte(`{"openai":{"models":{"fixture-model":{"cost":{"input":1,"output":2,"cache_read":3,"cache_write":4,"cache_write_1h":5,"tiers":[{"above":1,"input":100,"output":200}]}},"free-fixture":{"cost":{"input":0,"output":0,"cache_read":0,"cache_write":0,"cache_write_1h":0}}}}}`)}
-	service.pricingHTTPClient = &http.Client{Transport: transport}
-	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	day := now.Format(time.DateOnly)
-	requests := []magpie.UsageRequest{
-		{Time: now, Agent: "codex", Session: "priced", Provider: "provider-a", Model: "fixture-model", Input: 100, Output: 50, CacheRead: 20, CacheWrite: 30, CacheWrite1h: 10},
-		{Time: now.Add(time.Second), Agent: "codex", Session: "requested-only", Provider: "provider-a", Model: "unlisted-model", Requested: "fixture-model", Input: 10},
-		{Time: now.Add(2 * time.Second), Agent: "codex", Session: "cache-only", Provider: "provider-a", Model: "unlisted-model", CacheRead: 10},
-		{Time: now.Add(3 * time.Second), Agent: "codex", Session: "free", Provider: "provider-a", Model: "free-fixture", Input: 10},
-	}
-	for _, row := range requests {
-		if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,requested,session,input,output,cache_read,cache_write,cache_write_1h)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, row.Time.UnixNano(), day, row.Agent, row.Provider, row.Model, row.Requested,
-			row.Session, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CacheWrite1h); err != nil {
-			t.Fatalf("insert cost gate request: %v", err)
-		}
-	}
-	dataset, err := service.SessionDataset(context.Background(), SessionQuery{Range: DateRange{From: day, To: day}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dataset.Sessions) != 4 || len(dataset.Rows) != 4 {
-		t.Fatalf("cost-gate dataset size = %d sessions / %d rows, want 4 / 4", len(dataset.Sessions), len(dataset.Rows))
-	}
-	var formula, requested, cacheOnly, free *UsageRow
-	var cost float64
-	var unpriced int64
-	for i := range dataset.Rows {
-		row := &dataset.Rows[i]
-		cost += row.Cost
-		if row.Input+row.Output > 0 && !row.Priced {
-			unpriced++
-		}
-		switch {
-		case row.Model == "fixture-model":
-			formula = row
-		case row.Model == "free-fixture":
-			free = row
-		case row.Model == "unlisted-model" && row.Input > 0:
-			requested = row
-		case row.Model == "unlisted-model" && row.CacheRead > 0:
-			cacheOnly = row
-		}
-	}
-	if formula == nil || !formula.Priced || math.Abs(formula.Cost-0.00039) > 1e-9 || math.Abs(cost-0.00039) > 1e-9 || unpriced != 1 {
-		t.Fatalf("five-price row = %+v, want priced cost 0.00039", formula)
-	}
-	if requested == nil || requested.Priced || requested.Cost != 0 {
-		t.Fatalf("requested-only row = %+v, want unpriced at zero", requested)
-	}
-	if cacheOnly == nil || cacheOnly.Priced || cacheOnly.Cost != 0 {
-		t.Fatalf("cache-only row = %+v, want zero cost and no price lookup", cacheOnly)
-	}
-	if free == nil || !free.Priced || free.Cost != 0 {
-		t.Fatalf("explicit zero-price row = %+v, want priced at zero", free)
-	}
 }
 
 func digestPoint(day string, location *time.Location, calls, input int) syncDigestPoint {
@@ -783,21 +513,32 @@ func TestSyncDayGlobalChangeRetriesRecentDayAfterFailedPull(t *testing.T) {
 	}
 }
 
-func TestSyncFreezeUsesStrictLocalCutoffAndRecordsDifference(t *testing.T) {
+func TestSyncFrozenDayPriceOnlyChangeRefreshes(t *testing.T) {
 	location := time.FixedZone("UTC+8", 8*60*60)
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
 	const from = "2026-10-04"
 	const cutoff = "2026-10-07"
+	const oldCost = 0.10
+	const newCost = 0.75
 	var series []magpie.UsagePoint
 	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all", UsageTotals: magpie.UsageTotals{Calls: 11}})
 	for date := 0; date <= 10; date++ {
 		day := now.AddDate(0, 0, date-10).In(location).Format(time.DateOnly)
 		point := digestPoint(day, location, 1, date+1)
+		if day == from {
+			point.Cost = oldCost
+		}
 		fixture.digests[day] = point
-		series = append(series, magpie.UsagePoint{Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{Calls: point.Calls, Input: point.Input}})
+		series = append(series, magpie.UsagePoint{Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{
+			Calls: point.Calls, Input: point.Input, Cost: point.Cost, Unpriced: point.Unpriced,
+		}})
 	}
 	fixture.summary.Series = series
 	fixture.summary.UsageTotals.Calls = len(series)
+	fixture.requests[from] = []magpie.UsageRequest{{
+		Time: now.Add(-10 * 24 * time.Hour), Agent: "codex", Model: "baseline", Input: 1,
+		Status: http.StatusOK, Cost: oldCost, Priced: true,
+	}}
 	fixture.requests["2026-10-05"] = []magpie.UsageRequest{{
 		Time: now.Add(-9 * 24 * time.Hour), Agent: "codex", Model: "new", Input: 90, Status: http.StatusOK,
 	}}
@@ -816,15 +557,17 @@ func TestSyncFreezeUsesStrictLocalCutoffAndRecordsDifference(t *testing.T) {
 		}
 		frozen := day == from
 		fingerprint := digestBytes(t, point)
-		if day == from {
-			fingerprint[0] ^= 0xff
-		}
 		seedDay(t, db, day, fingerprint, lastSync, frozen)
 		seedRequest(t, db, day, "baseline", index)
+		if day == from {
+			if _, err := db.Exec("UPDATE requests SET magpie_cost = ?, magpie_priced = 1 WHERE local_day = ?", oldCost, day); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	service := newSyncTestService(t, db, fixture, location, now)
 	if _, err := service.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
+		t.Fatalf("initial Sync() error = %v", err)
 	}
 	var cutoffFrozen, eligibleFrozen, needsCompleteFetchFrozen int
 	if err := db.QueryRow("SELECT frozen FROM sync_days WHERE day = ?", cutoff).Scan(&cutoffFrozen); err != nil {
@@ -839,32 +582,53 @@ func TestSyncFreezeUsesStrictLocalCutoffAndRecordsDifference(t *testing.T) {
 	if cutoffFrozen != 0 || eligibleFrozen != 1 || needsCompleteFetchFrozen != 1 {
 		t.Fatalf("cutoff/eligible/incomplete frozen flags = %d/%d/%d, want 0/1/1", cutoffFrozen, eligibleFrozen, needsCompleteFetchFrozen)
 	}
-	var difference string
-	if err := db.QueryRow("SELECT difference FROM sync_days WHERE day = ?", from).Scan(&difference); err != nil {
+	var model string
+	var cost float64
+	var priced int
+	if err := db.QueryRow("SELECT model, magpie_cost, magpie_priced FROM requests WHERE local_day = ?", from).
+		Scan(&model, &cost, &priced); err != nil {
 		t.Fatal(err)
 	}
-	if difference == "" {
-		t.Fatal("changed frozen fingerprint did not record a difference")
+	if model != "baseline" || cost != oldCost || priced != 1 {
+		t.Fatalf("initial frozen request = %q cost %.2f priced %d", model, cost, priced)
 	}
-	var baselineModel string
-	if err := db.QueryRow("SELECT model FROM requests WHERE local_day = ?", from).Scan(&baselineModel); err != nil || baselineModel != "baseline" {
-		t.Fatalf("frozen requests were overwritten: model=%q error=%v", baselineModel, err)
+	initialPages, initialRevision := countPageCalls(fixture.calls()), dbRevision(t, db)
+	fixture.mu.Lock()
+	changed := fixture.digests[from]
+	changed.Cost = newCost
+	fixture.digests[from] = changed
+	fixture.requests[from] = []magpie.UsageRequest{{
+		Time: now.Add(-10 * 24 * time.Hour), Agent: "codex", Model: "refreshed", Input: 1,
+		Status: http.StatusOK, Cost: newCost, Priced: true,
+	}}
+	fixture.mu.Unlock()
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("price-change Sync() error = %v", err)
 	}
-	var fetchedModel string
-	if err := db.QueryRow("SELECT model FROM requests WHERE local_day = '2026-10-05'").Scan(&fetchedModel); err != nil || fetchedModel != "new" {
-		t.Fatalf("old day requiring a completed sync retained model %q, error %v", fetchedModel, err)
+	if err := db.QueryRow("SELECT model, magpie_cost, magpie_priced FROM requests WHERE local_day = ?", from).
+		Scan(&model, &cost, &priced); err != nil {
+		t.Fatal(err)
 	}
-	if got := dbRevision(t, db); got != 1 {
-		t.Fatalf("data revision = %d, want only the mutable day replacement; freeze and difference do not increment", got)
+	if model != "refreshed" || cost != newCost || priced != 1 {
+		t.Fatalf("price-only change left request = %q cost %.2f priced %d", model, cost, priced)
 	}
-	var fetchedDays []string
-	for _, call := range fixture.calls() {
-		if call.limit == syncPageLimit {
-			fetchedDays = append(fetchedDays, call.period)
-		}
+	if got := countPageCalls(fixture.calls()); got != initialPages+1 {
+		t.Fatalf("price-only change fetched %d days, want one", got-initialPages)
 	}
-	if len(fetchedDays) != 1 || fetchedDays[0] != "2026-10-05..2026-10-05" {
-		t.Fatalf("full request fetches for freeze pass = %v, want only 2026-10-05", fetchedDays)
+	if got := dbRevision(t, db); got != initialRevision+1 {
+		t.Fatalf("data revision = %d, want one committed day update from %d", got, initialRevision)
+	}
+	calls := fixture.calls()
+	if len(calls) == 0 || calls[len(calls)-1].period != from+".."+from {
+		t.Fatalf("last full-day fetch = %+v, want %s", calls, from)
+	}
+	pages, revision := countPageCalls(fixture.calls()), dbRevision(t, db)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged price Sync() error = %v", err)
+	}
+	if countPageCalls(fixture.calls()) != pages || dbRevision(t, db) != revision {
+		t.Fatalf("unchanged price sync fetched or revised data: pages %d -> %d revision %d -> %d",
+			pages, countPageCalls(fixture.calls()), revision, dbRevision(t, db))
 	}
 }
 
@@ -921,6 +685,200 @@ func TestSyncFreezeFailureDoesNotFreezeOldDayWithoutSuccessfulPostEndSync(t *tes
 	}
 	if frozen != 0 || lastSync != end.UnixNano() || model != "old" || dbRevision(t, db) != 0 {
 		t.Fatalf("failed old-day fetch state = frozen %d last_sync %d model %q revision %d", frozen, lastSync, model, dbRevision(t, db))
+	}
+}
+
+func TestSyncMigratedFrozenDayRetriesWithoutChangingState(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := "2026-10-04"
+	today := now.Format(time.DateOnly)
+	point := digestPoint(day, location, 1, 1)
+	todayPoint := digestPoint(today, location, 1, 1)
+	summaryPoint := magpie.UsagePoint{Label: today, Time: todayPoint.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}}
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all", Series: []magpie.UsagePoint{summaryPoint},
+		UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}})
+	fixture.digests[day] = point
+	fixture.digests[today] = todayPoint
+	fixture.requests[day] = []magpie.UsageRequest{{
+		Time: point.Time, Agent: "codex", Model: "upstream", Input: 0, Cost: 1.25, Priced: false,
+	}}
+	fixture.setPageFailure(day, 0, true)
+	path := filepath.Join(t.TempDir(), "migrated.sqlite")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE app_meta SET value = '1' WHERE key = 'initial_sync_complete'"); err != nil {
+		t.Fatal(err)
+	}
+	seedDay(t, db, day, nil, now.Add(-24*time.Hour).UnixNano(), true)
+	seedRequest(t, db, day, "old", 7)
+	seedDay(t, db, today, digestBytes(t, todayPoint), now.Add(-time.Hour).UnixNano(), false)
+	seedRequest(t, db, today, "today", 1)
+	beforeRevision := int64(0)
+	if err := db.QueryRow("SELECT CAST(value AS INTEGER) FROM app_meta WHERE key = 'data_revision'").Scan(&beforeRevision); err != nil {
+		t.Fatal(err)
+	}
+	var beforeLastSync sql.NullInt64
+	if err := db.QueryRow("SELECT last_sync_ns FROM sync_days WHERE day = ?", day).Scan(&beforeLastSync); err != nil {
+		t.Fatal(err)
+	}
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err == nil {
+		t.Fatal("migrated frozen day fetch failure returned no error")
+	}
+	var fingerprint []byte
+	var frozen int
+	var model string
+	if err := db.QueryRow(`SELECT d.fingerprint, d.frozen, r.model FROM sync_days d
+		JOIN requests r ON r.local_day = d.day WHERE d.day = ?`, day).Scan(&fingerprint, &frozen, &model); err != nil {
+		t.Fatal(err)
+	}
+	var afterLastSync sql.NullInt64
+	if err := db.QueryRow("SELECT last_sync_ns FROM sync_days WHERE day = ?", day).Scan(&afterLastSync); err != nil {
+		t.Fatal(err)
+	}
+	if len(fingerprint) != 0 || frozen != 1 || model != "old" || afterLastSync.Valid != beforeLastSync.Valid || afterLastSync.Int64 != beforeLastSync.Int64 || dbRevision(t, db) != beforeRevision {
+		t.Fatalf("failed calibration changed state: fingerprint=%x frozen=%d model=%q last_sync=%v/%v revision=%d baseline=%d",
+			fingerprint, frozen, model, beforeLastSync, afterLastSync, dbRevision(t, db), beforeRevision)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	fixture.setPageFailure(day, 0, false)
+	service = newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("retry calibration after reopen: %v", err)
+	}
+	var cost float64
+	var priced int
+	if err := db.QueryRow(`SELECT d.fingerprint, d.frozen, r.model, r.magpie_cost, r.magpie_priced
+		FROM sync_days d JOIN requests r ON r.local_day = d.day WHERE d.day = ?`, day).
+		Scan(&fingerprint, &frozen, &model, &cost, &priced); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fingerprint, digestBytes(t, point)) || frozen != 1 || model != "upstream" || cost != 1.25 || priced != 0 {
+		t.Fatalf("retried calibration state = fingerprint %x frozen %d model %q cost %.2f priced %d",
+			fingerprint, frozen, model, cost, priced)
+	}
+	pages, revision := countPageCalls(fixture.calls()), dbRevision(t, db)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged calibrated Sync() error = %v", err)
+	}
+	if countPageCalls(fixture.calls()) != pages || dbRevision(t, db) != revision {
+		t.Fatalf("calibrated frozen day fetched again: pages %d -> %d revision %d -> %d",
+			pages, countPageCalls(fixture.calls()), revision, dbRevision(t, db))
+	}
+}
+
+func TestSyncMigratedOldDateWithPostEndSyncRefreshesBeforeFreezing(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := "2026-10-05"
+	point := digestPoint(day, location, 1, 1)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all", Series: []magpie.UsagePoint{{
+		Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1},
+	}}, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}})
+	fixture.digests[day] = point
+	fixture.requests[day] = []magpie.UsageRequest{{Time: point.Time, Agent: "codex", Model: "upstream", Cost: 0.5, Priced: true}}
+	fixture.setPageFailure(day, 0, true)
+	db, _ := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	end, err := localDayEnd(day, location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDay(t, db, day, nil, end.Add(time.Hour).UnixNano(), false)
+	seedRequest(t, db, day, "old", 1)
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err == nil {
+		t.Fatal("migrated old date fetch failure returned no error")
+	}
+	var fingerprint []byte
+	var frozen int
+	if err := db.QueryRow("SELECT fingerprint, frozen FROM sync_days WHERE day = ?", day).Scan(&fingerprint, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if len(fingerprint) != 0 || frozen != 0 {
+		t.Fatalf("failed old-date calibration = fingerprint %x frozen %d, want pending and unfrozen", fingerprint, frozen)
+	}
+	fixture.setPageFailure(day, 0, false)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("retry old-date calibration: %v", err)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT d.fingerprint, d.frozen, r.model FROM sync_days d
+		JOIN requests r ON r.local_day = d.day WHERE d.day = ?`, day).Scan(&fingerprint, &frozen, &model); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fingerprint, digestBytes(t, point)) || frozen != 1 || model != "upstream" {
+		t.Fatalf("retried old-date state = fingerprint %x frozen %d model %q", fingerprint, frozen, model)
+	}
+}
+
+func TestSyncCalibratesStoredDateOmittedFromSummaryOnce(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := "2026-10-04"
+	point := digestPoint(day, location, 1, 1)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all"})
+	fixture.digests[day] = point
+	fixture.requests[day] = []magpie.UsageRequest{{Time: point.Time, Agent: "codex", Model: "upstream", Cost: 0.25, Priced: true}}
+	db, _ := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	seedDay(t, db, day, nil, now.Add(-24*time.Hour).UnixNano(), true)
+	seedRequest(t, db, day, "old", 1)
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("calibrate omitted stored date: %v", err)
+	}
+	var fingerprint []byte
+	var model string
+	if err := db.QueryRow(`SELECT d.fingerprint, r.model FROM sync_days d JOIN requests r ON r.local_day = d.day
+		WHERE d.day = ?`, day).Scan(&fingerprint, &model); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fingerprint, digestBytes(t, point)) || model != "upstream" {
+		t.Fatalf("omitted stored date state = fingerprint %x model %q", fingerprint, model)
+	}
+	pages, revision := countPageCalls(fixture.calls()), dbRevision(t, db)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("unchanged omitted stored date Sync() error = %v", err)
+	}
+	if countPageCalls(fixture.calls()) != pages || dbRevision(t, db) != revision {
+		t.Fatalf("omitted stored date re-fetched: pages %d -> %d revision %d -> %d",
+			pages, countPageCalls(fixture.calls()), revision, dbRevision(t, db))
+	}
+}
+
+func TestSyncUnsupportedDigestsStillRepullsRecentDay(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, location)
+	day := now.Format(time.DateOnly)
+	point := digestPoint(day, location, 1, 1)
+	fixture := newSyncHTTPFixture(magpie.UsageSummary{Period: "all", Series: []magpie.UsagePoint{{
+		Label: day, Time: point.Time, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1},
+	}}, UsageTotals: magpie.UsageTotals{Calls: 1, Input: 1}})
+	fixture.digests[day] = point
+	fixture.setDigestsUnavailable(true)
+	fixture.requests[day] = []magpie.UsageRequest{{Time: point.Time, Agent: "codex", Model: "fresh"}}
+	db, _ := openSyncTestDB(t)
+	setInitialSyncComplete(t, db)
+	seedDay(t, db, day, digestBytes(t, point), now.Add(-time.Hour).UnixNano(), false)
+	seedRequest(t, db, day, "old", 1)
+	service := newSyncTestService(t, db, fixture, location, now)
+	if _, err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync with unsupported digests: %v", err)
+	}
+	var model string
+	if err := db.QueryRow("SELECT model FROM requests WHERE local_day = ?", day).Scan(&model); err != nil || model != "fresh" {
+		t.Fatalf("recent day with unsupported digests = %q, %v; want re-pull", model, err)
 	}
 }
 

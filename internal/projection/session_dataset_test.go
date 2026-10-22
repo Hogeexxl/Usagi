@@ -21,17 +21,16 @@ func TestSessionConsistencyUsesOneFilteredDatabaseDataset(t *testing.T) {
 	addProjectionSession(t, db, "codex", "C", "/repo", "Codex", 7, 19, false)
 	addProjectionSession(t, db, "codex", "subproject", "/repo/sub", "Nested project", 7, 18, false)
 	addProjectionSession(t, db, "codex", "no-rows", "/repo", "No rows", 7, 17, true)
-	addProjectionPrices(t, db)
 
 	rows := []projectionLedgerRow{
-		{at: projectionTime(9, 0), agent: "claude", provider: "provider-a", model: "claude-model", session: "A", input: 10, output: 5, cacheRead: 2, cacheWrite: 8, cacheWrite1h: 4},
+		{at: projectionTime(9, 0), agent: "claude", provider: "provider-a", model: "claude-model", session: "A", input: 10, output: 5, cacheRead: 2, cacheWrite: 8, cacheWrite1h: 4, cost: 0.00224, priced: true},
 		{at: projectionTime(10, 0), agent: "claude", provider: "provider-a", model: "worker-model", session: "A", subagent: "worker", input: 4, output: 2},
 		{at: projectionTime(11, 0), agent: "claude", provider: "provider-a", model: "worker-model", session: "A", subagent: "worker", parent: "A", input: 2, output: 1},
 		{at: projectionTime(12, 0), agent: "claude", provider: "provider-a", model: "nested-model", session: "A", subagent: "nested", parent: "worker", input: 3, output: 1},
-		{at: projectionTime(9, 0), agent: "codex", provider: "provider-a", model: "codex-model", session: "C", kind: "review", input: 7, output: 2, cacheRead: 1, cacheWrite: 2},
-		{at: projectionTime(10, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "collab_spawn", input: 5, output: 1, cacheRead: 2, cacheWrite: 3, cacheWrite1h: 1},
-		{at: projectionTime(11, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "thread_spawn", input: 2, output: 1, cacheRead: 1, cacheWrite: 1},
-		{at: projectionTime(12, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "agent_job", input: 1},
+		{at: projectionTime(9, 0), agent: "codex", provider: "provider-a", model: "codex-model", session: "C", kind: "review", input: 7, output: 2, cacheRead: 1, cacheWrite: 2, cost: 0.00048, priced: true},
+		{at: projectionTime(10, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "collab_spawn", input: 5, output: 1, cacheRead: 2, cacheWrite: 3, cacheWrite1h: 1, cost: 0.000173, priced: true},
+		{at: projectionTime(11, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "thread_spawn", input: 2, output: 1, cacheRead: 1, cacheWrite: 1, cost: 0.000095, priced: true},
+		{at: projectionTime(12, 0), agent: "codex", provider: "provider-a", model: "spawn-model", session: "C", kind: "agent_job", input: 1, cost: 0.00002, priced: true},
 		{at: projectionTime(13, 0), agent: "codex", provider: "provider-a", model: "other-model", session: "C", kind: "other", input: 3, output: 1},
 		{at: projectionTime(14, 0), agent: "codex", provider: "provider-a", model: "failure-model", session: "virtual", status: 503, err: "upstream", input: 6},
 		{at: projectionTime(14, 0), agent: "codex", provider: "provider-a", model: "subproject-model", session: "subproject", input: 99},
@@ -188,16 +187,15 @@ func TestCodexSessionHierarchyKeepsOwnUsageAndUnknownSeparate(t *testing.T) {
 	addProjectionIdentitySession(t, db, "U", "/unknown", "Unknown with usage", dayTwo, dayTwo, "unknown", "", "")
 	addProjectionIdentitySession(t, db, "Z", "/unknown-zero", "Unknown without usage", dayTwo, dayTwo, "unknown", "", "")
 	addProjectionIdentitySession(t, db, "V", "/zero", "Zero request", dayTwo, dayTwo, "unknown", "", "")
-	addProjectionPrices(t, db)
 
 	for _, row := range []projectionLedgerRow{
-		{at: dayOne, agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "main", input: 10, output: 5},
-		{at: dayOne.Add(30 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "main", input: 2, output: 1},
-		{at: dayOne.Add(45 * time.Minute), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "main", input: 3, output: 2},
-		{at: dayOne.Add(time.Hour), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "subagent", subagent: "B", input: 4, output: 2},
-		{at: dayOne.Add(90 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "B", input: 2, output: 1},
-		{at: dayOne.Add(2 * time.Hour), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "C", input: 5, output: 1},
-		{at: dayTwo, agent: "codex", provider: "provider-a", model: "codex-model", effort: "medium", session: "A", sessionRole: "subagent", subagent: "D", parent: "B", input: 6, output: 3},
+		{at: dayOne, agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "main", input: 10, output: 5, cost: 0.0008, priced: true},
+		{at: dayOne.Add(30 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "main", input: 2, output: 1, cost: 0.00016, priced: true},
+		{at: dayOne.Add(45 * time.Minute), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "main", input: 3, output: 2, cost: 0.00014, priced: true},
+		{at: dayOne.Add(time.Hour), agent: "codex", provider: "provider-a", model: "codex-model", effort: "low", session: "A", sessionRole: "subagent", subagent: "B", input: 4, output: 2, cost: 0.00032, priced: true},
+		{at: dayOne.Add(90 * time.Minute), agent: "codex", provider: "provider-a", model: "codex-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "B", input: 2, output: 1, cost: 0.00016, priced: true},
+		{at: dayOne.Add(2 * time.Hour), agent: "codex", provider: "provider-a", model: "spawn-model", effort: "high", session: "A", sessionRole: "subagent", subagent: "C", input: 5, output: 1, cost: 0.00014, priced: true},
+		{at: dayTwo, agent: "codex", provider: "provider-a", model: "codex-model", effort: "medium", session: "A", sessionRole: "subagent", subagent: "D", parent: "B", input: 6, output: 3, cost: 0.00048, priced: true},
 		{at: dayTwo, agent: "codex", provider: "provider-a", model: "orphan-model", effort: "low", sessionRole: "subagent", subagent: "E", parent: "B", input: 7},
 		{at: dayOne, agent: "codex", provider: "provider-a", model: "unknown-model", effort: "high", session: "A", sessionRole: "unknown", kind: "collab_spawn", input: 8},
 		{at: dayTwo, agent: "codex", provider: "provider-a", model: "unknown-model", effort: "low", session: "U", sessionRole: "unknown", input: 3},
@@ -558,14 +556,17 @@ type projectionLedgerRow struct {
 	cacheWrite1h           int
 	millis, ttftMS         int
 	firstTextMS, flowMS    int
+	cost                   float64
+	priced                 bool
 }
 
 func addProjectionRequest(t *testing.T, db *sql.DB, row projectionLedgerRow) {
 	t.Helper()
-	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,effort,session,session_role,subagent,parent_agent,kind,status,rejected,error,input,output,cache_read,cache_write,cache_write_1h,ms,ttft_ms,first_text_ms,flow_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.at.UnixNano(), row.at.Format(time.DateOnly), row.agent, row.provider,
+	if _, err := db.Exec(`INSERT INTO requests (t_ns,local_day,agent,provider,model,effort,session,session_role,subagent,parent_agent,kind,status,rejected,error,input,output,cache_read,cache_write,cache_write_1h,ms,ttft_ms,first_text_ms,flow_ms,magpie_cost,magpie_priced)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row.at.UnixNano(), row.at.Format(time.DateOnly), row.agent, row.provider,
 		row.model, row.effort, row.session, row.sessionRole, row.subagent, row.parent, row.kind, row.status, projectionBoolInt(row.rejected), row.err,
-		row.input, row.output, row.cacheRead, row.cacheWrite, row.cacheWrite1h, row.millis, row.ttftMS, row.firstTextMS, row.flowMS); err != nil {
+		row.input, row.output, row.cacheRead, row.cacheWrite, row.cacheWrite1h, row.millis, row.ttftMS, row.firstTextMS, row.flowMS,
+		row.cost, projectionBoolInt(row.priced)); err != nil {
 		t.Fatalf("insert projection request %s/%s/%s: %v", row.agent, row.session, row.model, err)
 	}
 }
@@ -579,33 +580,6 @@ func projectionBoolInt(value bool) int {
 
 func projectionTime(hour, minute int) time.Time {
 	return time.Date(2026, 10, 11, hour, minute, 0, 0, time.UTC)
-}
-
-func addProjectionPrices(t *testing.T, db *sql.DB) {
-	t.Helper()
-	result, err := db.Exec(`INSERT INTO price_versions (source,fetched_at_ns,effective_at_ns,provider_catalogs_json,maker_catalogs_json)
-		VALUES ('fixture',0,0,'{"provider-a":["openai"]}','[]')`)
-	if err != nil {
-		t.Fatalf("insert projection price version: %v", err)
-	}
-	version, err := result.LastInsertId()
-	if err != nil {
-		t.Fatalf("read projection price version: %v", err)
-	}
-	for _, price := range []struct {
-		model                                string
-		input, output, cacheRead, cacheWrite int
-		cacheWrite1h                         int
-	}{
-		{model: "claude-model", input: 100, output: 200, cacheRead: 50, cacheWrite: 25, cacheWrite1h: 10},
-		{model: "codex-model", input: 40, output: 80, cacheRead: 20, cacheWrite: 10, cacheWrite1h: 5},
-		{model: "spawn-model", input: 20, output: 40, cacheRead: 10, cacheWrite: 5, cacheWrite1h: 3},
-	} {
-		if _, err := db.Exec(`INSERT INTO prices (version_id,catalog_id,model_key,canonical_model_id,input,output,cache_read,cache_write,cache_write_1h)
-			VALUES (?,'openai',?,'',?,?,?,?,?)`, version, price.model, price.input, price.output, price.cacheRead, price.cacheWrite, price.cacheWrite1h); err != nil {
-			t.Fatalf("insert projection price %s: %v", price.model, err)
-		}
-	}
 }
 
 func sameSessionUsage(a, b UsageView) bool {

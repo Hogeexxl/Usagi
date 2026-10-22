@@ -139,7 +139,7 @@ export function SessionTable({
       sortable: true,
       align: "right",
       cell: (item) => item.has_usage_rows
-        ? <span className="tabular-nums" title={formatCost(item.inclusive_usage.cost).title}>{formatCost(item.inclusive_usage.cost).text}</span>
+        ? <span className={cn("tabular-nums", item.inclusive_usage.unpriced > 0 && "text-warning")} title={formatCost(item.inclusive_usage.cost).title}>{formatCost(item.inclusive_usage.cost).text}</span>
         : <span>—</span>,
     },
   ];

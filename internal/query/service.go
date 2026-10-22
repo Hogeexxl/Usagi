@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -16,7 +15,6 @@ type upstream interface {
 	Usage(context.Context, string) (magpie.UsageSummary, error)
 	UsageRequests(context.Context, magpie.UsageRequestsQuery) (magpie.UsageRequestsPage, error)
 	UsageDayDigests(context.Context, string, string) ([]magpie.UsageDayDigest, error)
-	Providers(context.Context) (magpie.ProviderCatalogsResponse, error)
 	Sessions(context.Context, int) (magpie.SessionsResponse, error)
 	Quotas(context.Context, bool) (magpie.QuotasResponse, error)
 	SessionOverview(context.Context, magpie.SessionOverviewQuery) (magpie.SessionOverview, error)
@@ -29,7 +27,6 @@ type Service struct {
 	db                  *sql.DB
 	location            *time.Location
 	now                 func() time.Time
-	pricingHTTPClient   *http.Client
 	syncMu              sync.Mutex
 	usageFingerprint    [32]byte
 	hasUsageFingerprint bool
@@ -46,12 +43,11 @@ func NewService(db *sql.DB, client *magpie.Client, location *time.Location) *Ser
 
 func newService(db *sql.DB, client upstream, location *time.Location) *Service {
 	return &Service{
-		upstream:          client,
-		db:                db,
-		location:          location,
-		now:               time.Now,
-		pendingRecent:     make(map[string]struct{}),
-		pricingHTTPClient: &http.Client{Timeout: 30 * time.Second},
+		upstream:      client,
+		db:            db,
+		location:      location,
+		now:           time.Now,
+		pendingRecent: make(map[string]struct{}),
 	}
 }
 

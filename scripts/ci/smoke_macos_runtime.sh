@@ -271,12 +271,6 @@ import sys
 
 connection = sqlite3.connect(sys.argv[2])
 connection.executescript(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-version = connection.execute("""INSERT INTO price_versions
-    (source, fetched_at_ns, effective_at_ns, provider_catalogs_json, maker_catalogs_json)
-    VALUES ('https://models.dev/api.json', 0, 0, '{"openai":["openai"]}', '[]')""").lastrowid
-connection.execute("""INSERT INTO prices
-    (version_id, catalog_id, model_key, canonical_model_id, input, output, cache_read, cache_write, cache_write_1h)
-    VALUES (?, 'openai', 'gpt-6-luna', 'openai/gpt-6-luna', 1.0, 2.0, 0.5, 1.5, 2.5)""", (version,))
 connection.commit()
 assert connection.execute("SELECT value FROM app_meta WHERE key='initial_sync_complete'").fetchone()[0] == "0"
 connection.close()
@@ -334,26 +328,29 @@ while time.monotonic() < deadline:
     time.sleep(0.05)
 if summary is None:
     raise SystemExit("complete SQLite summary did not become readable after simulated Magpie sync")
-if summary["usage"]["input"] != 10 or summary["usage"]["output"] != 5 or summary["data_revision"] <= 0:
+if (summary["usage"]["input"] != 10 or summary["usage"]["output"] != 5 or
+        summary["usage"]["cost"] != 0 or summary["usage"]["unpriced"] != 1 or summary["data_revision"] <= 0):
     raise SystemExit(f"unexpected synchronized summary: {summary!r}")
 with request("/api/usage/sessions?range=today") as response:
     sessions = json.load(response)
     assert response.status == 200 and len(sessions["items"]) == 1, f"session list was {sessions!r}"
     assert sessions["items"][0]["thread"]["title"] == "Temporary runtime smoke session"
+    assert sessions["items"][0]["inclusive_usage"]["cost"] == 0
+    assert sessions["items"][0]["inclusive_usage"]["unpriced"] == 1
 
 connection = sqlite3.connect(db_path)
 schema_version = connection.execute("SELECT value FROM app_meta WHERE key='schema_version'").fetchone()[0]
 initial_sync = connection.execute("SELECT value FROM app_meta WHERE key='initial_sync_complete'").fetchone()[0]
 revision = int(connection.execute("SELECT value FROM app_meta WHERE key='data_revision'").fetchone()[0])
 link_count = connection.execute("SELECT COUNT(*) FROM session_links").fetchone()[0]
-request_row = connection.execute("SELECT source, provider, model, session FROM requests").fetchone()
-price_row = connection.execute("SELECT canonical_model_id, input, output, cache_read, cache_write, cache_write_1h FROM prices").fetchone()
+tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+request_row = connection.execute("SELECT source, provider, model, session, magpie_cost, magpie_priced FROM requests").fetchone()
 connection.close()
-assert schema_version == "4" and initial_sync == "1", f"schema / initial sync = {schema_version}/{initial_sync}"
+assert schema_version == "5" and initial_sync == "1", f"schema / initial sync = {schema_version}/{initial_sync}"
+assert "prices" not in tables and "price_versions" not in tables, f"legacy price tables remain: {sorted(tables)!r}"
 assert link_count == 0, f"session_links contains {link_count} rows"
 assert revision == summary["data_revision"], f"database/API revision differs: {revision}/{summary['data_revision']}"
-assert request_row == ("magpie-http", "openai", "gpt-6-luna", "smoke-session"), f"stored HTTP row was {request_row!r}"
-assert price_row == ("openai/gpt-6-luna", 1.0, 2.0, 0.5, 1.5, 2.5), f"stored price row was {price_row!r}"
+assert request_row == ("magpie-http", "openai", "gpt-6-luna", "smoke-session", 0, 0), f"stored HTTP row was {request_row!r}"
 print(f"first sync and SQLite reads passed: schema={schema_version}, revision={revision}")
 with request("/api/service/stop", "POST") as response:
     result = json.load(response)
@@ -406,9 +403,12 @@ with request("/api/usage/summary?range=today") as response:
 with request("/api/usage/sessions?range=today") as response:
     sessions = json.load(response)
     assert response.status == 200, f"offline session status was {response.status}: {sessions!r}"
-assert summary["usage"]["input"] == 10 and summary["usage"]["output"] == 5, f"offline summary = {summary!r}"
+assert (summary["usage"]["input"] == 10 and summary["usage"]["output"] == 5 and
+    summary["usage"]["cost"] == 0 and summary["usage"]["unpriced"] == 1), f"offline summary = {summary!r}"
 assert sessions["summary"]["data_revision"] == summary["data_revision"]
 assert len(sessions["items"]) == 1 and sessions["items"][0]["thread"]["title"] == "Temporary runtime smoke session"
+assert sessions["items"][0]["inclusive_usage"]["cost"] == 0
+assert sessions["items"][0]["inclusive_usage"]["unpriced"] == 1
 print(f"complete offline SQLite reads passed: revision={summary['data_revision']}")
 with request("/api/service/stop", "POST") as response:
     result = json.load(response)
@@ -420,7 +420,7 @@ if [[ -e "$DESCRIPTOR" ]]; then
 	cat "$OFFLINE_LOG" >&2
 	exit 1
 fi
-printf 'runtime smoke passed: first sync, DATA_LOADING, complete offline reads, schema 4, and empty session_links\n'
+printf 'runtime smoke passed: first sync, DATA_LOADING, complete offline reads, schema 5, Magpie cost, and empty session_links\n'
 
 cat > "$TMP_ROOT/occupy.py" <<'PY'
 import socket

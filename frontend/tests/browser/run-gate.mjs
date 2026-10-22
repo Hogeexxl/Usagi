@@ -50,12 +50,6 @@ import sys
 
 connection = sqlite3.connect(sys.argv[2])
 connection.executescript(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-version = connection.execute("""INSERT INTO price_versions
-    (source, fetched_at_ns, effective_at_ns, provider_catalogs_json, maker_catalogs_json)
-    VALUES ('https://models.dev/api.json', 0, 0, '{"openai":["openai"]}', '[]')""").lastrowid
-connection.execute("""INSERT INTO prices
-    (version_id, catalog_id, model_key, canonical_model_id, input, output, cache_read, cache_write, cache_write_1h)
-    VALUES (?, 'openai', 'gpt-6-luna', 'openai/gpt-6-luna', 1.0, 2.0, 0.5, 1.5, 2.5)""", (version,))
 connection.commit()
 assert connection.execute("SELECT value FROM app_meta WHERE key='initial_sync_complete'").fetchone()[0] == "0"
 connection.close()`;

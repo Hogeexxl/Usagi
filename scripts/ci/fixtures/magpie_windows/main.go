@@ -143,11 +143,6 @@ func (f *fixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"name":     "Claude",
 			"windows":  []any{},
 		}})
-	case "/api/providers":
-		f.writeJSON(w, http.StatusOK, map[string]any{
-			"providers": []any{map[string]any{"id": "openai", "catalog": "openai"}},
-			"fileError": "",
-		})
 	case "/api/usage":
 		f.writeJSON(w, http.StatusOK, map[string]any{
 			"period": f.period(r),

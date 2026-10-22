@@ -84,6 +84,27 @@ func TestUsageRequestMetricFieldsJSON(t *testing.T) {
 	}
 }
 
+func TestUsageDayDigestTracksDayFactsNotJSONOrdering(t *testing.T) {
+	first, err := usageDayDigest(json.RawMessage(`{"time":"2026-10-11T12:00:00+08:00","calls":1,"input":7,"cost":0.125}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered, err := usageDayDigest(json.RawMessage(`{"cost":0.125,"input":7,"calls":1,"time":"2026-10-11T12:00:00+08:00"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedCost, err := usageDayDigest(json.RawMessage(`{"time":"2026-10-11T12:00:00+08:00","calls":1,"input":7,"cost":0.25}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Digest != reordered.Digest {
+		t.Fatal("equivalent day facts changed the digest")
+	}
+	if first.Digest == changedCost.Digest {
+		t.Fatal("changed day cost kept the same digest")
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func sameBoolPointer(a, b *bool) bool {
@@ -164,6 +185,20 @@ func TestClientEndpoints(t *testing.T) {
 			call: func(t *testing.T, client *Client) {
 				if _, err := client.UsageRequests(context.Background(), UsageRequestsQuery{}); err != nil {
 					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:  "usage day digests",
+			path:  "/api/usage/requests",
+			query: url.Values{"period": {"2026-10-10..2026-10-11"}, "limit": {"1"}},
+			call: func(t *testing.T, client *Client) {
+				got, err := client.UsageDayDigests(context.Background(), "2026-10-10", "2026-10-11")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 1 || got[0].Day != "2026-10-11" || got[0].Calls != 1 {
+					t.Fatalf("UsageDayDigests() = %+v", got)
 				}
 			},
 		},
@@ -455,7 +490,7 @@ func clientResponseJSON(path string) string {
 	case "/api/usage":
 		return `{"period":"today","input":42,"output":7,"calls":2,"future_field":"ignored"}`
 	case "/api/usage/requests":
-		return `{"period":"today","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","session_role":"subagent","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}]}`
+		return `{"period":"today","bucket":"day","total":1,"rows":[{"t":"2026-10-11T10:00:00Z","agent":"codex","effort":"high","session":"session-1","session_role":"subagent","subagent":"worker","parent_agent":"codex","cost":0.125,"priced":true,"rejected":true}],"series":[{"time":"2026-10-11T12:00:00+08:00","calls":1,"input":7}]}`
 	case "/api/usage/quotas":
 		return `[{"provider":"openai","name":"OpenAI","windows":[{"name":"5h","used":0.4,"resetsAt":"2026-10-11T15:00:00Z"}],"resets":{"count":1,"until":"2026-10-11T15:00:00Z"}}]`
 	case "/api/sessions":

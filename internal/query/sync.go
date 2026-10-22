@@ -5,19 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
-	"github.com/Hogeexxl/Usagi/internal/pricing"
 )
 
 const (
@@ -65,60 +61,11 @@ func (s *Service) Sync(ctx context.Context) (int64, error) {
 	if err := s.syncUsage(ctx, identityAvailable); err != nil {
 		syncErr = errors.Join(syncErr, err)
 	}
-	if err := s.syncPricing(ctx); err != nil {
-		slog.Warn("query: bootstrap price catalog", "error", err)
-	}
 	revision, err := s.dataRevision(context.Background())
 	if err != nil {
 		return revision, errors.Join(syncErr, err)
 	}
 	return revision, syncErr
-}
-
-func (s *Service) syncPricing(ctx context.Context) error {
-	var exists bool
-	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM price_versions)").Scan(&exists); err != nil {
-		return fmt.Errorf("query: check price versions: %w", err)
-	}
-	if exists {
-		return nil
-	}
-	response, err := s.upstream.Providers(ctx)
-	if err != nil {
-		return fmt.Errorf("query: read provider catalogs: %w", err)
-	}
-	if response.FileError != "" {
-		return fmt.Errorf("query: providers file error: %s", response.FileError)
-	}
-	if _, err := pricing.Bootstrap(ctx, s.db, s.pricingHTTPClient, providerCatalogsOf(response.Providers), s.now()); err != nil {
-		return fmt.Errorf("query: bootstrap price catalog: %w", err)
-	}
-	return nil
-}
-
-func providerCatalogsOf(providers []magpie.ProviderCatalog) map[string][]string {
-	result := make(map[string][]string, len(providers))
-	for _, provider := range providers {
-		catalogs, exists := result[provider.ID]
-		if !exists {
-			catalogs = []string{}
-			result[provider.ID] = catalogs
-		}
-		seen := make(map[string]bool, len(catalogs))
-		for _, catalog := range catalogs {
-			seen[catalog] = true
-		}
-		for _, catalog := range strings.FieldsFunc(strings.ToLower(provider.Catalog), func(r rune) bool {
-			return r == ',' || r == ' '
-		}) {
-			catalog = strings.TrimSpace(catalog)
-			if catalog != "" && !seen[catalog] {
-				result[provider.ID] = append(result[provider.ID], catalog)
-				seen[catalog] = true
-			}
-		}
-	}
-	return result
 }
 
 // InitialSyncComplete reports whether the first full local-day pass committed.
@@ -385,6 +332,10 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 	if err != nil {
 		return fmt.Errorf("query: enumerate usage days: %w", err)
 	}
+	days, err = s.includeStoredDays(ctx, days)
+	if err != nil {
+		return err
+	}
 	if identityAvailable {
 		if err := s.startSessionIdentityBackfill(ctx, days); err != nil {
 			return err
@@ -414,7 +365,7 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 	var targets []string
 	for _, day := range days {
 		state := states[day]
-		digest := digests[day].digest
+		digest, digestPresent := digests[day]
 		if state.compactionBackfillPending {
 			targets = append(targets, day)
 			continue
@@ -427,13 +378,16 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 			targets = append(targets, day)
 			continue
 		}
+		if len(state.fingerprint) == 0 {
+			targets = append(targets, day)
+			continue
+		}
+		if verified && digestPresent && !slices.Equal(state.fingerprint, digest.digest[:]) {
+			targets = append(targets, day)
+			continue
+		}
 		if state.frozen {
 			delete(s.pendingRecent, day)
-			if verified && len(state.fingerprint) == len(digest) && !slices.Equal(state.fingerprint, digest[:]) {
-				if err := s.recordFrozenDifference(ctx, day, state.fingerprint, digest); err != nil {
-					return err
-				}
-			}
 			continue
 		}
 		dayEnd, err := localDayEnd(day, s.location)
@@ -444,14 +398,9 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 			if err := s.freezeDay(ctx, day); err != nil {
 				return err
 			}
-			if verified && len(state.fingerprint) == len(digest) && !slices.Equal(state.fingerprint, digest[:]) {
-				if err := s.recordFrozenDifference(ctx, day, state.fingerprint, digest); err != nil {
-					return err
-				}
-			}
 			continue
 		}
-		stale := !state.lastSyncNS.Valid || len(state.fingerprint) != len(digest) || !verified || !slices.Equal(state.fingerprint, digest[:])
+		stale := !state.lastSyncNS.Valid || !verified
 		_, pendingRecent := s.pendingRecent[day]
 		recent := pendingRecent || (summaryChanged && (day == today || day == yesterday))
 		mustFreeze := day < cutoff && (!state.lastSyncNS.Valid || state.lastSyncNS.Int64 <= dayEnd.UnixNano())
@@ -472,6 +421,34 @@ func (s *Service) syncUsage(ctx context.Context, identityAvailable bool) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Service) includeStoredDays(ctx context.Context, days []string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT day FROM sync_days")
+	if err != nil {
+		return nil, fmt.Errorf("query: read stored sync days: %w", err)
+	}
+	defer rows.Close()
+	values := make(map[string]struct{}, len(days))
+	for _, day := range days {
+		values[day] = struct{}{}
+	}
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return nil, fmt.Errorf("query: scan stored sync day: %w", err)
+		}
+		values[day] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query: iterate stored sync days: %w", err)
+	}
+	result := make([]string, 0, len(values))
+	for day := range values {
+		result = append(result, day)
+	}
+	slices.Sort(result)
+	return result, nil
 }
 
 func (s *Service) startSessionIdentityBackfill(ctx context.Context, days []string) error {
@@ -852,16 +829,6 @@ func (s *Service) freezeDay(ctx context.Context, day string) error {
 	if _, err := s.db.ExecContext(ctx, "UPDATE sync_days SET frozen = 1 WHERE day = ?", day); err != nil {
 		return fmt.Errorf("query: freeze day %s: %w", day, err)
 	}
-	return nil
-}
-
-func (s *Service) recordFrozenDifference(ctx context.Context, day string, baseline []byte, current [32]byte) error {
-	difference := hex.EncodeToString(baseline) + " -> " + hex.EncodeToString(current[:])
-	if _, err := s.db.ExecContext(ctx, "UPDATE sync_days SET difference = ? WHERE day = ?", difference, day); err != nil {
-		return fmt.Errorf("query: record frozen day difference %s: %w", day, err)
-	}
-	slog.Warn("frozen usage day differs from its committed baseline", "day", day,
-		"baseline", hex.EncodeToString(baseline), "current", hex.EncodeToString(current[:]))
 	return nil
 }
 

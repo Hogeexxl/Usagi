@@ -42,7 +42,6 @@ func TestRuntimeUpstreamLooksUpCurrentClientAtEachOperation(t *testing.T) {
 		{name: "usage", run: func() error { _, err := upstream.Usage(ctx, "all"); return err }},
 		{name: "usage requests", run: func() error { _, err := upstream.UsageRequests(ctx, magpie.UsageRequestsQuery{}); return err }},
 		{name: "usage day digests", run: func() error { _, err := upstream.UsageDayDigests(ctx, "2026-10-14", "2026-10-14"); return err }},
-		{name: "providers", run: func() error { _, err := upstream.Providers(ctx); return err }},
 		{name: "sessions", run: func() error { _, err := upstream.Sessions(ctx, 0); return err }},
 		{name: "quotas", run: func() error { _, err := upstream.Quotas(ctx, false); return err }},
 		{name: "session overview", run: func() error { _, err := upstream.SessionOverview(ctx, magpie.SessionOverviewQuery{}); return err }},

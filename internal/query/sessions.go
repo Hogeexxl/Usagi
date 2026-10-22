@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Hogeexxl/Usagi/internal/magpie"
-	"github.com/Hogeexxl/Usagi/internal/pricing"
 )
 
 type sessionMetadata struct {
@@ -41,10 +40,6 @@ func (s *Service) SessionDataset(ctx context.Context, q SessionQuery) (SessionDa
 		return SessionDatasetResult{}, err
 	}
 	metadata, err := readSessionMetadata(ctx, tx)
-	if err != nil {
-		return SessionDatasetResult{}, err
-	}
-	catalog, err := pricing.Load(ctx, tx)
 	if err != nil {
 		return SessionDatasetResult{}, err
 	}
@@ -97,14 +92,6 @@ func (s *Service) SessionDataset(ctx context.Context, q SessionQuery) (SessionDa
 		}
 		if !matchesProjects(project, filter.Projects) {
 			continue
-		}
-		request.Cost = 0
-		request.Priced = false
-		if request.Input+request.Output > 0 {
-			if price, ok := catalog.PriceAt(request.Time, request.Provider, request.Model, request.Served); ok {
-				request.Cost = price.Cost(int64(request.Input), int64(request.Output), int64(request.CacheRead), int64(request.CacheWrite), int64(request.CacheWrite1h))
-				request.Priced = true
-			}
 		}
 		row := usageRowOf(request, family, id, project, matched)
 		row.SessionRole = role

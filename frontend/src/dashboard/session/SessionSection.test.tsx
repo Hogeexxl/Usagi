@@ -436,6 +436,15 @@ describe("SessionSection v0.2.0", () => {
     expect(cells[5]).toHaveTextContent("$1.25");
   });
 
+  it("warns on an inclusive cost only when the session has unpriced usage", () => {
+    const rendered = render(<SessionSection view={view({ rows: [row(1, { inclusive_usage: { ...item.inclusive_usage, unpriced: 1 } }), row(2)] })} />);
+    const unpricedCost = tableRow(rendered.container, JSON.stringify(["codex", "session-1", "root-1"])).cells[5].firstElementChild;
+    const pricedCost = tableRow(rendered.container, JSON.stringify(["codex", "session-2", "root-2"])).cells[5].firstElementChild;
+
+    expect(unpricedCost).toHaveClass("text-warning");
+    expect(pricedCost).not.toHaveClass("text-warning");
+  });
+
   it("does not attribute a model to unknown thread rows", () => {
     const unknown = row(3, {
       thread: {

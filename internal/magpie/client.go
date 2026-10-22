@@ -154,14 +154,6 @@ func (c *Client) UsageDayDigests(ctx context.Context, from, to string) ([]UsageD
 	return digests, nil
 }
 
-func (c *Client) Providers(ctx context.Context) (ProviderCatalogsResponse, error) {
-	var providers ProviderCatalogsResponse
-	if err := c.getJSON(ctx, "/api/providers", nil, &providers); err != nil {
-		return ProviderCatalogsResponse{}, err
-	}
-	return providers, nil
-}
-
 func usageDayDigest(raw json.RawMessage) (UsageDayDigest, error) {
 	var point struct {
 		Time  time.Time `json:"time"`

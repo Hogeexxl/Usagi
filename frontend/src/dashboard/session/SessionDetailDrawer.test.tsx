@@ -128,8 +128,52 @@ describe("SessionDetailDrawer Spec04 SessionListItemView", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "未计价使用记录提示" });
+    expect(trigger).toHaveClass("text-warning");
     fireEvent.pointerEnter(trigger, { pointerId: 1, pointerType: "mouse", buttons: 0 });
     expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("marks unpriced Main models and Subagent actors with title warning spans", () => {
+    const unpricedMain = thread({
+      model_effort: [
+        { model: "gpt-6.1-sol", effort: "medium", compaction_tokens: 0, usage: usage(1, 0.1, 1) },
+        { model: "gpt-6.1-sol", effort: "high", compaction_tokens: 0, usage: usage(1, 0.1) },
+      ],
+    });
+    const unpricedChild = child({
+      key: { agent: "codex", session_id: "root-session-full-id", thread_id: "child-unpriced" },
+      nickname: "Tesla",
+      usage: usage(101, 0.11, 1),
+      model_effort: [{ model: "deepseek-v4.1-flash", effort: "max", compaction_tokens: 11, usage: usage(101, 0.11) }],
+    });
+    const pricedChild = child({
+      key: { agent: "codex", session_id: "root-session-full-id", thread_id: "child-priced" },
+      nickname: "Locke",
+      model_effort: [{ model: "deepseek-v4.1-flash", effort: "max", compaction_tokens: 11, usage: usage(101, 0.11) }],
+    });
+    render(
+      <SessionDetailDrawer
+        view={view({ detail: { ...detail, thread: unpricedMain, children: [unpricedChild, pricedChild] }, selected_row: { ...row, thread: unpricedMain } })}
+        timezone={timezone}
+      />,
+    );
+
+    const mainMedium = screen.getByRole("button", { name: "gpt-6.1-sol (medium)" });
+    const mainHigh = screen.getByRole("button", { name: "gpt-6.1-sol (high)" });
+    const childHeader = screen.getByRole("button", { name: "Tesladeepseek-v4.1-flash (max)" });
+    const pricedChildHeader = screen.getByRole("button", { name: "Lockedeepseek-v4.1-flash (max)" });
+    const warning = mainMedium.querySelector(".lucide-circle-alert")?.parentElement;
+    expect(warning).toHaveClass("text-warning");
+    expect(warning?.previousElementSibling).toHaveTextContent("gpt-6.1-sol (medium)");
+    expect(mainHigh.querySelector(".lucide-circle-alert")).toBeNull();
+    expect(childHeader.querySelector(".lucide-circle-alert")?.parentElement?.previousElementSibling).toHaveTextContent("deepseek-v4.1-flash (max)");
+    expect(pricedChildHeader.querySelector(".lucide-circle-alert")).toBeNull();
+    expect(mainMedium.querySelector("button")).toBeNull();
+    expect(childHeader.querySelector("button")).toBeNull();
+
+    fireEvent.click(mainMedium);
+    const mainRegion = screen.getByRole("region", { name: "gpt-6.1-sol (medium)" });
+    expect(within(mainRegion).getByRole("button", { name: "未计价使用记录提示" })).toHaveClass("text-warning");
   });
 
   it("renders the existing receipt shell from the new inclusive DTO", () => {

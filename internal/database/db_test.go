@@ -13,7 +13,7 @@ import (
 
 func TestSchemaCreatesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi #100%.sqlite")
-	wantTables := []string{"app_meta", "price_versions", "prices", "requests", "session_links", "sessions", "sync_days"}
+	wantTables := []string{"app_meta", "requests", "session_links", "sessions", "sync_days"}
 
 	for openNumber := range 2 {
 		db, err := Open(path)
@@ -35,7 +35,7 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 		if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'initial_sync_complete'").Scan(&initialSync); err != nil {
 			t.Fatalf("read initial sync state: %v", err)
 		}
-		if version != "4" || revision != "0" || initialSync != "0" {
+		if version != "5" || revision != "0" || initialSync != "0" {
 			t.Fatalf("app_meta = schema %q, revision %q, initial sync %q", version, revision, initialSync)
 		}
 		for table, columns := range map[string][]string{
@@ -73,16 +73,17 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 			t.Fatalf("schema tables = %v, want %v", tables, wantTables)
 		}
 		if openNumber == 0 {
-			if _, err := db.Exec("INSERT INTO sync_days (day, row_count) VALUES ('2026-01-02', 3)"); err != nil {
+			if _, err := db.Exec("INSERT INTO sync_days (day, fingerprint, row_count) VALUES ('2026-01-02', X'CAFE', 3)"); err != nil {
 				t.Fatalf("write sync day before reopen: %v", err)
 			}
 		} else {
 			var rowCount int
-			if err := db.QueryRow("SELECT row_count FROM sync_days WHERE day = '2026-01-02'").Scan(&rowCount); err != nil {
+			var fingerprint []byte
+			if err := db.QueryRow("SELECT row_count, fingerprint FROM sync_days WHERE day = '2026-01-02'").Scan(&rowCount, &fingerprint); err != nil {
 				t.Fatalf("read sync day after reopen: %v", err)
 			}
-			if rowCount != 3 {
-				t.Fatalf("reopened sync day row_count = %d, want 3", rowCount)
+			if rowCount != 3 || !reflect.DeepEqual(fingerprint, []byte{0xCA, 0xFE}) {
+				t.Fatalf("reopened sync day = %d/%x, want 3/cafe", rowCount, fingerprint)
 			}
 		}
 
@@ -92,7 +93,7 @@ func TestSchemaCreatesAndReopens(t *testing.T) {
 	}
 }
 
-func TestMigrationV1ToV4PreservesData(t *testing.T) {
+func TestMigrationV1ToV5PreservesData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
 	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
@@ -133,7 +134,7 @@ func TestMigrationV1ToV4PreservesData(t *testing.T) {
 	defer db.Close()
 	var version, role, parent, root, sessionRole string
 	var cwd, title, dayDifference string
-	var cost, priceInput float64
+	var cost float64
 	var priced, input, rowCount, frozen, metricsPending int
 	if err := db.QueryRow("SELECT value FROM app_meta WHERE key = 'schema_version'").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -147,9 +148,6 @@ func TestMigrationV1ToV4PreservesData(t *testing.T) {
 	if err := db.QueryRow("SELECT row_count, frozen, difference, request_metrics_backfill_pending FROM sync_days WHERE day = '2026-10-01'").Scan(&rowCount, &frozen, &dayDifference, &metricsPending); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT input FROM prices WHERE version_id = 1 AND model_key = 'gpt-5'").Scan(&priceInput); err != nil {
-		t.Fatal(err)
-	}
 	var links int
 	if err := db.QueryRow("SELECT COUNT(*) FROM session_links").Scan(&links); err != nil {
 		t.Fatal(err)
@@ -159,23 +157,23 @@ func TestMigrationV1ToV4PreservesData(t *testing.T) {
 	if err := db.QueryRow("SELECT compaction, handed_on, first_reasoning_ms, reasoning_hidden FROM requests WHERE local_day = '2026-10-01'").Scan(&compaction, &handedOn, &firstReasoning, &reasoningHidden); err != nil {
 		t.Fatal(err)
 	}
-	if version != "4" || role != "" || parent != "" || root != "" || cwd != "/work" || title != "Title" ||
+	if version != "5" || role != "" || parent != "" || root != "" || cwd != "/work" || title != "Title" ||
 		sessionRole != "" || input != 7 || cost != 0.125 || priced != 1 || rowCount != 1 || frozen != 1 ||
-		dayDifference != "saved" || metricsPending != 1 || priceInput != 2 || links != 1 || compaction.Valid || handedOn != 0 || firstReasoning != 0 || reasoningHidden != 0 {
-		t.Fatalf("migrated data: schema=%q session=%q/%q/%q cwd=%q title=%q request=%q/%d/%.3f/%d sync=%d/%d/%q/%d price=%.1f links=%d new_fields=%d/%d/%d",
-			version, role, parent, root, cwd, title, sessionRole, input, cost, priced, rowCount, frozen, dayDifference, metricsPending, priceInput, links, handedOn, firstReasoning, reasoningHidden)
+		dayDifference != "saved" || metricsPending != 1 || links != 1 || compaction.Valid || handedOn != 0 || firstReasoning != 0 || reasoningHidden != 0 {
+		t.Fatalf("migrated data: schema=%q session=%q/%q/%q cwd=%q title=%q request=%q/%d/%.3f/%d sync=%d/%d/%q/%d links=%d new_fields=%d/%d/%d",
+			version, role, parent, root, cwd, title, sessionRole, input, cost, priced, rowCount, frozen, dayDifference, metricsPending, links, handedOn, firstReasoning, reasoningHidden)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migrated database: %v", err)
 	}
 	if reopened, err := Open(path); err != nil {
-		t.Fatalf("reopen v4 database: %v", err)
+		t.Fatalf("reopen v5 database: %v", err)
 	} else {
 		_ = reopened.Close()
 	}
 }
 
-func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
+func TestMigrationV3ToV5QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi-v3.sqlite")
 	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
@@ -224,7 +222,7 @@ func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 
 	db, err := Open(path)
 	if err != nil {
-		t.Fatalf("migrate v3 fixture to v4: %v", err)
+		t.Fatalf("migrate v3 fixture to v5: %v", err)
 	}
 	defer db.Close()
 	var version, model, difference string
@@ -238,7 +236,7 @@ func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 		&cost, &priced, &pending, &frozen, &difference); err != nil {
 		t.Fatal(err)
 	}
-	if version != "4" || model != "gpt-5" || input != 7 || output != 3 || millis != 900 || ttft != 100 || firstText != 200 || flow != 700 ||
+	if version != "5" || model != "gpt-5" || input != 7 || output != 3 || millis != 900 || ttft != 100 || firstText != 200 || flow != 700 ||
 		cost != 0.125 || priced != 1 || pending != 1 || frozen != 1 || difference != "saved" {
 		t.Fatalf("migrated v3 row/day: schema=%q request=%q/%d/%d timing=%d/%d/%d/%d cost=%.3f/%d day=%d/%d/%q",
 			version, model, input, output, millis, ttft, firstText, flow, cost, priced, pending, frozen, difference)
@@ -252,7 +250,7 @@ func TestMigrationV3ToV4QueuesFrozenRequestMetricsBackfill(t *testing.T) {
 	}
 }
 
-func TestMigrationV2ToV4QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
+func TestMigrationV2ToV5QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usagi.sqlite")
 	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	legacy, err := sql.Open("sqlite", fileURL.String())
@@ -329,7 +327,7 @@ func TestMigrationV2ToV4QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	if err := db.QueryRow("SELECT compaction_backfill_pending FROM sync_days WHERE day = '2026-09-30'").Scan(&insertedPending); err != nil {
 		t.Fatal(err)
 	}
-	if version != "4" || nickname != "" || title != "Preserved title" || model != "gpt-5" || input != 7 || cost != 0.125 || priced != 1 ||
+	if version != "5" || nickname != "" || title != "Preserved title" || model != "gpt-5" || input != 7 || cost != 0.125 || priced != 1 ||
 		compaction.Valid || frozen != 1 || codexPending != 1 || otherPending != 0 || insertedPending != 1 || metricsPending != 1 {
 		t.Fatalf("migrated v2 state: version=%q nickname=%q title=%q request=%q/%d/%.3f/%d compaction=%v frozen=%d compaction_pending=%d other=%d inserted=%d metrics_pending=%d",
 			version, nickname, title, model, input, cost, priced, compaction, frozen, codexPending, otherPending, insertedPending, metricsPending)
@@ -345,6 +343,153 @@ func TestMigrationV2ToV4QueuesCachedCodexDaysIncludingFrozenDays(t *testing.T) {
 	if err := reopened.QueryRow("SELECT compaction_backfill_pending FROM sync_days WHERE day = '2026-10-01'").Scan(&codexPending); err != nil || codexPending != 1 {
 		t.Fatalf("pending frozen day after reopen = %d, %v; want 1", codexPending, err)
 	}
+}
+
+func TestMigrationV4ToV5DropsPricesAndClearsFingerprints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usagi-v4.sqlite")
+	legacy := createSchema4Database(t, path)
+	for _, statement := range []string{
+		`INSERT INTO requests (t_ns, local_day, agent, model, input, output, cache_read, cache_write, cache_write_1h, reasoning, magpie_cost, magpie_priced)
+		 VALUES (100, '2026-10-01', 'codex', 'gpt-5', 7, 3, 2, 5, 11, 13, 0.125, 1)`,
+		`INSERT INTO sync_days (day, fingerprint, row_count, last_sync_ns, frozen)
+		 VALUES ('2026-10-01', X'0102', 1, 100, 1)`,
+		`INSERT INTO sync_days (day, fingerprint, row_count, last_sync_ns, frozen)
+		 VALUES ('2026-10-02', X'AABB', 2, 200, 0)`,
+		`INSERT INTO price_versions (source, fetched_at_ns, effective_at_ns, provider_catalogs_json, maker_catalogs_json)
+		 VALUES ('fixture', 1, 2, '{}', '{}')`,
+		`INSERT INTO prices (version_id, catalog_id, model_key, canonical_model_id, input, output)
+		 VALUES (1, 'openai', 'gpt-5', 'gpt-5', 2, 8)`,
+	} {
+		if _, err := legacy.Exec(statement); err != nil {
+			legacy.Close()
+			t.Fatalf("seed v4 database: %v", err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v4 database: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate v4 database: %v", err)
+	}
+	defer db.Close()
+	var version string
+	var input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning, priced int
+	var cost float64
+	if err := db.QueryRow(`SELECT m.value, r.input, r.output, r.cache_read, r.cache_write, r.cache_write_1h,
+		r.reasoning, r.magpie_cost, r.magpie_priced
+		FROM app_meta m JOIN requests r ON r.local_day = '2026-10-01'
+		WHERE m.key = 'schema_version'`).Scan(&version, &input, &output, &cacheRead, &cacheWrite, &cacheWrite1h,
+		&reasoning, &cost, &priced); err != nil {
+		t.Fatal(err)
+	}
+	if version != "5" || input != 7 || output != 3 || cacheRead != 2 || cacheWrite != 5 || cacheWrite1h != 11 ||
+		reasoning != 13 || cost != 0.125 || priced != 1 {
+		t.Fatalf("migrated request = schema %q tokens %d/%d/%d/%d/%d/%d cost %.3f/%d",
+			version, input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning, cost, priced)
+	}
+	for _, table := range []string{"prices", "price_versions"} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("schema still contains %s", table)
+		}
+	}
+	var days, fingerprinted int
+	if err := db.QueryRow("SELECT COUNT(*), COUNT(fingerprint) FROM sync_days").Scan(&days, &fingerprinted); err != nil {
+		t.Fatal(err)
+	}
+	if days != 2 || fingerprinted != 0 {
+		t.Fatalf("sync days after migration = %d rows, %d with fingerprints; want 2/0", days, fingerprinted)
+	}
+}
+
+func TestMigrationV4ToV5RollsBackOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usagi-v4-failure.sqlite")
+	legacy := createSchema4Database(t, path)
+	for _, statement := range []string{
+		`INSERT INTO sync_days (day, fingerprint, row_count) VALUES ('2026-10-01', X'0102', 1)`,
+		`INSERT INTO price_versions (source, fetched_at_ns, effective_at_ns, provider_catalogs_json, maker_catalogs_json)
+		 VALUES ('fixture', 1, 2, '{}', '{}')`,
+		`INSERT INTO prices (version_id, catalog_id, model_key, input) VALUES (1, 'openai', 'gpt-5', 2)`,
+		`CREATE TRIGGER reject_schema_version_update BEFORE UPDATE OF value ON app_meta
+		 WHEN NEW.key = 'schema_version' BEGIN SELECT RAISE(ABORT, 'fixture migration failure'); END`,
+	} {
+		if _, err := legacy.Exec(statement); err != nil {
+			legacy.Close()
+			t.Fatalf("seed failing v4 database: %v", err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close failing v4 database: %v", err)
+	}
+
+	db, err := Open(path)
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("Open() error = nil, want v4 migration failure")
+	}
+
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
+	checkDB, err := sql.Open("sqlite", fileURL.String())
+	if err != nil {
+		t.Fatalf("open database after failed v4 migration: %v", err)
+	}
+	defer checkDB.Close()
+	var version string
+	var fingerprint []byte
+	if err := checkDB.QueryRow(`SELECT m.value, d.fingerprint FROM app_meta m JOIN sync_days d ON d.day = '2026-10-01'
+		WHERE m.key = 'schema_version'`).Scan(&version, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if version != "4" || !reflect.DeepEqual(fingerprint, []byte{0x01, 0x02}) {
+		t.Fatalf("state after failed migration = schema %q fingerprint %x, want 4/0102", version, fingerprint)
+	}
+	var prices, versions int
+	if err := checkDB.QueryRow("SELECT COUNT(*) FROM prices").Scan(&prices); err != nil {
+		t.Fatalf("read rolled-back prices: %v", err)
+	}
+	if err := checkDB.QueryRow("SELECT COUNT(*) FROM price_versions").Scan(&versions); err != nil {
+		t.Fatalf("read rolled-back price versions: %v", err)
+	}
+	if prices != 1 || versions != 1 {
+		t.Fatalf("rolled-back price rows = %d/%d, want 1/1", prices, versions)
+	}
+}
+
+func createSchema4Database(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	fileURL := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
+	db, err := sql.Open("sqlite", fileURL.String())
+	if err != nil {
+		t.Fatalf("open v4 fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin v4 fixture: %v", err)
+	}
+	if _, err := tx.Exec(schemaSQL); err != nil {
+		tx.Rollback()
+		t.Fatalf("create v1 fixture schema: %v", err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{
+		migrateV1ToV2,
+		migrateV2ToV3,
+		migrateV3ToV4,
+	} {
+		if err := migration(context.Background(), tx); err != nil {
+			tx.Rollback()
+			t.Fatalf("migrate v4 fixture: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit v4 fixture: %v", err)
+	}
+	return db
 }
 
 func hasColumn(t *testing.T, db *sql.DB, table, column string) bool {

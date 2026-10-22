@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { CircleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { SessionDetailResponse, SessionModelEffortDto, SessionThreadDto, UsageDto } from "../../data/types";
@@ -176,9 +176,10 @@ export function SessionDetailDrawer({ view, timezone, agentDisplay }: SessionDet
 
   const mainItems = useMemo(() => (detail?.thread.type === "unknown" ? [] : (detail?.thread.model_effort ?? [])).map((item, index) => {
     const id = `${item.model}:${item.effort}:${index}`;
+    const label = formatModelWithReasoningEffort(item.model, item.effort, false);
     return {
       id,
-      title: formatModelWithReasoningEffort(item.model, item.effort, false),
+      title: <span className="inline-flex max-w-full items-center gap-1"><span className="truncate">{label}</span>{item.usage.unpriced > 0 ? <span aria-hidden className="shrink-0 text-warning"><CircleAlert className="h-3.5 w-3.5" /></span> : null}</span>,
       ...(mountedMainItems.has(id) ? { description: <ModelReceipt item={item} showCompaction={detail?.thread.key.agent === "codex"} /> } : {}),
     };
   }), [detail, mountedMainItems]);
@@ -189,7 +190,7 @@ export function SessionDetailDrawer({ view, timezone, agentDisplay }: SessionDet
     const model = formatSessionModel(item.model_effort.map(({ model, effort }) => ({ model, effort })));
     return {
       id,
-      title: <Tooltip content={nickname} side="top" wrapperClassName="max-w-full"><span className="block min-w-0"><span className="block truncate">{nickname}</span><span className="block truncate text-xs font-normal text-muted-foreground" title={model.title || "—"}>{model.text || "—"}</span></span></Tooltip>,
+      title: <Tooltip content={nickname} side="top" wrapperClassName="max-w-full"><span className="block min-w-0"><span className="block truncate">{nickname}</span><span className="flex min-w-0 items-center gap-1 text-xs font-normal text-muted-foreground"><span className="truncate" title={model.title || "—"}>{model.text || "—"}</span>{item.usage.unpriced > 0 ? <span aria-hidden className="shrink-0 text-warning"><CircleAlert className="h-3.5 w-3.5" /></span> : null}</span></span></Tooltip>,
       ...(mountedChildItems.has(id) ? { description: <ChildReceipt item={item} timezone={timezone} /> } : {}),
     };
   }), [detail, mountedChildItems, timezone]);
